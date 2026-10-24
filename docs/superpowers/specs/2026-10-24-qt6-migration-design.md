@@ -4,7 +4,7 @@
 - **Repository:** `hyperdreamer/goldendict` @ `b4f3fcdc` (branch `master`)
 - **Topic slug:** `qt6-migration`
 - **Target environment:** Arch Linux, KDE Plasma 6 on **Wayland**, Qt **6.12**, GCC 16
-- **Revision:** 3 (addresses reviews 1 and 2: 19 first-round findings, 10 new majors, 1 new minor)
+- **Revision:** 4 (addresses reviews 1–3: 30 prior findings, 5 majors from round 3)
 
 ## 1. Background
 
@@ -169,11 +169,11 @@ tests-makefile.commands = $$QMAKE $$PWD/tests/tests.pro -o $$PWD/$$CHECK_MAKEFIL
 
 tests-build.target = tests-build
 tests-build.depends = tests-makefile
-tests-build.commands = $$MAKE -C $$PWD -f $$CHECK_MAKEFILE
+tests-build.commands = $$(GD_TEST_WRAPPER) $$MAKE -C $$PWD -f $$CHECK_MAKEFILE
 
 tests-run.target = tests-run
 tests-run.depends = tests-build
-tests-run.commands = $$MAKE -C $$PWD -f $$CHECK_MAKEFILE check
+tests-run.commands = $$(GD_TEST_WRAPPER) $$MAKE -C $$PWD -f $$CHECK_MAKEFILE check
 
 check.target = check
 check.depends = tests-run
@@ -184,12 +184,22 @@ QMAKE_EXTRA_TARGETS += check tests-makefile tests-build tests-run
 - `tests/tests.pro` is `TEMPLATE = subdirs`; every testcase project is
   `TEMPLATE = app`, `QT += testlib`, `CONFIG += testcase`, which makes
   `make -f Makefile.tests check` build each test and run it, propagating failures.
-- `GD_TEST_WRAPPER` (environment, default empty) is prefixed to the build and run
-  commands, e.g. `GD_TEST_WRAPPER="xvfb-run -a timeout 900"`.
-- **Gate verification:** `scripts/verify-test-gate.sh` copies the tree, adds an
-  intentionally failing testcase project to the test subdirs, runs the root
-  `make check`, and asserts it exits non-zero; it then runs the unmodified tree and
-  asserts exit zero. The gate is only considered wired when this script passes.
+- `GD_TEST_WRAPPER` is part of the **target commands above** (not prose), so
+  `GD_TEST_WRAPPER="xvfb-run -a timeout 900" make check` runs the suite under a
+  display and a wall-clock bound.
+- **Required suites fail, they do not skip.** `QSKIP` does not fail a test binary
+  (`qtestcase.h:42-59`), so every required suite starts with a `QVERIFY(envAvailable())`
+  guard (WebEngine initialises, D-Bus session reachable, fixture servers bindable).
+  A missing environment therefore produces a **failure**, and only genuinely optional
+  cases use `QSKIP`.
+- **Gate verification:** `scripts/verify-test-gate.sh` performs three mutations on a
+  copy of the tree and asserts the root `make check` outcome each time:
+  1. an intentionally failing testcase → non-zero (failure propagation);
+  2. a required-environment test with the environment forced unavailable → non-zero
+     (skip cannot mask a missing prerequisite);
+  3. a marker file written by `GD_TEST_WRAPPER` → present (the wrapper really ran).
+  The unmodified tree must then pass. The gate counts as wired only when all three
+  mutations behave as stated.
 
 ### 6.2 `Encoding` — character conversion
 
@@ -370,9 +380,21 @@ an access grant (§6.5.7).
    `m_requests[job] = sptr<DataRequest>(req)`.
 3. Device ownership: the handler creates the reply device **owned by the job**
    (`device->setParent(job)`), writes the payload on completion, and calls
-   `job->reply(mimeType, device)`. For known-large media it instead uses a streaming
-   device whose `readyRead` is emitted as chunks are appended and which signals EOF via
-   a zero-length read at completion (`Dictionary::DataRequest::finished`).
+   `job->reply(mimeType, device)` (`qwebengineurlrequestjob.h:48`).
+   For known-large media it instead installs `ArticleStreamDevice`, a `QIODevice` that
+   follows the existing `ArticleResourceReply` contract (`article_netmgr.cc:596-630`):
+   - `readData()` returns the bytes currently available and `0` when nothing is
+     available **and the request is still unfinished** ("wait for more"),
+   - after `Dictionary::DataRequest::finished`, `readData()` returns `0` while bytes
+     remain and **`-1` once drained** — the only unambiguous EOF signal for a
+     sequential reply device,
+   - `readyRead()` is emitted on every appended chunk and once more on completion,
+   - `bytesAvailable()` reports the unread backlog,
+   - cancellation/destruction releases the `DataRequest` and makes further reads
+     return `-1`.
+   `tst_article_stream` pushes three chunks through a fake `DataRequest`, drains the
+   device, asserts `0` before completion, `-1` after the final read, and asserts the
+   job reaches completion exactly once.
 4. Cancellation: `connect(job, &QObject::destroyed, ...)` → `req->cancel()` (the current
    code calls `cancel()` in `ArticleResourceAdapter`'s destructor, `article_netmgr.cc:567`),
    then disconnect and erase the `m_requests` entry. Job destruction also destroys the
@@ -464,17 +486,27 @@ untouched**, and instrumentation is done frame-locally:
 1. **Discovery:** `page()->mainFrame().children()`; a frame whose `name()` starts with
    `gdexpandframe-` is a website frame; the dictionary id is the suffix after
    `gdexpandframe-`.
-2. **Measurement:** `frame.runJavaScript("gdMeasureFrame()")` returns
-   `{height, width, url}`; the main frame then applies it with
-   `document.getElementById(name).height = h; ... .style.display = 'block'`.
-   Measurement repeats on a 250 ms timer while the frame's document is loading, and on
-   `frame.loadFinished`-equivalent polls; it stops after the height is stable for three
-   consecutive samples or 10 s, matching the old one-shot behaviour but tolerating
-   late-loading images.
-3. **Instrumentation:** `frame.runJavaScript` installs the same click/context listeners
-   the old code injected (`gdLastUrlText`). Because the frame is a different origin, it
-   reports through `window.parent.postMessage({gdFrameEvent: …}, '*')`; the main frame
-   forwards these to the bridge with the frame name and generation.
+2. **Instrumentation is installed by script injection, not once per frame.** The frame
+   helper is a `QWebEngineScript` with `InjectionPoint::DocumentCreation`,
+   `ScriptWorldId::MainWorld` and **`setRunsOnSubFrames(true)`**, re-inserted per
+   document with the current generation. Chromium injects it into every frame
+   document — same-origin, cross-origin, and **after every subsequent frame
+   navigation** — which is exactly the reinstrumentation that a one-shot
+   `frame.runJavaScript()` call cannot provide (`QWebEngineFrame` has no
+   `loadFinished` signal). The helper:
+   - installs the click/context listeners the old code injected (`gdLastUrlText`),
+   - posts `{gdFrameEvent: "ready" | "click" | "context", name, text, docId}` to
+     `window.parent` with a per-document `docId`,
+   - installs `gdMeasureFrame()` and reports height changes.
+   The main frame listens for `message` events, forwards them to the bridge together
+   with the frame name and generation, and re-arms height measurement whenever a
+   `ready` event arrives with a new `docId`.
+3. **Measurement:** on every `ready`, and on a 250 ms timer, the main frame asks the
+   frame for `gdMeasureFrame()` shape data and applies it with
+   `document.getElementById(name).height = h; … .style.display = 'block'`; polling stops
+   after the height is stable for three samples or 10 s, and restarts on the next
+   `ready`. Because the frame is a different origin, all reporting goes through
+   `postMessage`, never direct DOM access.
 4. **Coordinates:** as in §6.5.5 — frame rect from the parent, zoom-divided, then
    frame-local hit testing inside the frame.
 5. **Attribution:** the frame name carries the dictionary id, so a click maps to the
@@ -504,7 +536,7 @@ frame's real origin and port.
 | --- | --- |
 | Custom-scheme subresources | `bres`/`gico`/`gdau`/`gdvideo`/`qrcx` are loaded as subresources (`img`, `link`, `script`, media). `CorsEnabled` only permits CORS *to* those schemes; since no application JS issues `fetch`/`XHR` at them (audio is played through links/`AudioPlayerFactory`, not fetched), no CORS headers are required. If a future caller does fetch them, the handler must answer with `Access-Control-Allow-Origin` — noted, not assumed |
 | Website-frame content | Loads from its real origin under Chromium's normal rules; the application does not mediate or rewrite it (K6) |
-| External-content blocking | When `disallowContentFromOtherSites` is enabled, `ArticleRequestInterceptor::interceptRequest` blocks requests whose host is not in the page's allowlist. Allowlist = hosts of the enabled dictionaries' website URLs, plus the current frame's origin host. The rule replaces the old referer/host comparison at `article_netmgr.cc:317`; default remains **allow** (`config.cc:255`) |
+| External-content blocking | When `disallowContentFromOtherSites` is enabled, `ArticleRequestInterceptor::interceptRequest` decides **per request** from `info.firstPartyUrl()` and `info.initiator()` (`qwebengineurlrequestinfo.h:70-72`): a request is allowed only if its host is same-site with the page's first-party host, or its initiator is one of the application's own schemes (`gdlookup`, `bres`, `gico`) **and** the host belongs to the dictionary set used to build *that* page. The per-page dictionary set is provided by `ArticleView` when the profile/page policy snapshot is created — never a global union of all enabled dictionaries. Default remains **allow** (`config.cc:255`). `tst_external_content` enables two dictionaries on unrelated domains and asserts that A's page blocks B's host while A's own resources load |
 | Local files | `file://` URLs are not routed through scheme handlers; path fix-up (the old `article_netmgr.cc:338` logic) is applied by the **interceptor** using `QWebEngineUrlRequestInfo::redirect()` (`qwebengineurlrequestinfo.h:79`) |
 | User agent | `QWebEngineProfile::setHttpUserAgent()` from the existing preference |
 | Response-header filtering (incl. `X-Frame-Options`) | Only possible for content we fetch ourselves (dictionary resources, inline-mode website fetches); third-party subresources and framed sites are subject to their own headers. Documented limitation |
@@ -552,7 +584,7 @@ frame's real origin and port.
 | Save article (`toHtml` at `articleview.cc:1751`, collector at `mainwindow.cc:3599-3695`) | `page()->toHtml(cb)` → existing resource filtering/collection rewritten with `QRegularExpression` → downloads complete → **atomic publication** (write to a temp directory, rename into place); cancellation token cancels every in-flight download and removes the temp directory; navigation or tab close during collection aborts with a message |
 | Find bar (`articleview.cc:2428-2470`) | `findText(sub, flags, callback)`; results carry a monotonically increasing query id, stale results are ignored, `QWebEngineFindTextResult` drives "n of m"/not-found |
 | FTS highlight | JS highlighter with its own match index (`gdHighlightAll`, `gdScrollToHit`) |
-| Print preview (`mainwindow.cc:3568-3600`) | PDF snapshot first: `printToPdf(cb)` → `QPdfDocument` (Qt Pdf). `paintRequested` then paints **synchronously** from the already-loaded document (`render(page, size, &image)` per page). `QPrintPreviewDialog` therefore receives finished pages; no dependence on WebEngine's asynchronous printer |
+| Print preview (`mainwindow.cc:3568-3600`) | PDF snapshot first, using the installed APIs: `printToPdf(cb)` supplies `QByteArray` (`qwebengineview.h:93-96`); the bytes are copied into a `QBuffer` **owned by the print controller** and kept alive for the document's whole lifetime; `QPdfDocument::load(QIODevice*)` (`qpdfdocument.h:77`) is called on it, `status()` is observed until `Ready` (`Error` is reported to the user), `pageCount()` is then valid, and `paintRequested` paints synchronously with `QImage img = doc.render(page, size, options)` (`qpdfdocument.h:96`). Preview is opened only after `Ready`, so WebEngine's asynchronous printer is never on the paint path |
 | Direct print | Same snapshot: render each page into the `QPrinter` inside the print action |
 | Regeneration | Changing page size/orientation re-renders the same snapshot at the new metrics; the snapshot is not re-flowed (WebKit reflowed). Documented as a B1 parity note |
 | PDF export | `printToPdf` (unchanged separate action) |
@@ -605,6 +637,13 @@ Rules:
    clamp the restored offset.
 5. Duplicate URLs are distinguished by `itemIndex`, never by URL.
 6. Forward-history truncation calls `truncateAfter()`.
+7. **Capture timing:** `setCurrent()` records the live article id and scroll offsets
+   **before** every navigation that leaves the current document — before a new lookup,
+   before back and before forward — at the same points the old code saved them
+   (`articleview.cc:886`, `:1691`, `:1698`). Relying on the `commit()` of the *next*
+   load would record the new document's state instead of the outgoing one. `commit()`
+   then only creates/associates the entry; scroll updates during reading are debounced
+   through `setCurrent()` on the current index.
 
 Cached UI state: `getArticlesList`, `getCurrentArticle` and `hasSound`
 (`articleview.cc:726`, `:741`, `:1721`) read `ArticleView`'s cached state, which is
@@ -767,10 +806,12 @@ Chromium IO thread and reads only immutable snapshots.
 | `tst_regex` | Per-pattern pre-change expectations, incl. newline-in-dot, Unicode word/digit, empty pattern, anchored `exactMatch`, minimal matching, wildcard, and the `website.cc` RegExp2 pattern |
 | `tst_article_schemes` | Registration for every scheme, percent-encoded hosts/paths, flags |
 | `tst_article_load` | `gdlookup` document from a fixture dictionary with `bres` resources; `blank=1`; group/dictionaries/contexts; `gdpicture` wrapper document |
+| `tst_article_stream` | `ArticleStreamDevice` contract: `0` before completion, `-1` once drained after completion, `readyRead` per chunk and on completion, `bytesAvailable`, cancellation, single job completion |
+| `tst_external_content` | Block policy per §6.5.7: two enabled dictionaries on unrelated domains — A's page blocks B's host, allows its own and same-site resources, and allows everything when the preference is off |
 | `tst_article_bridge` | Parser-time notification queued before channel ready; post-switch notification; stale-generation rejection; navigation during in-flight script; destruction |
-| `tst_website_frames` | Two local servers on non-default ports (same-origin and cross-origin): relative image/CSS/form/script-relative fetch, height measurement and reveal, click-text forwarding with dictionary id, frame-local word lookup, second frame navigation |
+| `tst_website_frames` | Two local servers on non-default ports (same-origin and cross-origin): relative image/CSS/form/script-relative fetch, height measurement and reveal, click-text forwarding with dictionary id, frame-local word lookup, **and the same instrumentation assertions again after a second frame navigation** |
 | `tst_article_history` | A→B→back, repeated identical URLs, reload (no scroll restore), forward truncation, scroll restore after content growth |
-| `tst_print_pipeline` | Preview page count, page-size regeneration, cancel, tab close |
+| `tst_print_pipeline` | PDF snapshot readiness (`Ready` before preview), page count before preview, page-size regeneration, error status, cancel, tab close |
 | `tst_save_article` | Normal save, cancel mid-download (no leftovers), navigate-during-collection |
 | `tst_portal_hotkeys` | Fake-portal lifecycle per §6.6.2 |
 | `tst_hotkeys` | Binding parser/matcher, `HotkeySyntax` conversion, single-combination restriction |
@@ -780,12 +821,12 @@ Chromium IO thread and reads only immutable snapshots.
 ### 8.2 Gates
 
 1. **Build:** `qmake6 && make -j$(nproc)` → exit 0.
-2. **Tests:** root `make check` (§6.1 recipe) builds and runs every testcase and
-   propagates failure. Per-test limits: 60 s for pure tests, 120 s for WebEngine tests,
-   enforced with `QSignalSpy::wait()`/`QTRY_VERIFY` inside the test and
-   `GD_TEST_WRAPPER="xvfb-run -a timeout 900"` for the suite. A test whose required
-   environment is missing (WebEngine cannot initialise, no D-Bus session) reports
-   **SKIP** via `QSKIP`, never a pass.
+2. **Tests:** root `make check` (§6.1 recipe) builds and runs every testcase through the
+   `GD_TEST_WRAPPER`-prefixed commands and propagates failure. Per-test limits: 60 s for
+   pure tests, 120 s for WebEngine tests, enforced with `QSignalSpy::wait()` and
+   `QTRY_VERIFY` inside the test, plus the suite-level `timeout 900`. A required suite
+   whose environment is missing **fails** via its `QVERIFY(envAvailable())` guard (§6.1);
+   only optional cases may `QSKIP`.
 3. **Gate verification:** `scripts/verify-test-gate.sh` proves an intentionally failing
    testcase makes the root `make check` fail, and that the clean tree passes.
 4. **Qt6-only audit:** `scripts/check-qt6-only.sh` greps the *compiled inputs*
@@ -846,7 +887,7 @@ groups, preferences dialogs, and the four hotkey preference states.
 | Regex conversion changes parser behaviour silently | Consolidate duplicates into `LinkRewrite`, convert rule by rule, pin with `tst_regex`/`tst_linkrewrite`; per-pattern flags (`DotMatchesEverythingOption`, `UseUnicodePropertiesOption`) |
 | iconv mapping differs from previous `QTextCodec` tables | Byte-exact fixtures per charset; unknown names degrade to UTF-8 |
 | Word-under-cursor JS rewrite changes selection semantics | Deterministic JS harness page plus the manual checklist |
-| Frame instrumentation depends on `QWebEngineFrame` script execution across origins | `tst_website_frames` with two real servers before UI work lands; fallback is inline mode |
+| Frame instrumentation depends on `QWebEngineFrame` script execution across origins | `tst_website_frames` with two real servers before UI work lands, incl. reinstrumentation after the second navigation; fallback is inline mode |
 | `X-Frame-Options`-protected sites cannot be framed | Documented parity limit + inline-mode escape hatch |
 | Portal UX differs from the recorder widget | Capability-driven UI; no binding shown active unless the portal reported it |
 | Proxy semantics differ for `HttpCachingProxy` | Documented; verified by a proxy fixture |
