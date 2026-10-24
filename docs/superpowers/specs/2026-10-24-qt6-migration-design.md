@@ -4,7 +4,7 @@
 - **Repository:** `hyperdreamer/goldendict` @ `b4f3fcdc` (branch `master`)
 - **Topic slug:** `qt6-migration`
 - **Target environment:** Arch Linux, KDE Plasma 6 on **Wayland**, Qt **6.12**, GCC 16
-- **Revision:** 4 (addresses reviews 1–3: 30 prior findings, 5 majors from round 3)
+- **Revision:** 5 (addresses reviews 1–4: 33 prior findings resolved across rounds)
 
 ## 1. Background
 
@@ -169,11 +169,11 @@ tests-makefile.commands = $$QMAKE $$PWD/tests/tests.pro -o $$PWD/$$CHECK_MAKEFIL
 
 tests-build.target = tests-build
 tests-build.depends = tests-makefile
-tests-build.commands = $$(GD_TEST_WRAPPER) $$MAKE -C $$PWD -f $$CHECK_MAKEFILE
+tests-build.commands = $(GD_TEST_WRAPPER) $$MAKE -C $$PWD -f $$CHECK_MAKEFILE
 
 tests-run.target = tests-run
 tests-run.depends = tests-build
-tests-run.commands = $$(GD_TEST_WRAPPER) $$MAKE -C $$PWD -f $$CHECK_MAKEFILE check
+tests-run.commands = $(GD_TEST_WRAPPER) $$MAKE -C $$PWD -f $$CHECK_MAKEFILE check
 
 check.target = check
 check.depends = tests-run
@@ -184,20 +184,31 @@ QMAKE_EXTRA_TARGETS += check tests-makefile tests-build tests-run
 - `tests/tests.pro` is `TEMPLATE = subdirs`; every testcase project is
   `TEMPLATE = app`, `QT += testlib`, `CONFIG += testcase`, which makes
   `make -f Makefile.tests check` build each test and run it, propagating failures.
-- `GD_TEST_WRAPPER` is part of the **target commands above** (not prose), so
-  `GD_TEST_WRAPPER="xvfb-run -a timeout 900" make check` runs the suite under a
-  display and a wall-clock bound.
+- `GD_TEST_WRAPPER` uses **make-time** expansion (`$(GD_TEST_WRAPPER)`, not
+  `$$(...)`, which qmake would expand when generating the Makefile). It is therefore
+  supplied at invocation time, not at qmake time:
+  `GD_TEST_WRAPPER=scripts/test-wrapper.sh make check` runs the suite under a display
+  and a wall-clock bound.
+- `scripts/test-wrapper.sh` appends its argv to `$GD_TEST_WRAPPER_LOG` and then execs
+  `xvfb-run -a timeout 900 "$@"`; the log therefore proves which invocations the
+  wrapper actually received.
 - **Required suites fail, they do not skip.** `QSKIP` does not fail a test binary
   (`qtestcase.h:42-59`), so every required suite starts with a `QVERIFY(envAvailable())`
   guard (WebEngine initialises, D-Bus session reachable, fixture servers bindable).
   A missing environment therefore produces a **failure**, and only genuinely optional
   cases use `QSKIP`.
-- **Gate verification:** `scripts/verify-test-gate.sh` performs three mutations on a
-  copy of the tree and asserts the root `make check` outcome each time:
+- **Gate verification:** `scripts/verify-test-gate.sh` generates the root Makefile with
+  `GD_TEST_WRAPPER` **unset**, then performs four probes on a copy of the tree, each
+  asserting the root `make check` outcome:
   1. an intentionally failing testcase → non-zero (failure propagation);
   2. a required-environment test with the environment forced unavailable → non-zero
      (skip cannot mask a missing prerequisite);
-  3. a marker file written by `GD_TEST_WRAPPER` → present (the wrapper really ran).
+  3. `GD_TEST_WRAPPER_LOG` must contain an entry whose command line includes
+     `-f Makefile.tests check` → the **check** execution itself was wrapped, not just
+     the build step;
+  4. removing the wrapper from the `tests-run` recipe only → probe 3 must fail, while
+     the build-generated marker still exists. This proves probe 3 cannot be satisfied by
+     the wrapped build.
   The unmodified tree must then pass. The gate counts as wired only when all three
   mutations behave as stated.
 
@@ -382,19 +393,27 @@ an access grant (§6.5.7).
    (`device->setParent(job)`), writes the payload on completion, and calls
    `job->reply(mimeType, device)` (`qwebengineurlrequestjob.h:48`).
    For known-large media it instead installs `ArticleStreamDevice`, a `QIODevice` that
-   follows the existing `ArticleResourceReply` contract (`article_netmgr.cc:596-630`):
-   - `readData()` returns the bytes currently available and `0` when nothing is
-     available **and the request is still unfinished** ("wait for more"),
-   - after `Dictionary::DataRequest::finished`, `readData()` returns `0` while bytes
-     remain and **`-1` once drained** — the only unambiguous EOF signal for a
-     sequential reply device,
-   - `readyRead()` is emitted on every appended chunk and once more on completion,
-   - `bytesAvailable()` reports the unread backlog,
+   follows the existing `ArticleResourceReply` contract (`article_netmgr.cc:596-630`).
+   The rule is **independent of producer completion**:
+   - `readData(maxSize)`: if the unread backlog is positive, copy and return
+     `min(maxSize, backlog)` — even when the producer has already finished, so a
+     finished-but-undrained reply still delivers its bytes;
+   - return `0` only when the backlog is empty and the request is unfinished
+     ("wait for more"), plus zero when `maxSize == 0`;
+   - return `-1` only when the request is finished and the backlog is drained — the
+     terminal state for a sequential reply device;
+   - `isSequential()` is `true`; `bytesAvailable()` reports the unread backlog and
+     becomes `0` exactly when `atEnd()` becomes `true` (i.e. only after the terminal
+     `-1` condition is reachable);
+   - `readyRead()` is emitted on every appended chunk and once more on completion, so a
+     consumer that already read everything still gets woken for the final `-1`;
    - cancellation/destruction releases the `DataRequest` and makes further reads
      return `-1`.
-   `tst_article_stream` pushes three chunks through a fake `DataRequest`, drains the
-   device, asserts `0` before completion, `-1` after the final read, and asserts the
-   job reaches completion exactly once.
+   `tst_article_stream` drives the ordering that matters: the final chunk is appended
+   **and** `finished` is raised *before* the consumer drains that chunk. It then asserts
+   the full payload comes out, that `0` was returned only while unfinished-and-empty,
+   that exactly one `-1` terminates the stream, and that the job completes exactly
+   once.
 4. Cancellation: `connect(job, &QObject::destroyed, ...)` → `req->cancel()` (the current
    code calls `cancel()` in `ArticleResourceAdapter`'s destructor, `article_netmgr.cc:567`),
    then disconnect and erase the `m_requests` entry. Job destruction also destroys the
@@ -536,7 +555,7 @@ frame's real origin and port.
 | --- | --- |
 | Custom-scheme subresources | `bres`/`gico`/`gdau`/`gdvideo`/`qrcx` are loaded as subresources (`img`, `link`, `script`, media). `CorsEnabled` only permits CORS *to* those schemes; since no application JS issues `fetch`/`XHR` at them (audio is played through links/`AudioPlayerFactory`, not fetched), no CORS headers are required. If a future caller does fetch them, the handler must answer with `Access-Control-Allow-Origin` — noted, not assumed |
 | Website-frame content | Loads from its real origin under Chromium's normal rules; the application does not mediate or rewrite it (K6) |
-| External-content blocking | When `disallowContentFromOtherSites` is enabled, `ArticleRequestInterceptor::interceptRequest` decides **per request** from `info.firstPartyUrl()` and `info.initiator()` (`qwebengineurlrequestinfo.h:70-72`): a request is allowed only if its host is same-site with the page's first-party host, or its initiator is one of the application's own schemes (`gdlookup`, `bres`, `gico`) **and** the host belongs to the dictionary set used to build *that* page. The per-page dictionary set is provided by `ArticleView` when the profile/page policy snapshot is created — never a global union of all enabled dictionaries. Default remains **allow** (`config.cc:255`). `tst_external_content` enables two dictionaries on unrelated domains and asserts that A's page blocks B's host while A's own resources load |
+| External-content blocking | When `disallowContentFromOtherSites` is enabled, `ArticleRequestInterceptor::interceptRequest` decides **per request** with a rule that treats the initiating document as first-class (`info.firstPartyUrl()` and `info.initiator()`, `qwebengineurlrequestinfo.h:70-72`). Let `initiatorHost` be the host of `info.initiator()` when its scheme is `http`/`https`, otherwise the host of `info.firstPartyUrl()`. A request is allowed when **any** holds: (a) its host is same-site with `initiatorHost` — this is the case for a website frame loading its own images/CSS/fetch, whose initiator is the remote frame origin, not the `gdlookup` article; (b) its host is same-site with the first-party host; (c) its initiator uses an application scheme (`gdlookup`, `bres`, `gico`) **and** its host belongs to the dictionary set used to build *that* page. The per-page dictionary set and the policy snapshot are installed with `QWebEnginePage::setUrlRequestInterceptor` (`qwebenginepage.h:320`) so each page carries its own policy even though the profile is shared; a global union of enabled dictionaries is never used. An absent or opaque initiator falls back to (b) only. Default remains **allow** (`config.cc:255`). `tst_external_content` embeds dictionary A (unrelated domain) inside a real `gdlookup` article document with two dictionaries enabled and asserts: A's own image/CSS/`fetch` succeed, A's request to B's domain is blocked, the same page still loads its `bres` resources, and everything loads when the preference is off |
 | Local files | `file://` URLs are not routed through scheme handlers; path fix-up (the old `article_netmgr.cc:338` logic) is applied by the **interceptor** using `QWebEngineUrlRequestInfo::redirect()` (`qwebengineurlrequestinfo.h:79`) |
 | User agent | `QWebEngineProfile::setHttpUserAgent()` from the existing preference |
 | Response-header filtering (incl. `X-Frame-Options`) | Only possible for content we fetch ourselves (dictionary resources, inline-mode website fetches); third-party subresources and framed sites are subject to their own headers. Documented limitation |
