@@ -4,7 +4,7 @@
 - **Repository:** `hyperdreamer/goldendict` @ `b4f3fcdc` (branch `master`)
 - **Topic slug:** `qt6-migration`
 - **Target environment:** Arch Linux, KDE Plasma 6 on **Wayland**, Qt **6.12**, GCC 16
-- **Revision:** 5 (addresses reviews 1–4: 33 prior findings resolved across rounds)
+- **Revision:** 6 (addresses reviews 1–5; all blockers and majors resolved)
 
 ## 1. Background
 
@@ -169,11 +169,11 @@ tests-makefile.commands = $$QMAKE $$PWD/tests/tests.pro -o $$PWD/$$CHECK_MAKEFIL
 
 tests-build.target = tests-build
 tests-build.depends = tests-makefile
-tests-build.commands = $(GD_TEST_WRAPPER) $$MAKE -C $$PWD -f $$CHECK_MAKEFILE
+tests-build.commands = $(GD_TEST_WRAPPER) $(MAKE) -C $$PWD -f $$CHECK_MAKEFILE
 
 tests-run.target = tests-run
 tests-run.depends = tests-build
-tests-run.commands = $(GD_TEST_WRAPPER) $$MAKE -C $$PWD -f $$CHECK_MAKEFILE check
+tests-run.commands = $(GD_TEST_WRAPPER) $(MAKE) -C $$PWD -f $$CHECK_MAKEFILE check
 
 check.target = check
 check.depends = tests-run
