@@ -3,12 +3,10 @@
 
 #include "mutex.hh"
 
-Mutex::Lock::Lock( Mutex & m_ ): m( m_ )
+Mutex::Lock::Lock( Mutex & m_ ): locker( &m_ )
 {
-  m.lock();
 }
 
 Mutex::Lock::~Lock()
 {
-  m.unlock();
 }

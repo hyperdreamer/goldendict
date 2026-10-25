@@ -6,11 +6,38 @@
 
 #include <QFile>
 #include <QDateTime>
+#include <limits>
 #include "splitfile.hh"
 
 /// Support for zip files in GoldenDict. Note that the implementation is
 /// strictly tailored to GoldenDict needs only.
 namespace ZipFile {
+
+/// Modification times have to keep round-tripping as unsigned 32-bit seconds
+/// since the Unix epoch -- the width QDateTime::toTime_t() reported and the
+/// width GoldenDict's timestamp comparisons are written against. Converts
+/// @p time to that representation and returns false -- leaving @p seconds
+/// untouched -- when the time does not fit, so no caller stores a silently
+/// truncated, and therefore wrong, date.
+/// An invalid @p time (an unknown or absent modification time) converts to 0,
+/// which is what the Qt 5 toTime_t() this replaces reported for it.
+inline bool toOnDiskSeconds( QDateTime const & time, quint32 & seconds )
+{
+  if( !time.isValid() )
+  {
+    // An unknown modification time was recorded as the epoch, not rejected.
+    seconds = 0;
+    return true;
+  }
+
+  qint64 const epochSeconds = time.toSecsSinceEpoch();
+
+  if( epochSeconds < 0 || epochSeconds > qint64( std::numeric_limits< quint32 >::max() ) )
+    return false;
+
+  seconds = static_cast< quint32 >( epochSeconds );
+  return true;
+}
 
 // Support for split zip files
 class SplitZipFile : public SplitFile::SplitFile
