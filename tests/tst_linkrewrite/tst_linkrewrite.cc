@@ -804,21 +804,12 @@ void TstLinkRewrite::websiteNonAsciiWhitespaceIsUrlData_data()
         << QStringLiteral( "<img src='  image.png\t'>" ) << QStringLiteral( "src" )
         << QStringLiteral( "<img src='  https://example.test/dir/image.png\t'>" )
         << QStringLiteral( "  https://example.test/dir/image.png\t" );
-    // A base href's NBSP is URL data: the base used for other URLs must match
-    // the value the browser would see.
+    // Base href NBSPs are URL data, including before an absolute-looking URL;
+    // the selected base must match what the browser resolves for entity and
+    // literal NBSP spellings alike.
     QTest::newRow( "base-href-nbsp-is-data" )
-        << QStringLiteral( "<base href='&#160;other/'><img src='image.png'>" ) << QStringLiteral( "src" )
-        << QStringLiteral( "<base href='https://example.test/dir/%C2%A0other/'><img src='https://example.test/dir/%C2%A0other/image.png'>" )
-        << QStringLiteral( "https://example.test/dir/%C2%A0other/image.png" );
-    // A leading NBSP before an absolute-looking URL remains URL data, so the
-    // browser resolves the resulting relative path against the document URL.
-    QTest::newRow( "base-href-nbsp-absolute-entity" )
-        << QStringLiteral( "<base href='&nbsp;https://cdn.example.test/assets/'><img src='image.png'>" ) << QStringLiteral( "src" )
-        << QStringLiteral( "<base href='https://example.test/dir/%C2%A0https://cdn.example.test/assets/'><img src='https://example.test/dir/%C2%A0https://cdn.example.test/assets/image.png'>" )
-        << QStringLiteral( "https://example.test/dir/%C2%A0https://cdn.example.test/assets/image.png" );
-    QTest::newRow( "base-href-nbsp-absolute-literal" )
-        << QStringLiteral( "<base href='\u00a0https://cdn.example.test/assets/'><img src='image.png'>" ) << QStringLiteral( "src" )
-        << QStringLiteral( "<base href='https://example.test/dir/%C2%A0https://cdn.example.test/assets/'><img src='https://example.test/dir/%C2%A0https://cdn.example.test/assets/image.png'>" )
+        << QStringLiteral( "<base href='&nbsp;https://cdn.example.test/assets/'><base href='\u00a0https://cdn.example.test/assets/'><base href='&#160;other/'><img src='image.png'>" ) << QStringLiteral( "src" )
+        << QStringLiteral( "<base href='https://example.test/dir/%C2%A0https://cdn.example.test/assets/'><base href='https://example.test/dir/%C2%A0https://cdn.example.test/assets/'><base href='https://example.test/dir/%C2%A0other/'><img src='https://example.test/dir/%C2%A0https://cdn.example.test/assets/image.png'>" )
         << QStringLiteral( "https://example.test/dir/%C2%A0https://cdn.example.test/assets/image.png" );
 }
 
