@@ -44,6 +44,23 @@ inline QString applyEdits( QString text, QVector< UrlEdit > edits )
   return text;
 }
 
+// HTML attribute, srcset and CSS grammars classify only ASCII whitespace.
+// U+00A0 (NBSP) and other Unicode spaces are URL data, not padding or separators,
+// so QString::trimmed()/QChar::isSpace() must not be used at these boundaries.
+inline bool isAsciiSpace( QChar c )
+{
+  return c == QLatin1Char( ' ' ) || c == QLatin1Char( '\t' ) || c == QLatin1Char( '\n' )
+      || c == QLatin1Char( '\f' ) || c == QLatin1Char( '\r' );
+}
+
+inline QString asciiTrimmed( QString const & text )
+{
+  qsizetype begin = 0, end = text.size();
+  while ( begin < end && isAsciiSpace( text[ begin ] ) ) ++begin;
+  while ( end > begin && isAsciiSpace( text[ end - 1 ] ) ) --end;
+  return text.mid( begin, end - begin );
+}
+
 inline QVector< Tag > htmlTags( QString const & html, QVector< TextSpan > * cssSpans = nullptr )
 {
   QVector< Tag > tags;
@@ -60,7 +77,7 @@ inline QVector< Tag > htmlTags( QString const & html, QVector< TextSpan > * cssS
       continue;
     }
     const auto start = p++;
-    while ( p < html.size() && html[p].isSpace() ) ++p;
+    while ( p < html.size() && isAsciiSpace( html[p] ) ) ++p;
     if ( p >= html.size() ) break;
     // Closing tags and declarations have no editable URL-valued spans.
     if ( html[p] == '/' || html[p] == '!' || html[p] == '?' )
@@ -76,26 +93,26 @@ inline QVector< Tag > htmlTags( QString const & html, QVector< TextSpan > * cssS
     bool closed = false;
     while ( p < html.size() )
     {
-      while ( p < html.size() && html[p].isSpace() ) ++p;
+      while ( p < html.size() && isAsciiSpace( html[p] ) ) ++p;
       if ( p == html.size() ) break;
       if ( html[p] == '>' ) { tag.end = ++p; closed = true; break; }
       if ( html[p] == '/' ) { ++p; continue; }
       const auto attrStart = p;
-      while ( p < html.size() && !html[p].isSpace() && html[p] != '=' && html[p] != '>' ) ++p;
+      while ( p < html.size() && !isAsciiSpace( html[p] ) && html[p] != '=' && html[p] != '>' ) ++p;
       const auto nameEnd = p;
       const QString name = html.mid( attrStart, p - attrStart ).toLower();
-      while ( p < html.size() && html[p].isSpace() ) ++p;
+      while ( p < html.size() && isAsciiSpace( html[p] ) ) ++p;
       if ( p >= html.size() || html[p] != '=' )
       {
         tag.attributes.append( { name, nameEnd, 0, false } );
         continue;
       }
       ++p;
-      while ( p < html.size() && html[p].isSpace() ) ++p;
+      while ( p < html.size() && isAsciiSpace( html[p] ) ) ++p;
       if ( p == html.size() ) break;
       const QChar quote = html[p] == '\'' || html[p] == '"' ? html[p++] : QChar();
       const auto valueStart = p;
-      while ( p < html.size() && ( !quote.isNull() ? html[p] != quote : !html[p].isSpace() && html[p] != '>' ) ) ++p;
+      while ( p < html.size() && ( !quote.isNull() ? html[p] != quote : !isAsciiSpace( html[p] ) && html[p] != '>' ) ) ++p;
       tag.attributes.append( { name, valueStart, p - valueStart } );
       if ( !quote.isNull() && p < html.size() ) ++p;
     }
@@ -107,7 +124,7 @@ inline QVector< Tag > htmlTags( QString const & html, QVector< TextSpan > * cssS
       const QString closing = QStringLiteral( "</" ) + tag.name;
       auto end = html.indexOf( closing, p, Qt::CaseInsensitive );
       while ( end >= 0 && end + closing.size() < html.size()
-              && !html[end + closing.size()].isSpace()
+              && !isAsciiSpace( html[end + closing.size()] )
               && html[end + closing.size()] != '>' && html[end + closing.size()] != '/' )
         end = html.indexOf( closing, end + closing.size(), Qt::CaseInsensitive );
       const auto bodyEnd = end < 0 ? html.size() : end;
@@ -2509,11 +2526,11 @@ inline QString serializeTarget( QString value, UrlContext context )
 inline QString resolvedTarget( QString const & raw, QUrl const & base,
                                UrlContext context = UrlContext::Css )
 {
-  const QString rawTarget = raw.trimmed();
+  const QString rawTarget = asciiTrimmed( raw );
   if ( rawTarget.isEmpty() ) return raw;
 
   const QString target = context == UrlContext::HtmlAttribute
-    ? decodeHtmlAttributeValue( rawTarget ).trimmed()
+    ? asciiTrimmed( decodeHtmlAttributeValue( rawTarget ) )
     : rawTarget;
   if ( target.isEmpty() || target.startsWith( '#' ) ) return raw;
 
@@ -2545,7 +2562,7 @@ inline QVector< UrlEdit > cssUrlEdits( QString const & css, QUrl const & base )
     const QString raw = css.mid( start, end - start );
     // Leave CSS-escaped URLs alone instead of misinterpreting escape syntax.
     if ( raw.contains( '\\' ) ) return;
-    const QString target = raw.trimmed();
+    const QString target = asciiTrimmed( raw );
     if ( target.isEmpty() ) return;
     const QString value = resolvedTarget( target, base, unquoted ? UrlContext::CssUnquoted : UrlContext::Css );
     if ( value != target ) edits.append( { start + raw.indexOf( target ), target.size(), value } );
@@ -2560,10 +2577,10 @@ inline QVector< UrlEdit > cssUrlEdits( QString const & css, QUrl const & base )
     }
     if ( css[p] == '\'' || css[p] == '"' ) { p = quotedEnd( p + 1, css[p] ) + 1; continue; }
     if ( startsAt( css, p, QStringLiteral( "@import" ) )
-         && ( p + 7 == css.size() || css[p + 7].isSpace() ) )
+         && ( p + 7 == css.size() || isAsciiSpace( css[p + 7] ) ) )
     {
       p += 7;
-      while ( p < css.size() && css[p].isSpace() ) ++p;
+      while ( p < css.size() && isAsciiSpace( css[p] ) ) ++p;
       if ( p < css.size() && ( css[p] == '\'' || css[p] == '"' ) )
       {
         const auto end = quotedEnd( p + 1, css[p] );
@@ -2575,11 +2592,11 @@ inline QVector< UrlEdit > cssUrlEdits( QString const & css, QUrl const & base )
          && ( p == 0 || ( !css[p - 1].isLetterOrNumber() && css[p - 1] != '-' && css[p - 1] != '_' ) ) )
     {
       auto value = p + 3;
-      while ( value < css.size() && css[value].isSpace() ) ++value;
+      while ( value < css.size() && isAsciiSpace( css[value] ) ) ++value;
       if ( value < css.size() && css[value] == '(' )
       {
         ++value;
-        while ( value < css.size() && css[value].isSpace() ) ++value;
+        while ( value < css.size() && isAsciiSpace( css[value] ) ) ++value;
         if ( value < css.size() && ( css[value] == '\'' || css[value] == '"' ) )
         {
           const auto end = quotedEnd( value + 1, css[value] );
@@ -2606,10 +2623,10 @@ inline QVector< UrlEdit > srcsetUrlEdits( QString const & text, QUrl const & bas
   qsizetype p = 0;
   while ( p < text.size() )
   {
-    while ( p < text.size() && ( text[p].isSpace() || text[p] == ',' ) ) ++p;
+    while ( p < text.size() && ( isAsciiSpace( text[p] ) || text[p] == ',' ) ) ++p;
     const auto start = p;
     const bool data = startsAt( text, p, QStringLiteral( "data:" ) );
-    while ( p < text.size() && !text[p].isSpace() && ( data || text[p] != ',' ) ) ++p;
+    while ( p < text.size() && !isAsciiSpace( text[p] ) && ( data || text[p] != ',' ) ) ++p;
     auto targetEnd = p;
     // A data URL may contain commas, but trailing commas delimit candidates
     // without descriptors rather than becoming part of the next candidate.

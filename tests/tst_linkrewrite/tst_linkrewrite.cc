@@ -313,6 +313,8 @@ class TstLinkRewrite : public QObject
     void websiteReferenceDecodingPrecedesTokenization();
     void websiteNestedGrammarDecodesEntities_data();
     void websiteNestedGrammarDecodesEntities();
+    void websiteNonAsciiWhitespaceIsUrlData_data();
+    void websiteNonAsciiWhitespaceIsUrlData();
 
     void gdLookupPreservesStructureAndIsIdempotent();
     void gdLookupNormalizesOnlyThePathHeadword();
@@ -760,6 +762,51 @@ void TstLinkRewrite::websiteNestedGrammarDecodesEntities_data()
 }
 
 void TstLinkRewrite::websiteNestedGrammarDecodesEntities()
+{
+    QFETCH( QString, input );
+    QFETCH( QString, attribute );
+    QFETCH( QString, expectedSource );
+    QFETCH( QString, expectedValue );
+    const QUrl document( QStringLiteral( "https://example.test/dir/page" ) );
+    const QString output = WebSite::resolveInlineUrls( input, document );
+    QCOMPARE( output, expectedSource );
+    const auto parsed = firstHtmlAttributeValue( output, attribute );
+    QVERIFY( parsed );
+    QCOMPARE( *parsed, expectedValue );
+    QCOMPARE( WebSite::resolveInlineUrls( output, document ), output );
+}
+
+
+void TstLinkRewrite::websiteNonAsciiWhitespaceIsUrlData_data()
+{
+    QTest::addColumn< QString >( "input" );
+    QTest::addColumn< QString >( "attribute" );
+    QTest::addColumn< QString >( "expectedSource" );
+    QTest::addColumn< QString >( "expectedValue" );
+
+    // An NBSP inside a filename is data: it must survive resolution.
+    QTest::newRow( "nbsp-inside-filename" )
+        << QStringLiteral( "<img src='im&#160;age.png'>" ) << QStringLiteral( "src" )
+        << QStringLiteral( "<img src='https://example.test/dir/im%C2%A0age.png'>" )
+        << QStringLiteral( "https://example.test/dir/im%C2%A0age.png" );
+    // HTML/CSS padding is ASCII only: a leading NBSP is part of the target.
+    QTest::newRow( "nbsp-leading-is-data" )
+        << QStringLiteral( "<img src='&#160;image.png'>" ) << QStringLiteral( "src" )
+        << QStringLiteral( "<img src='https://example.test/dir/%C2%A0image.png'>" )
+        << QStringLiteral( "https://example.test/dir/%C2%A0image.png" );
+    // srcset separators are ASCII whitespace: NBSP does not split a candidate.
+    QTest::newRow( "srcset-nbsp-is-not-a-separator" )
+        << QStringLiteral( "<img srcset='one.png&#160;1x, two.png 2x'>" ) << QStringLiteral( "srcset" )
+        << QStringLiteral( "<img srcset='https://example.test/dir/one.png%C2%A01x, https://example.test/dir/two.png 2x'>" )
+        << QStringLiteral( "https://example.test/dir/one.png%C2%A01x, https://example.test/dir/two.png 2x" );
+    // Ordinary ASCII padding still trims exactly as before.
+    QTest::newRow( "ascii-padding-still-trims" )
+        << QStringLiteral( "<img src='  image.png\t'>" ) << QStringLiteral( "src" )
+        << QStringLiteral( "<img src='  https://example.test/dir/image.png\t'>" )
+        << QStringLiteral( "  https://example.test/dir/image.png\t" );
+}
+
+void TstLinkRewrite::websiteNonAsciiWhitespaceIsUrlData()
 {
     QFETCH( QString, input );
     QFETCH( QString, attribute );
