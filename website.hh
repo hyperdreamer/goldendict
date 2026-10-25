@@ -2523,9 +2523,29 @@ inline QString serializeTarget( QString value, UrlContext context )
   return value;
 }
 
+// A URL is an ASCII grammar. A decoded attribute may carry raw non-ASCII text
+// (a filename with U+00A0, an exotic space before an otherwise absolute URL);
+// browsers percent-encode those bytes as UTF-8 before parsing. Qt classifies the
+// unencoded form as invalid and *still* resolves it, so the raw form must never
+// decide validity. Normalising first makes one rule cover every non-ASCII class
+// instead of special-casing U+00A0.
+inline QString urlAsciiForm( QString const & text )
+{
+  QString out;
+  out.reserve( text.size() + 8 );
+  for ( QChar const c : text )
+  {
+    if ( c.unicode() < 0x80 ) { out.append( c ); continue; }
+    QByteArray const bytes = QString( c ).toUtf8();
+    for ( char b : bytes )
+      out.append( QLatin1Char( '%' ) )
+         .append( QString::number( static_cast< unsigned char >( b ), 16 ).toUpper().rightJustified( 2, QLatin1Char( '0' ) ) );
+  }
+  return out;
+}
+
 inline QString resolvedTarget( QString const & raw, QUrl const & base,
-                               UrlContext context = UrlContext::Css,
-                               bool allowInvalidRelative = false )
+                               UrlContext context = UrlContext::Css )
 {
   const QString rawTarget = asciiTrimmed( raw );
   if ( rawTarget.isEmpty() ) return raw;
@@ -2535,12 +2555,11 @@ inline QString resolvedTarget( QString const & raw, QUrl const & base,
     : rawTarget;
   if ( target.isEmpty() || target.startsWith( '#' ) ) return raw;
 
-  const QUrl relative( target );
-  // Qt reports a leading NBSP before a colon as invalid but relative. The base
-  // URL path still needs to be resolved when this opt-in is requested.
-  const bool allowInvalidNbspRelative = allowInvalidRelative && target.startsWith( QChar( 0x00a0 ) );
-  if ( ( !relative.isValid() && ( !allowInvalidNbspRelative || !relative.isRelative() ) )
-       || !relative.scheme().isEmpty() ) return raw;
+  // A leading colon means an empty scheme: "://invalid" is not a URL.
+  if ( target.startsWith( QLatin1Char( ':' ) ) ) return raw;
+
+  const QUrl relative( urlAsciiForm( target ) );
+  if ( !relative.scheme().isEmpty() || !relative.isRelative() ) return raw;
   const QUrl absolute = base.resolved( relative );
   if ( !absolute.isValid() || absolute.isRelative() ) return raw;
 
@@ -2715,11 +2734,10 @@ inline QString resolveInlineUrls( QString const & html, QUrl const & documentUrl
       if ( attr.name != QStringLiteral( "href" ) ) continue;
       const QString raw = detail::asciiTrimmed( html.mid( attr.start, attr.length ) );
       const QString decoded = detail::asciiTrimmed( detail::decodeHtmlAttributeValue( raw ) );
-      const QUrl candidate( decoded );
+      if ( decoded.startsWith( QLatin1Char( ':' ) ) ) continue;
+      const QUrl candidate( detail::urlAsciiForm( decoded ) );
       const QUrl resolved = documentUrl.resolved( candidate );
-      const bool candidateIsInvalidNbspRelative = !candidate.isValid() && candidate.isRelative()
-        && decoded.startsWith( QChar( 0x00a0 ) );
-      if ( ( candidate.isValid() || candidateIsInvalidNbspRelative ) && resolved.isValid() && !resolved.isRelative()
+      if ( resolved.isValid() && !resolved.isRelative()
            && ( resolved.scheme() == QStringLiteral( "http" ) || resolved.scheme() == QStringLiteral( "https" ) ) )
       { base = resolved; foundBase = true; break; }
     }
@@ -2749,8 +2767,7 @@ inline QString resolveInlineUrls( QString const & html, QUrl const & documentUrl
         else
           value = detail::resolvedTarget( raw,
                                           tag.name == QStringLiteral( "base" ) ? documentUrl : base,
-                                          detail::UrlContext::HtmlAttribute,
-                                          tag.name == QStringLiteral( "base" ) );
+                                          detail::UrlContext::HtmlAttribute );
       }
       if ( raw != value ) edits.append( { attr.start, attr.length, value } );
     }

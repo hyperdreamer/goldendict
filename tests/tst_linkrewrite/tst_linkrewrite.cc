@@ -811,6 +811,36 @@ void TstLinkRewrite::websiteNonAsciiWhitespaceIsUrlData_data()
         << QStringLiteral( "<base href='&nbsp;https://cdn.example.test/assets/'><base href='\u00a0https://cdn.example.test/assets/'><base href='&#160;other/'><img src='image.png'>" ) << QStringLiteral( "src" )
         << QStringLiteral( "<base href='https://example.test/dir/%C2%A0https://cdn.example.test/assets/'><base href='https://example.test/dir/%C2%A0https://cdn.example.test/assets/'><base href='https://example.test/dir/%C2%A0other/'><img src='https://example.test/dir/%C2%A0https://cdn.example.test/assets/image.png'>" )
         << QStringLiteral( "https://example.test/dir/%C2%A0https://cdn.example.test/assets/image.png" );
+    // The normalisation is by character class, not by U+00A0: every non-ASCII
+    // leading space is URL data, in every relative-URL context.
+    QTest::newRow( "nbsp-src-resolves-document-relative" )
+        << QStringLiteral( "<img src='&#160;https://cdn.example.test/image.png'>" ) << QStringLiteral( "src" )
+        << QStringLiteral( "<img src='https://example.test/dir/%C2%A0https://cdn.example.test/image.png'>" )
+        << QStringLiteral( "https://example.test/dir/%C2%A0https://cdn.example.test/image.png" );
+    QTest::newRow( "nbsp-srcset-resolves-document-relative" )
+        << QStringLiteral( "<img srcset='&#160;https://cdn.example.test/image.png 1x'>" ) << QStringLiteral( "srcset" )
+        << QStringLiteral( "<img srcset='https://example.test/dir/%C2%A0https://cdn.example.test/image.png 1x'>" )
+        << QStringLiteral( "https://example.test/dir/%C2%A0https://cdn.example.test/image.png 1x" );
+    QTest::newRow( "nbsp-css-url-resolves-document-relative" )
+        << QStringLiteral( "<div style='background:url(&#160;https://cdn.example.test/i.png)'></div>" ) << QStringLiteral( "style" )
+        << QStringLiteral( "<div style='background:url(https://example.test/dir/%C2%A0https://cdn.example.test/i.png)'></div>" )
+        << QStringLiteral( "background:url(https://example.test/dir/%C2%A0https://cdn.example.test/i.png)" );
+    QTest::newRow( "figure-space-base-is-data" )
+        << QStringLiteral( "<base href='&#8199;https://cdn.example.test/assets/'><img src='image.png'>" ) << QStringLiteral( "src" )
+        << QStringLiteral( "<base href='https://example.test/dir/%E2%80%87https://cdn.example.test/assets/'><img src='https://example.test/dir/%E2%80%87https://cdn.example.test/assets/image.png'>" )
+        << QStringLiteral( "https://example.test/dir/%E2%80%87https://cdn.example.test/assets/image.png" );
+    QTest::newRow( "narrow-space-base-is-data" )
+        << QStringLiteral( "<base href='&#8239;https://cdn.example.test/assets/'><img src='image.png'>" ) << QStringLiteral( "src" )
+        << QStringLiteral( "<base href='https://example.test/dir/%E2%80%AFhttps://cdn.example.test/assets/'><img src='https://example.test/dir/%E2%80%AFhttps://cdn.example.test/assets/image.png'>" )
+        << QStringLiteral( "https://example.test/dir/%E2%80%AFhttps://cdn.example.test/assets/image.png" );
+    QTest::newRow( "em-space-base-is-data" )
+        << QStringLiteral( "<base href='&#8195;https://cdn.example.test/assets/'><img src='image.png'>" ) << QStringLiteral( "src" )
+        << QStringLiteral( "<base href='https://example.test/dir/%E2%80%83https://cdn.example.test/assets/'><img src='https://example.test/dir/%E2%80%83https://cdn.example.test/assets/image.png'>" )
+        << QStringLiteral( "https://example.test/dir/%E2%80%83https://cdn.example.test/assets/image.png" );
+    QTest::newRow( "empty-scheme-is-not-a-url" )
+        << QStringLiteral( "<base href='://invalid'><img src='image.png'>" ) << QStringLiteral( "src" )
+        << QStringLiteral( "<base href='://invalid'><img src='https://example.test/dir/image.png'>" )
+        << QStringLiteral( "https://example.test/dir/image.png" );
 }
 
 
