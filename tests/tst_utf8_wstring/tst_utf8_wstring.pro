@@ -27,6 +27,6 @@ SOURCES += $$GD_REPO_ROOT/utf8.cc \
 
 # The extra TIFF handler links the system libtiff, exactly as goldendict.pro does
 # when MAKE_EXTRA_TIFF_HANDLER is enabled.
-LIBS += -ltiff
+!CONFIG( no_extra_tiff_handler ): LIBS += -ltiff
 
 SOURCES += tst_utf8_wstring.cc
