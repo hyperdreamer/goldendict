@@ -117,7 +117,8 @@ QString const fixedContextsBase64 =
 
 /// Builds the bres counterpart of a picture document the way the handler maps
 /// it: the dictionary id is the host and the decoded resource name (including a
-/// query suffix) is the path, exactly one percent-encoding pass later.
+/// query suffix) is the path, exactly one percent-encoding pass later. A bare
+/// `?` in the name is a present but empty query suffix and survives.
 QUrl bresUrl( QString const & dictionaryId, QString const & resourceName )
 {
     QUrl url;
@@ -125,16 +126,17 @@ QUrl bresUrl( QString const & dictionaryId, QString const & resourceName )
     url.setHost( dictionaryId );
 
     QString path = resourceName;
-    QString query;
     int const queryStart = path.indexOf( QLatin1Char( '?' ) );
-    if( queryStart >= 0 )
+    bool const hasQuery = queryStart >= 0;
+    QString query;
+    if( hasQuery )
     {
         query = path.mid( queryStart + 1 );
-        path = path.left( queryStart );
+        path.truncate( queryStart );
     }
 
     url.setPath( QLatin1Char( '/' ) + path, QUrl::DecodedMode );
-    if( !query.isEmpty() )
+    if( hasQuery )
         url.setQuery( query, QUrl::DecodedMode );
     return url;
 }
@@ -215,12 +217,15 @@ private slots:
     void lookupDocumentRoundTrip();
     void lookupDocumentOmitsActionOnlyDict();
     void producedDocumentUrlTextEncoding();
+    void lookupDocumentEncodesDecodedValuesOnce();
     void pictureDocumentComponents();
+    void pictureDocumentPreservesResourceIdentity();
 
     void contextsWireFormatIsPinned();
     void contextsMalformedPayloadsRejected_data();
     void contextsMalformedPayloadsRejected();
     void contextsClearOutputOnFailure();
+    void contextsRejectsNonCanonicalBase64();
 
     void highlightSpecCompilesWildcards();
     void highlightSpecRejectsInvalidUserPattern();
@@ -347,6 +352,44 @@ void TstArticleSchemes::blankDocumentForm()
     const Parsed asAction = ArticleUrls::parse( QUrl( "gdlookup://localhost?blank=1" ), Use::UserAction );
     QCOMPARE( asAction.kind, Kind::Invalid );
     QVERIFY2( asAction.error.contains( QStringLiteral( "blank" ) ), qPrintable( asAction.error ) );
+
+    // The blank exemption runs before group validation: the dispatch branch
+    // never reads the group (spec §4.4, and the baseline returns makeEmptyPage
+    // before inspecting it), so an empty, malformed or overflowing group must
+    // not turn an empty-page URL into an error.
+    for( QString const & group : { QString(), QStringLiteral( "abc" ), QStringLiteral( "4294967296" ) } )
+    {
+        const QUrl url( QStringLiteral( "gdlookup://localhost?blank=1&group=" ) + group );
+        const Parsed parsed = ArticleUrls::parse( url, Use::DocumentLoad );
+        QVERIFY2( parsed.kind == Kind::LookupDocument,
+                  qPrintable( QStringLiteral( "blank with group=%1: %2" ).arg( group, parsed.error ) ) );
+        QVERIFY2( parsed.lookup.blank, qPrintable( group ) );
+        QVERIFY2( parsed.error.isEmpty(), qPrintable( parsed.error ) );
+    }
+
+    // Ordinary lookups still reject the same group values, so the exemption is
+    // scoped to the blank form and not a general relaxation.
+    for( QString const & group : { QString(), QStringLiteral( "abc" ), QStringLiteral( "4294967296" ) } )
+    {
+        const QUrl url( QStringLiteral( "gdlookup://localhost/?word=cat&group=" ) + group );
+        const Parsed parsed = ArticleUrls::parse( url, Use::DocumentLoad );
+        QVERIFY2( parsed.kind == Kind::Invalid,
+                  qPrintable( QStringLiteral( "ordinary lookup accepted group=%1" ).arg( group ) ) );
+        QVERIFY2( parsed.error.contains( QStringLiteral( "invalid group" ) ), qPrintable( parsed.error ) );
+    }
+
+    // The exemption is an ordering change only: duplicate scalar keys and the
+    // contexts payload stay validated on the blank form.
+    const Parsed duplicateGroup = ArticleUrls::parse(
+      QUrl( "gdlookup://localhost?blank=1&group=1&group=1" ), Use::DocumentLoad );
+    QCOMPARE( duplicateGroup.kind, Kind::Invalid );
+    QVERIFY2( duplicateGroup.error.contains( QStringLiteral( "duplicate query parameter" ) ),
+              qPrintable( duplicateGroup.error ) );
+
+    const Parsed badContexts = ArticleUrls::parse(
+      QUrl( "gdlookup://localhost?blank=1&contexts=%21%21%21" ), Use::DocumentLoad );
+    QCOMPARE( badContexts.kind, Kind::Invalid );
+    QVERIFY2( badContexts.error.contains( QStringLiteral( "contexts" ) ), qPrintable( badContexts.error ) );
 }
 
 void TstArticleSchemes::explicitDictionariesAndScalarFields()
@@ -800,13 +843,89 @@ void TstArticleSchemes::producedDocumentUrlTextEncoding()
 
     QVERIFY2( !encoded.contains( ' ' ), encoded.constData() );
     // A literal plus stays a literal plus, it is never form-encoded into a
-    // space, and the reserved delimiters are percent-encoded.
-    QVERIFY2( encoded.contains( "a+b%20c%25d%26e%3Df" ), encoded.constData() );
+    // space, and the reserved delimiters are percent-encoded exactly once.
+    QVERIFY2( encoded.contains( "a%2Bb%20c%25d%26e%3Df" ), encoded.constData() );
     QVERIFY2( encoded.contains( "%E4%B8%AD" ), encoded.constData() );
 
     const Parsed back = ArticleUrls::parse( produced, Use::DocumentLoad );
     QCOMPARE( back.kind, Kind::LookupDocument );
     QCOMPARE( back.lookup.phrase.phrase, lookup.phrase.phrase );
+}
+
+void TstArticleSchemes::lookupDocumentEncodesDecodedValuesOnce()
+{
+    // A decoded value may itself contain a valid %HH sequence. It has to be
+    // encoded exactly once on the wire: QUrlQuery keeps a valid escape it is
+    // handed because such a value looks already encoded, so an unencoded value
+    // silently loses one level and parses back as a different string.
+    ArticleUrls::Lookup lookup;
+    lookup.phrase = Config::InputPhrase( QStringLiteral( "a%20b" ), QStringLiteral( "%2F" ) );
+    lookup.group = 3;
+    lookup.groupSpecified = true;
+    lookup.dictionaries = QStringList( { QStringLiteral( "d%2C1" ) } );
+    lookup.muted = QStringList( { QStringLiteral( "m%25" ) } );
+    lookup.scrollTo = QStringLiteral( "gdfrom-a%20b" );
+    lookup.anchor = QStringLiteral( "part%26x" );
+    lookup.highlight.sourcePattern = QStringLiteral( "a%20b" );
+    lookup.highlight.wildcards = true;
+    lookup.highlight.matchCase = true;
+    lookup.highlight.expression = QRegularExpression( QStringLiteral( "a%20b" ) );
+
+    const QUrl produced = ArticleUrls::lookupDocument( lookup );
+
+    // Literal expected URL text: every decoded value gained exactly one
+    // percent-encoding pass, so each original escape became a double escape.
+    QCOMPARE( produced.toEncoded(),
+              QByteArray( "gdlookup://localhost?word=a%2520b"
+                          "&punctuation_suffix=%252F&group=3"
+                          "&dictionaries=d%252C1&muted=m%2525"
+                          "&scrollto=gdfrom-a%2520b"
+                          "&regexp=a%2520b&matchcase=1&wildcards=1"
+                          "&gdanchor=part%2526x" ) );
+
+    // And every decoded field comes back unchanged.
+    const Parsed back = ArticleUrls::parse( produced, Use::DocumentLoad );
+    QCOMPARE( back.kind, Kind::LookupDocument );
+    QCOMPARE( back.lookup.phrase.phrase, lookup.phrase.phrase );
+    QCOMPARE( back.lookup.phrase.punctuationSuffix, lookup.phrase.punctuationSuffix );
+    QCOMPARE( back.lookup.group, lookup.group );
+    QCOMPARE( back.lookup.dictionaries, lookup.dictionaries );
+    QCOMPARE( back.lookup.muted, lookup.muted );
+    QCOMPARE( back.lookup.scrollTo, lookup.scrollTo );
+    QCOMPARE( back.lookup.anchor, lookup.anchor );
+    QCOMPARE( back.lookup.highlight.sourcePattern, lookup.highlight.sourcePattern );
+    QCOMPARE( back.lookup.highlight.wildcards, lookup.highlight.wildcards );
+    QCOMPARE( back.lookup.highlight.matchCase, lookup.highlight.matchCase );
+
+    // Each escape the finding named keeps its own level instead of losing one.
+    struct EscapeRow
+    {
+        char const * decoded;
+        char const * encoded;
+    };
+
+    EscapeRow const rows[] = {
+        { "%25", "%2525" },
+        { "%2F", "%252F" },
+        { "%26", "%2526" },
+        { "%2520", "%252520" },
+    };
+
+    for( EscapeRow const & row : rows )
+    {
+        ArticleUrls::Lookup value;
+        value.phrase = Config::InputPhrase::fromPhrase( QString::fromLatin1( row.decoded ) );
+        value.group = 1;
+        value.groupSpecified = true;
+
+        const QUrl url = ArticleUrls::lookupDocument( value );
+        QVERIFY2( url.toEncoded().contains( QByteArray( "word=" ) + QByteArray( row.encoded ) + '&' ),
+                  url.toEncoded().constData() );
+
+        const Parsed valueBack = ArticleUrls::parse( url, Use::DocumentLoad );
+        QCOMPARE( valueBack.kind, Kind::LookupDocument );
+        QCOMPARE( valueBack.lookup.phrase.phrase, QString::fromLatin1( row.decoded ) );
+    }
 }
 
 void TstArticleSchemes::pictureDocumentComponents()
@@ -833,12 +952,59 @@ void TstArticleSchemes::pictureDocumentComponents()
               resource.toEncoded().constData() );
     QCOMPARE( ArticleUrls::resourcePath( resource ), parsed.resourceName );
 
-    // A trailing structural slash of the resource name is preserved once.
+    // A leading slash in the decoded resource name is resource data, not the
+    // structural URL slash: the producer adds exactly one structural slash.
     const QUrl nested = ArticleUrls::pictureDocument( QStringLiteral( "d" ),
                                                       QStringLiteral( "/sub/a.png" ) );
+    QCOMPARE( nested.toEncoded(), QByteArray( "gdpicture://d//sub/a.png" ) );
     const Parsed nestedParsed = ArticleUrls::parse( nested, Use::DocumentLoad );
     QCOMPARE( nestedParsed.kind, Kind::PictureDocument );
-    QCOMPARE( nestedParsed.resourceName, QStringLiteral( "sub/a.png" ) );
+    QCOMPARE( nestedParsed.resourceName, QStringLiteral( "/sub/a.png" ) );
+}
+
+void TstArticleSchemes::pictureDocumentPreservesResourceIdentity()
+{
+    // bres -> picture -> bres must be lossless: `parse` hands out an already
+    // decoded resource name, so a leading slash in it is data and a bare `?` is
+    // a present but empty query suffix.
+    struct Row
+    {
+        char const * bres;
+        char const * resourceName;
+        char const * picture;
+    };
+
+    Row const rows[] = {
+        { "bres://d//a.png?q=x+y", "/a.png?q=x+y", "gdpicture://d//a.png?q=x+y" },
+        { "bres://d/a.png?", "a.png?", "gdpicture://d/a.png?" },
+        { "bres://d//a.png?", "/a.png?", "gdpicture://d//a.png?" },
+        { "bres://d/a%20b.png?q=x+y", "a b.png?q=x+y", "gdpicture://d/a%20b.png?q=x+y" },
+        { "bres://d/a%3Fb.png", "a?b.png", "gdpicture://d/a?b.png" },
+    };
+
+    for( Row const & row : rows )
+    {
+        const Parsed resource =
+          ArticleUrls::parse( QUrl( QString::fromLatin1( row.bres ) ), Use::DocumentLoad );
+        QVERIFY2( resource.kind == Kind::Resource, qPrintable( QString::fromLatin1( row.bres ) ) );
+        QCOMPARE( resource.dictionaryId, QStringLiteral( "d" ) );
+        QCOMPARE( resource.resourceName, QString::fromLatin1( row.resourceName ) );
+
+        const QUrl picture = ArticleUrls::pictureDocument( resource.dictionaryId, resource.resourceName );
+        QCOMPARE( picture.scheme(), QStringLiteral( "gdpicture" ) );
+        QCOMPARE( picture.host(), QStringLiteral( "d" ) );
+        QCOMPARE( picture.hasQuery(), QString::fromLatin1( row.resourceName ).contains( QLatin1Char( '?' ) ) );
+        QCOMPARE( picture.toEncoded(), QByteArray( row.picture ) );
+
+        const Parsed back = ArticleUrls::parse( picture, Use::DocumentLoad );
+        QCOMPARE( back.kind, Kind::PictureDocument );
+        QCOMPARE( back.dictionaryId, QStringLiteral( "d" ) );
+        QCOMPARE( back.resourceName, QString::fromLatin1( row.resourceName ) );
+
+        // The same decoded name maps back onto the same resource URL.
+        QCOMPARE( ArticleUrls::resourcePath( bresUrl( back.dictionaryId, back.resourceName ) ),
+                  QString::fromLatin1( row.resourceName ) );
+    }
 }
 
 void TstArticleSchemes::contextsWireFormatIsPinned()
@@ -899,6 +1065,8 @@ void TstArticleSchemes::contextsMalformedPayloadsRejected_data()
     QTest::newRow( "empty" ) << QByteArray();
     QTest::newRow( "invalid-base64" ) << QByteArrayLiteral( "!!!" );
     QTest::newRow( "bad-padding" ) << QByteArrayLiteral( "AAAAAA=" );
+    QTest::newRow( "missing-padding" ) << QByteArrayLiteral( "AAAAAA" );
+    QTest::newRow( "nonzero-unused-bits" ) << QByteArrayLiteral( "AAAAAB==" );
     QTest::newRow( "truncated" ) << valid.left( valid.size() - 1 ).toBase64();
     QTest::newRow( "trailing-byte" ) << ( valid + QByteArray( 1, '\0' ) ).toBase64();
     QTest::newRow( "short-payload" ) << QByteArrayLiteral( "AAAA" );
@@ -952,6 +1120,39 @@ void TstArticleSchemes::contextsClearOutputOnFailure()
       QUrl( QStringLiteral( "gdlookup://localhost/?word=cat&group=1&contexts=!!!" ) ), Use::DocumentLoad );
     QCOMPARE( parsed.kind, Kind::Invalid );
     QVERIFY2( parsed.error.contains( QStringLiteral( "contexts" ) ), qPrintable( parsed.error ) );
+}
+
+void TstArticleSchemes::contextsRejectsNonCanonicalBase64()
+{
+    // AbortOnBase64DecodingErrors stops at invalid characters only: a missing
+    // pad and a non-zero unused-bits tail still decode. The wire form is the
+    // producer's canonical padded Base64, so both payloads must be rejected
+    // directly and through the public parser.
+    for( QByteArray const & payload : { QByteArrayLiteral( "AAAAAA" ),
+                                        QByteArrayLiteral( "AAAAAB==" ) } )
+    {
+        QMap< QString, QString > decoded;
+        decoded.insert( QStringLiteral( "stale" ), QStringLiteral( "value" ) );
+        QString error;
+        QVERIFY2( !ArticleUrls::decodeContexts( payload, &decoded, &error ), payload.constData() );
+        QVERIFY2( !error.isEmpty(), payload.constData() );
+        QVERIFY2( decoded.isEmpty(), payload.constData() );
+
+        const QUrl url( QStringLiteral( "gdlookup://localhost/?word=cat&group=1&contexts=" )
+                        + QString::fromLatin1( payload ) );
+        const Parsed parsed = ArticleUrls::parse( url, Use::DocumentLoad );
+        QVERIFY2( parsed.kind == Kind::Invalid, payload.constData() );
+        QVERIFY2( parsed.error.contains( QStringLiteral( "contexts" ) ), qPrintable( parsed.error ) );
+        QVERIFY2( parsed.error.contains( QStringLiteral( "base64" ) ), qPrintable( parsed.error ) );
+    }
+
+    // The canonical spelling of the same bytes stays accepted, so the check is
+    // about grammar and not about the decoded map.
+    QMap< QString, QString > canonical;
+    QString canonicalError;
+    QVERIFY2( ArticleUrls::decodeContexts( QByteArrayLiteral( "AAAAAA==" ), &canonical, &canonicalError ),
+              qPrintable( canonicalError ) );
+    QVERIFY( canonical.isEmpty() );
 }
 
 void TstArticleSchemes::highlightSpecCompilesWildcards()

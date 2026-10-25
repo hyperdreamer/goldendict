@@ -98,6 +98,26 @@ QString stripOneLeadingSlash( QString path )
   return path;
 }
 
+/// Encodes one decoded query value for the wire.
+///
+/// QUrlQuery is not a decoder-aware encoder: it keeps a valid `%HH` sequence in
+/// the text it is given, because that is what an already encoded value looks
+/// like. A decoded value must therefore be percent-encoded exactly once before
+/// it is handed over, or a value containing `%20` would travel as a space and
+/// come back changed. QUrl::toPercentEncoding leaves only unreserved characters
+/// alone, so `+` becomes `%2B` and stays a literal plus after the round trip;
+/// these values are never form-encoded, so no `+` may mean a space.
+QString encodedQueryValue( QString const & decoded )
+{
+  return QString::fromLatin1( QUrl::toPercentEncoding( decoded ) );
+}
+
+/// The single producer path of every query value: decoded in, encoded once out.
+void addQueryValue( QUrlQuery & query, QString const & key, QString const & decodedValue )
+{
+  query.addQueryItem( key, encodedQueryValue( decodedValue ) );
+}
+
 /// The decoded resource name a resource URL carries. The query suffix belongs
 /// to the name (the legacy fullPath contract included it), the fragment does
 /// not.
@@ -247,9 +267,12 @@ Parsed parseLookup( QUrl const & url, Use use, Parsed parsed )
   QString error;
   if( !fillLookup( query, &lookup, &error ) )
     return invalidParsed( parsed, error );
-  if( !applyGroup( query, use, &lookup, &error ) )
-    return invalidParsed( parsed, error );
 
+  // The blank exemption runs before group validation on purpose: the empty page
+  // is dispatched without ever reading the group (spec §4.4, and the baseline
+  // returns makeEmptyPage before inspecting it), so an empty, malformed or
+  // overflowing group must not fail the document. Duplicate-key and contexts
+  // validation happened in fillLookup above and still apply.
   if( query.value( QStringLiteral( "blank" ) ) == QLatin1String( "1" ) )
   {
     // The empty page is a document form; an action never routes it.
@@ -261,6 +284,9 @@ Parsed parseLookup( QUrl const & url, Use use, Parsed parsed )
     parsed.lookup = lookup;
     return parsed;
   }
+
+  if( !applyGroup( query, use, &lookup, &error ) )
+    return invalidParsed( parsed, error );
 
   if( use == Use::UserAction )
   {
@@ -410,7 +436,7 @@ QUrl lookupDocument( Lookup const & lookup )
     // The empty page bypasses the word/group requirements, so it carries
     // nothing else.
     QUrlQuery blank;
-    blank.addQueryItem( QStringLiteral( "blank" ), QStringLiteral( "1" ) );
+    addQueryValue( blank, QStringLiteral( "blank" ), QStringLiteral( "1" ) );
     url.setQuery( blank );
     return url;
   }
@@ -418,29 +444,29 @@ QUrl lookupDocument( Lookup const & lookup )
   QUrlQuery query;
 
   if( !lookup.phrase.phrase.isEmpty() )
-    query.addQueryItem( QStringLiteral( "word" ), lookup.phrase.phrase );
+    addQueryValue( query, QStringLiteral( "word" ), lookup.phrase.phrase );
   if( !lookup.phrase.punctuationSuffix.isEmpty() )
-    query.addQueryItem( QStringLiteral( "punctuation_suffix" ), lookup.phrase.punctuationSuffix );
+    addQueryValue( query, QStringLiteral( "punctuation_suffix" ), lookup.phrase.punctuationSuffix );
   // A document URL carries a group; the explicit-dictionary form keeps the
   // group omission it is allowed to have.
   if( lookup.groupSpecified || lookup.dictionaries.isEmpty() )
-    query.addQueryItem( QStringLiteral( "group" ), QString::number( lookup.group ) );
+    addQueryValue( query, QStringLiteral( "group" ), QString::number( lookup.group ) );
   if( !lookup.dictionaries.isEmpty() )
-    query.addQueryItem( QStringLiteral( "dictionaries" ),
-                        lookup.dictionaries.join( QLatin1Char( ',' ) ) );
+    addQueryValue( query, QStringLiteral( "dictionaries" ),
+                   lookup.dictionaries.join( QLatin1Char( ',' ) ) );
   if( !lookup.muted.isEmpty() )
-    query.addQueryItem( QStringLiteral( "muted" ), lookup.muted.join( QLatin1Char( ',' ) ) );
+    addQueryValue( query, QStringLiteral( "muted" ), lookup.muted.join( QLatin1Char( ',' ) ) );
   if( lookup.ignoreDiacritics )
-    query.addQueryItem( QStringLiteral( "ignore_diacritics" ), QStringLiteral( "1" ) );
+    addQueryValue( query, QStringLiteral( "ignore_diacritics" ), QStringLiteral( "1" ) );
   if( !lookup.scrollTo.isEmpty() )
-    query.addQueryItem( QStringLiteral( "scrollto" ), lookup.scrollTo );
+    addQueryValue( query, QStringLiteral( "scrollto" ), lookup.scrollTo );
   if( !lookup.highlight.sourcePattern.isEmpty() )
   {
-    query.addQueryItem( QStringLiteral( "regexp" ), lookup.highlight.sourcePattern );
+    addQueryValue( query, QStringLiteral( "regexp" ), lookup.highlight.sourcePattern );
     if( lookup.highlight.matchCase )
-      query.addQueryItem( QStringLiteral( "matchcase" ), QStringLiteral( "1" ) );
+      addQueryValue( query, QStringLiteral( "matchcase" ), QStringLiteral( "1" ) );
     if( lookup.highlight.wildcards )
-      query.addQueryItem( QStringLiteral( "wildcards" ), QStringLiteral( "1" ) );
+      addQueryValue( query, QStringLiteral( "wildcards" ), QStringLiteral( "1" ) );
   }
 
   // The anchor is a query item, not a member of the context map, exactly like
@@ -456,10 +482,10 @@ QUrl lookupDocument( Lookup const & lookup )
     contexts.erase( anchorContext );
   }
   if( !anchor.isEmpty() )
-    query.addQueryItem( QStringLiteral( "gdanchor" ), anchor );
+    addQueryValue( query, QStringLiteral( "gdanchor" ), anchor );
   if( !contexts.isEmpty() )
-    query.addQueryItem( QStringLiteral( "contexts" ),
-                        QString::fromLatin1( encodeContexts( contexts ) ) );
+    addQueryValue( query, QStringLiteral( "contexts" ),
+                   QString::fromLatin1( encodeContexts( contexts ) ) );
 
   if( !query.isEmpty() )
     url.setQuery( query );
@@ -472,17 +498,26 @@ QUrl pictureDocument( QString const & dictionaryId, QString const & resourceName
   url.setScheme( QStringLiteral( "gdpicture" ) );
   url.setHost( dictionaryId );
 
-  QString path = stripOneLeadingSlash( resourceName );
-  QString query;
+  // `resourceName` is the decoded name ArticleUrls::parse reports: its
+  // structural URL slash is already gone, so a leading slash here is resource
+  // data and only the structural one is prepended again. The `?` starts the
+  // resource's own query suffix, and its presence counts even when the suffix
+  // is empty.
+  QString path = resourceName;
   int const queryStart = path.indexOf( QLatin1Char( '?' ) );
-  if( queryStart >= 0 )
+  bool const hasQuery = queryStart >= 0;
+  QString query;
+  if( hasQuery )
   {
+    // `mid()` past the '?' yields an empty but non-null QString. QUrl::setQuery
+    // drops the query for a null string and keeps the structural separator for
+    // an empty one, so a bare trailing `?` survives without a special case.
     query = path.mid( queryStart + 1 );
-    path = path.left( queryStart );
+    path.truncate( queryStart );
   }
 
   url.setPath( QLatin1Char( '/' ) + path, QUrl::DecodedMode );
-  if( !query.isEmpty() )
+  if( hasQuery )
     url.setQuery( query, QUrl::DecodedMode );
   return url;
 }
@@ -522,6 +557,15 @@ bool decodeContexts( QByteArray const & base64, QMap< QString, QString > * out, 
     QByteArray::fromBase64Encoding( base64, QByteArray::AbortOnBase64DecodingErrors );
   if( !decoded )
     return fail( QStringLiteral( "invalid base64 payload" ) );
+
+  // AbortOnBase64DecodingErrors stops at invalid characters only: a missing pad
+  // character and a non-zero unused-bits tail both still decode. The wire form
+  // is the producer's canonical padded Base64, so re-encoding the decoded bytes
+  // has to reproduce the input exactly; that rejects the missing padding, the
+  // nonzero unused bits and any other non-canonical spelling of a valid
+  // payload.
+  if( decoded.decoded.toBase64() != base64 )
+    return fail( QStringLiteral( "non-canonical base64 payload" ) );
 
   QByteArray payload = decoded.decoded;
   QBuffer buffer( &payload );

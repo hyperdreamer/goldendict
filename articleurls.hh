@@ -121,14 +121,18 @@ Parsed parse( QUrl const & url, Use use );
 /// ordinary lookup, so it re-parses as Use::DocumentLoad. `dictionaryName` is
 /// not emitted: `dict` is an action-only field that the action handler consumes
 /// before the document URL is built, and a document request never passes it to
-/// the article maker.
+/// the article maker. Every field is decoded on the way in and is
+/// percent-encoded exactly once on the way out, so a value that itself contains
+/// a valid `%HH` sequence keeps its level and re-parses unchanged.
 QUrl lookupDocument( Lookup const & lookup );
 
 /// Produces the picture document URL of a dictionary resource.
 ///
 /// `resourceName` is the decoded resource name (path, plus `?` and the decoded
 /// query when the resource carries one), exactly the value ArticleUrls::parse
-/// reports for a resource scheme.
+/// reports for a resource scheme. The name's structural slash is already gone,
+/// so a leading slash in it is resource data and only one structural slash is
+/// added. A `?` is kept even when the query suffix behind it is empty.
 QUrl pictureDocument( QString const & dictionaryId, QString const & resourceName );
 
 /// Serializes the reference-view contexts for a URL query item.
@@ -140,10 +144,12 @@ QByteArray encodeContexts( QMap<QString, QString> const & contexts );
 
 /// Deserializes what encodeContexts() produced.
 ///
-/// Strict by construction: invalid Base64, a truncated or failing stream and
-/// trailing bytes all make the decode fail. `out` is cleared first and is left
-/// empty on failure, so a caller never applies half a map. `error` receives a
-/// human-readable reason; both output pointers may be null.
+/// Strict by construction: invalid Base64, a missing pad character, non-zero
+/// unused padding bits, a truncated or failing stream and trailing bytes all
+/// make the decode fail (the canonical padded Base64 of the decoded bytes has to
+/// reproduce the input). `out` is cleared first and is left empty on failure, so
+/// a caller never applies half a map. `error` receives a human-readable reason;
+/// both output pointers may be null.
 bool decodeContexts( QByteArray const & base64, QMap<QString, QString> * out,
                      QString * error );
 
