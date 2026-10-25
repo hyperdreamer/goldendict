@@ -855,8 +855,7 @@ bool EpwingBook::getNextHeadword( EpwingHeadword & head )
 {
   EB_Position pos;
 
-  static const QRegularExpression badLinks( QStringLiteral( "#(v|n)\\d" ) );
-  Q_ASSERT( badLinks.isValid() );
+  const auto & badLinks = detail::badLinksPattern();
 
   // At first we check references queue
   while( !LinksQueue.isEmpty() )
@@ -1057,8 +1056,7 @@ void EpwingBook::fixHeadword( QString & headword )
     return;
 
   QString fixed = headword;
-  static const QRegularExpression pronunciation( QStringLiteral( "/[^/]+/" ) );
-  Q_ASSERT( pronunciation.isValid() );
+  const auto & pronunciation = detail::pronunciationPattern();
   fixed.remove( pronunciation );
 
   if( isHeadwordCorrect( fixed ) )
@@ -1233,9 +1231,8 @@ void EpwingBook::finalizeText( QString & text )
   // Replace references
 
   int pos = 0;
-  static const QRegularExpression reg1( QStringLiteral( "<R[^<]*>" ) );
-  static const QRegularExpression reg2( QStringLiteral( "</R[^<]*>" ) );
-  Q_ASSERT( reg1.isValid() && reg2.isValid() );
+  const auto & reg1 = detail::referenceOpenPattern();
+  const auto & reg2 = detail::referenceClosePattern();
 
   EContainer cont( this, true );
 

@@ -4,28 +4,6 @@
 #include <QString>
 #include "categorized_logging.hh"
 #include "gddebug.hh"
-#include "encoding.hh"
-
-QString GdLocaleDecodeOnlyCodec::toUnicode( char const * data, qsizetype size ) const noexcept
-{
-  return Encoding::forLocale().decode( QByteArray( data, size ) );
-}
-
-QString GdLocaleDecodeOnlyCodec::toUnicode( char const * data ) const noexcept
-{
-  return Encoding::forLocale().decode( QByteArray( data ) );
-}
-
-QString GdLocaleDecodeOnlyCodec::toUnicode( QByteArray const & data ) const noexcept
-{
-  return Encoding::forLocale().decode( data );
-}
-
-QTextCodec * gdCodecForLocale() noexcept
-{
-  static GdLocaleDecodeOnlyCodec codec;
-  return &codec;
-}
 
 #define TO_LOG_MESSAGE( msg, ap ) QString::vasprintf( msg, ap ).toUtf8().constData()
 

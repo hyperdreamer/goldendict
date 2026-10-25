@@ -304,6 +304,11 @@ class TstLinkRewrite : public QObject
     void websiteResolverUsesProductionBase();
     void websiteResolverRowsMatchProduction();
     void websiteStylesheetMappingPreservesRemoteUrl();
+    void websiteGeneratedUrlsCannotCloseQuotes();
+    void websiteAbsentFormActionTargetsDocument_data();
+    void websiteAbsentFormActionTargetsDocument();
+    void websiteNestedGrammarDecodesEntities_data();
+    void websiteNestedGrammarDecodesEntities();
 
     void gdLookupPreservesStructureAndIsIdempotent();
     void gdLookupNormalizesOnlyThePathHeadword();
@@ -555,6 +560,111 @@ void TstLinkRewrite::websiteStylesheetMappingPreservesRemoteUrl()
                   QStringLiteral( "@import '../theme.css'; .x{background:url(../img.png)}" ),
                   QUrl( QStringLiteral( "http://127.0.0.1:43127/css/final/site.css" ) ) ),
               QStringLiteral( "@import 'http://127.0.0.1:43127/css/theme.css'; .x{background:url(http://127.0.0.1:43127/css/img.png)}" ) );
+}
+
+void TstLinkRewrite::websiteGeneratedUrlsCannotCloseQuotes()
+{
+    const QUrl document( QStringLiteral( "https://example.test/a'b/page?q=1&x=2" ) );
+    const QString source = QStringLiteral( "<img src='image.png' alt='keep'>" );
+    const QString output = WebSite::resolveInlineUrls( source, document );
+    QCOMPARE( output, QStringLiteral( "<img src='https://example.test/a%27b/image.png' alt='keep'>" ) );
+    const auto target = firstHtmlAttributeValue( output, QStringLiteral( "src" ) );
+    QVERIFY( target );
+    QCOMPARE( QUrl( *target ).path(), QStringLiteral( "/a'b/image.png" ) );
+    QCOMPARE( WebSite::resolveInlineUrls(
+                  QStringLiteral( "<style>.x{background:url('image.png')}</style>" ), document ),
+              QStringLiteral( "<style>.x{background:url('https://example.test/a%27b/image.png')}</style>" ) );
+    QCOMPARE( WebSite::resolveInlineUrls(
+                  QStringLiteral( "<base href=\"https://example.test/c'd/\"><div style=\"background:url('image.png')\"></div>" ), document ),
+              QStringLiteral( "<base href=\"https://example.test/c'd/\"><div style=\"background:url('https://example.test/c%27d/image.png')\"></div>" ) );
+    QCOMPARE( WebSite::detail::resolveCss( QStringLiteral( "url(image.png)" ),
+                  QUrl( QStringLiteral( "https://example.test/a(b)/style.css" ) ) ),
+              QStringLiteral( "url(https://example.test/a%28b%29/image.png)" ) );
+}
+
+void TstLinkRewrite::websiteAbsentFormActionTargetsDocument_data()
+{
+    QTest::addColumn< QString >( "prefix" );
+    QTest::addColumn< QString >( "form" );
+    QTest::addColumn< QString >( "expected" );
+    for ( const QString & prefix : { QString(), QStringLiteral( "<base href='/other/'>" ) } )
+    {
+        const QByteArray row = prefix.isEmpty() ? "no-base-" : "with-base-";
+        QTest::newRow( ( row + "absent" ).constData() ) << prefix
+            << QStringLiteral( "<form method='get'><input name=q></form>" )
+            << QStringLiteral( "<form method='get' action=\"https://example.test/a%27b/page?q=1&amp;x=2\"><input name=q></form>" );
+        QTest::newRow( ( row + "valueless" ).constData() ) << prefix
+            << QStringLiteral( "<form action method='get'><input name=q></form>" )
+            << QStringLiteral( "<form action=\"https://example.test/a%27b/page?q=1&amp;x=2\" method='get'><input name=q></form>" );
+        QTest::newRow( ( row + "empty" ).constData() ) << prefix
+            << QStringLiteral( "<form action=''><input name=q></form>" )
+            << QStringLiteral( "<form action='https://example.test/a%27b/page?q=1&amp;x=2'><input name=q></form>" );
+    }
+}
+
+void TstLinkRewrite::websiteAbsentFormActionTargetsDocument()
+{
+    QFETCH( QString, prefix );
+    QFETCH( QString, form );
+    QFETCH( QString, expected );
+    const QUrl document( QStringLiteral( "https://example.test/a'b/page?q=1&x=2" ) );
+    const QString output = WebSite::resolveInlineUrls( prefix + form, document );
+    QVERIFY2( output.endsWith( expected ), qPrintable( output ) );
+    const auto action = firstHtmlAttributeValue( output, QStringLiteral( "action" ) );
+    QVERIFY( action );
+    const QUrl parsedAction( *action );
+    QCOMPARE( parsedAction.scheme(), document.scheme() );
+    QCOMPARE( parsedAction.authority(), document.authority() );
+    QCOMPARE( parsedAction.path(), document.path() );
+    QCOMPARE( parsedAction.query( QUrl::FullyDecoded ), document.query( QUrl::FullyDecoded ) );
+    QCOMPARE( WebSite::resolveInlineUrls( output, document ), output );
+}
+
+void TstLinkRewrite::websiteNestedGrammarDecodesEntities_data()
+{
+    QTest::addColumn< QString >( "input" );
+    QTest::addColumn< QString >( "attribute" );
+    QTest::addColumn< QString >( "expectedSource" );
+    QTest::addColumn< QString >( "expectedValue" );
+    QTest::newRow( "srcset-space" )
+        << QStringLiteral( "<img srcset='one.png&#32;1x, two.png 2x'>" ) << QStringLiteral( "srcset" )
+        << QStringLiteral( "<img srcset='https://example.test/dir/one.png&#32;1x, https://example.test/dir/two.png 2x'>" )
+        << QStringLiteral( "https://example.test/dir/one.png 1x, https://example.test/dir/two.png 2x" );
+    QTest::newRow( "srcset-comma" )
+        << QStringLiteral( "<img srcset='one.png&#44; two.png 2x'>" ) << QStringLiteral( "srcset" )
+        << QStringLiteral( "<img srcset='https://example.test/dir/one.png&#44; https://example.test/dir/two.png 2x'>" )
+        << QStringLiteral( "https://example.test/dir/one.png, https://example.test/dir/two.png 2x" );
+    QTest::newRow( "style-quotes" )
+        << QStringLiteral( "<div style='background:url(&quot;image.png&quot;);color:red'></div>" ) << QStringLiteral( "style" )
+        << QStringLiteral( "<div style='background:url(&quot;https://example.test/dir/image.png&quot;);color:red'></div>" )
+        << QStringLiteral( "background:url(\"https://example.test/dir/image.png\");color:red" );
+    QTest::newRow( "style-function-and-padding" )
+        << QStringLiteral( "<div style='background:url&#40;&#32;&quot;im&#97;ge.png&quot;&#32;&#41;'></div>" ) << QStringLiteral( "style" )
+        << QStringLiteral( "<div style='background:url&#40;&#32;&quot;https://example.test/dir/image.png&quot;&#32;&#41;'></div>" )
+        << QStringLiteral( "background:url( \"https://example.test/dir/image.png\" )" );
+    QTest::newRow( "srcset-entity-url-and-query" )
+        << QStringLiteral( "<img srcset='im&#97;ge.png?a=1&amp;b=2&#32;1x, two.png 2x'>" ) << QStringLiteral( "srcset" )
+        << QStringLiteral( "<img srcset='https://example.test/dir/image.png?a=1&amp;b=2&#32;1x, https://example.test/dir/two.png 2x'>" )
+        << QStringLiteral( "https://example.test/dir/image.png?a=1&b=2 1x, https://example.test/dir/two.png 2x" );
+    QTest::newRow( "style-escaped-entity-is-not-decoded-twice" )
+        << QStringLiteral( "<div style='background:url(&quot;im&amp;#97;ge.png&quot;)'></div>" ) << QStringLiteral( "style" )
+        << QStringLiteral( "<div style='background:url(&quot;https://example.test/dir/im&amp;#97;ge.png&quot;)'></div>" )
+        << QStringLiteral( "background:url(\"https://example.test/dir/im&#97;ge.png\")" );
+}
+
+void TstLinkRewrite::websiteNestedGrammarDecodesEntities()
+{
+    QFETCH( QString, input );
+    QFETCH( QString, attribute );
+    QFETCH( QString, expectedSource );
+    QFETCH( QString, expectedValue );
+    const QUrl document( QStringLiteral( "https://example.test/dir/page" ) );
+    const QString output = WebSite::resolveInlineUrls( input, document );
+    QCOMPARE( output, expectedSource );
+    const auto parsed = firstHtmlAttributeValue( output, attribute );
+    QVERIFY( parsed );
+    QCOMPARE( *parsed, expectedValue );
+    QCOMPARE( WebSite::resolveInlineUrls( output, document ), output );
 }
 
 void TstLinkRewrite::gdLookupPreservesStructureAndIsIdempotent()

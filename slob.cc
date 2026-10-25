@@ -60,7 +60,6 @@ using BtreeIndexing::IndexInfo;
 DEF_EX_STR( exNotSlobFile, "Not an Slob file", Dictionary::Ex )
 DEF_EX_STR( exCantReadFile, "Can't read file", Dictionary::Ex )
 DEF_EX_STR( exCantDecodeFile, "Can't decode file", Dictionary::Ex )
-DEF_EX_STR( exNoCodecFound, "No text codec found", Dictionary::Ex )
 DEF_EX( exUserAbort, "User abort", Dictionary::Ex )
 DEF_EX( exNoResource, "No resource found", Dictionary::Ex )
 
@@ -101,6 +100,44 @@ struct RefEntry
   quint16 binIndex;
   QString fragment;
 };
+
+namespace detail {
+QRegularExpression parserPattern( QString const & source,
+    QRegularExpression::PatternOptions options = QRegularExpression::NoPatternOption )
+{
+  QRegularExpression pattern( source, options );
+  if( !pattern.isValid() )
+  {
+    const QString error = QStringLiteral( "invalid pattern '%1': %2" ).arg( source, pattern.errorString() );
+    gdWarning( "Slob: %s", qPrintable( error ) );
+    throw exCantDecodeFile( error.toUtf8().toStdString() );
+  }
+  return pattern;
+}
+
+struct ArticlePatterns
+{
+  const QRegularExpression resourceSource = parserPattern( QStringLiteral( "<\\s*(img|script)\\s+([^>]*)src=\"(?!(?:data|https?|ftp):)(|/)([^\"]*)\"" ) );
+  const QRegularExpression resourceLink = parserPattern( QStringLiteral( "<\\s*link\\s+([^>]*)href=\"(?!(?:data|https?|ftp):)" ) );
+  const QRegularExpression link = parserPattern( QStringLiteral( "<\\s*a\\s+([^>]*)href=\"(?!(?:\\w+://|#|mailto:|tel:))(/|)([^\"]*)\"\\s*(title=\"[^\"]*\")?[^>]*>" ) );
+  const QRegularExpression pathPrefix = parserPattern( QStringLiteral( ".*/" ) );
+  const QRegularExpression htmlSuffix = parserPattern( QStringLiteral( "\\.(s|)htm(l|)$" ), QRegularExpression::CaseInsensitiveOption );
+  const QRegularExpression texImage = parserPattern( QStringLiteral( "<\\s*img\\s+class=\"([^\"]+)\"\\s*([^>]*)alt=\"([^\"]+)\"[^>]*>" ) );
+  const QRegularExpression texFraction = parserPattern( QStringLiteral( "\\\\[dt]frac" ) );
+  const QRegularExpression texSpaces = parserPattern( QStringLiteral( "\\s+([\\{\\(\\[\\}\\)\\]])" ) );
+  const QRegularExpression texMultiplier = parserPattern( QStringLiteral( "\\*\\{(\\d+)\\}([^\\{]|\\{([^\\}]+)\\})" ) );
+};
+
+ArticlePatterns const & articlePatterns()
+{
+  static const ArticlePatterns patterns;
+  return patterns;
+}
+
+string convertArticle( string const & in, RefEntry const & entry,
+                       string const & dictionaryId, QString const & texCgiPath,
+                       QString const & texCachePath );
+}
 
 bool indexIsOldOrBad( string const & indexFile )
 {
@@ -300,12 +337,13 @@ QString error( name + ": " );
     encoding = readTinyText();
 
     const auto selectedCodec = Encoding::byName( encoding );
-    if( !selectedCodec )
+    if( selectedCodec )
+      codec = *selectedCodec;
+    else
     {
-      error = QString( "for encoding \"") + encoding + "\"";
-      throw exNoCodecFound( string( error.toUtf8().data() ) );
+      gdWarning( "Encoding: unknown charset %s; using UTF-8", qPrintable( encoding ) );
+      codec = Encoding::utf8();
     }
-    codec = *selectedCodec;
 
     // Read compression type
 
@@ -653,8 +691,6 @@ private:
                          string & articleText,
                          RefEntry & entry );
 
-    string convert( string const & in_data, RefEntry const & entry );
-
     void removeDirectory( QString const & directory );
 
     friend class SlobArticleRequest;
@@ -794,7 +830,7 @@ void SlobDictionary::loadArticle( quint32 address,
 
   if( !articleText.empty() )
   {
-    articleText = convert( articleText, entry );
+    articleText = detail::convertArticle( articleText, entry, getId(), texCgiPath, texCachePath );
   }
   else
     articleText = string( QObject::tr( "Article decoding error" ).toUtf8().constData() );
@@ -814,35 +850,31 @@ void SlobDictionary::loadArticle( quint32 address,
   articleText = prefix + articleText + cleaner + "</div>";
 }
 
-string SlobDictionary::convert( const string & in, RefEntry const & entry )
+string detail::convertArticle( const string & in, RefEntry const & entry,
+                               string const & dictionaryId, QString const & texCgiPath,
+                               QString const & texCachePath )
 {
-  QString text = QString::fromUtf8( in.c_str() );
+  QString text = QString::fromUtf8( in.data(), in.size() );
+  const auto & patterns = articlePatterns();
+  const auto & resourceSource = patterns.resourceSource;
+  const auto & resourceLink = patterns.resourceLink;
+  const auto & rxLink = patterns.link;
+  const auto & pathPrefix = patterns.pathPrefix;
+  const auto & htmlSuffix = patterns.htmlSuffix;
+  const auto & texImage = patterns.texImage;
+  const auto & regFrac = patterns.texFraction;
+  const auto & regSpaces = patterns.texSpaces;
+  const auto & multReg = patterns.texMultiplier;
 
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
   // pattern of img and script
-  static const QRegularExpression resourceSource( QStringLiteral( "<\\s*(img|script)\\s+([^>]*)src=\"(?!(?:data|https?|ftp):)(|/)([^\"]*)\"" ) );
-  static const QRegularExpression resourceLink( QStringLiteral( "<\\s*link\\s+([^>]*)href=\"(?!(?:data|https?|ftp):)" ) );
-  Q_ASSERT( resourceSource.isValid() && resourceLink.isValid() );
-  text.replace( resourceSource, QString( "<\\1 \\2src=\"bres://%1/\\4\"").arg( getId().c_str() ) );
+  text.replace( resourceSource, QString( "<\\1 \\2src=\"bres://%1/\\4\"").arg( dictionaryId.c_str() ) );
 
   // pattern <link... href="..." ...>
-  text.replace( resourceLink, QString( "<link \\1href=\"bres://%1/").arg( getId().c_str() ) );
-#else
-  // pattern of img and script
-  text.replace( QRegExp( "<\\s*(img|script)\\s+([^>]*)src=\"(?!(?:data|https?|ftp):)(|/)([^\"]*)\"" ),
-                QString( "<\\1 \\2src=\"bres://%1/\\4\"").arg( getId().c_str() ) );
-
-  // pattern <link... href="..." ...>
-  text.replace( QRegExp( "<\\s*link\\s+([^>]*)href=\"(?!(?:data|https?|ftp):)" ),
-                QString( "<link \\1href=\"bres://%1/").arg( getId().c_str() ) );
-#endif
+  text.replace( resourceLink, QString( "<link \\1href=\"bres://%1/").arg( dictionaryId.c_str() ) );
 
   // pattern <a href="..." ...>, excluding any known protocols such as http://, mailto:, #(comment)
   // these links will be translated into local definitions
   QString anchor;
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-  static const QRegularExpression rxLink( QStringLiteral( "<\\s*a\\s+([^>]*)href=\"(?!(?:\\w+://|#|mailto:|tel:))(/|)([^\"]*)\"\\s*(title=\"[^\"]*\")?[^>]*>" ) );
-  Q_ASSERT( rxLink.isValid() );
   QRegularExpressionMatchIterator it = rxLink.globalMatch( text );
   int pos = 0;
   QString newText;
@@ -857,16 +889,6 @@ string SlobDictionary::convert( const string & in, RefEntry const & entry )
     // Keep optional captures present for the legacy field indexes.
     for( int i = match.lastCapturedIndex() + 1; i < 5; i++ )
       list.append( QString() );
-#else
-  QRegExp rxLink( "<\\s*a\\s+([^>]*)href=\"(?!(\\w+://|#|mailto:|tel:))(/|)([^\"]*)\"\\s*(title=\"[^\"]*\")?[^>]*>",
-                       Qt::CaseSensitive,
-                       QRegExp::RegExp2 );
-
-  int pos = 0;
-  while( (pos = rxLink.indexIn( text, pos )) >= 0 )
-  {
-    QStringList list = rxLink.capturedTexts();
-#endif
     QString tag = list[3];
     if ( !list[4].isEmpty() )
       tag = list[4].split("\"")[1];
@@ -881,17 +903,12 @@ string SlobDictionary::convert( const string & in, RefEntry const & entry )
     else
       anchor.clear();
 
-    static const QRegularExpression pathPrefix( QStringLiteral( ".*/" ) );
-    static const QRegularExpression htmlSuffix( QStringLiteral( "\\.(s|)htm(l|)$" ),
-                                                QRegularExpression::CaseInsensitiveOption );
-    Q_ASSERT( pathPrefix.isValid() && htmlSuffix.isValid() );
     tag.remove( pathPrefix ).
         remove( htmlSuffix ).
         replace( "_", "%20" ).
         prepend( "<a href=\"gdlookup://localhost/" ).
         append( anchor + "\" " + list[4] + ">" );
 
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
     newText += tag;
   }
   if( pos )
@@ -900,37 +917,17 @@ string SlobDictionary::convert( const string & in, RefEntry const & entry )
     text = newText;
   }
   newText.clear();
-#else
-    text.replace( pos, list[0].length(), tag );
-    pos += tag.length() + 1;
-  }
-#endif
 
   // Handle TeX formulas via mimetex.cgi
 
   if( !texCgiPath.isEmpty() )
   {
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-    static const QRegularExpression texImage( QStringLiteral( "<\\s*img\\s+class=\"([^\"]+)\"\\s*([^>]*)alt=\"([^\"]+)\"[^>]*>" ) );
-    static const QRegularExpression regFrac( QStringLiteral( "\\\\[dt]frac" ) );
-    static const QRegularExpression regSpaces( QStringLiteral( "\\s+([\\{\\(\\[\\}\\)\\]])" ) );
-    Q_ASSERT( texImage.isValid() && regFrac.isValid() && regSpaces.isValid() );
-#else
-    QRegExp texImage( "<\\s*img\\s+class=\"([^\"]+)\"\\s*([^>]*)alt=\"([^\"]+)\"[^>]*>",
-                      Qt::CaseSensitive,
-                      QRegExp::RegExp2 );
-    QRegExp regFrac = QRegExp( "\\\\[dt]frac" );
-    QRegExp regSpaces = QRegExp( "\\s+([\\{\\(\\[\\}\\)\\]])", Qt::CaseSensitive, QRegExp::RegExp2 );
-#endif
-    static const QRegularExpression multReg( QStringLiteral( "\\*\\{(\\d+)\\}([^\\{]|\\{([^\\}]+)\\})" ) );
-    Q_ASSERT( multReg.isValid() );
 
     QString arrayDesc( "\\begin{array}{" );
     pos = 0;
     unsigned texCount = 0;
     QString imgName;
 
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
     QRegularExpressionMatchIterator it = texImage.globalMatch( text );
     QString newText;
     while( it.hasNext() )
@@ -941,22 +938,12 @@ string SlobDictionary::convert( const string & in, RefEntry const & entry )
       pos = match.capturedEnd();
 
       QStringList list = match.capturedTexts();
-#else
-    while( (pos = texImage.indexIn( text, pos )) >= 0 )
-    {
-      QStringList list = texImage.capturedTexts();
-#endif
 
       if( list[ 1 ].compare( "tex" ) == 0
           || list[ 1 ].compare( "mwe-math-fallback-image-inline" ) == 0
           || list[ 1 ].endsWith( " tex" ) )
       {
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 5, 0 )
         QString const name = QString::asprintf(
-#else
-        QString name;
-        name.sprintf(
-#endif
                "%04X%04X%04X.gif", entry.itemIndex, entry.binIndex, texCount );
 
         imgName = texCachePath + "/" + name;
@@ -1050,30 +1037,19 @@ string SlobDictionary::convert( const string & in, RefEntry const & entry )
 #endif
                       + imgName + "\" alt=\"" + list[ 3 ] + "\">";
 
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
         newText += tag;
-#else
-        text.replace( pos, list[0].length(), tag );
-        pos += tag.length() + 1;
-#endif
 
         texCount += 1;
       }
       else
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
         newText += list[ 0 ];
-#else
-        pos += list[ 0 ].length();
-#endif
     }
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
     if( pos )
     {
       newText += text.mid( pos );
       text = newText;
     }
     newText.clear();
-#endif
   }
 #ifdef Q_OS_WIN32
   else
@@ -1091,7 +1067,8 @@ string SlobDictionary::convert( const string & in, RefEntry const & entry )
   // Fix outstanding elements
   text += "<br style=\"clear:both;\" />";
 
-  return text.toUtf8().data();
+  const QByteArray utf8 = text.toUtf8();
+  return string( utf8.constData(), utf8.size() );
 }
 
 void SlobDictionary::loadResource( std::string & resourceName, string & data )

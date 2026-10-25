@@ -22,11 +22,11 @@ using std::string;
 
 namespace detail {
 
-// Only these value spans may change: markup, quotes, whitespace, comments and
-// raw script text are retained from the original input, never serialized again.
+// Markup, quotes, whitespace, comments and raw script text are retained.
+// Edits cover URL spans, plus the required insertion of an absent form action.
 struct UrlEdit { qsizetype start, length; QString value; };
 struct TextSpan { qsizetype start, length; };
-struct Attribute { QString name; qsizetype start, length; };
+struct Attribute { QString name; qsizetype start, length; bool hasValue = true; };
 struct Tag { QString name; QVector< Attribute > attributes; qsizetype start, end; };
 
 inline bool startsAt( QString const & text, qsizetype at, QString const & token )
@@ -81,9 +81,14 @@ inline QVector< Tag > htmlTags( QString const & html, QVector< TextSpan > * cssS
       if ( html[p] == '/' ) { ++p; continue; }
       const auto attrStart = p;
       while ( p < html.size() && !html[p].isSpace() && html[p] != '=' && html[p] != '>' ) ++p;
+      const auto nameEnd = p;
       const QString name = html.mid( attrStart, p - attrStart ).toLower();
       while ( p < html.size() && html[p].isSpace() ) ++p;
-      if ( p >= html.size() || html[p] != '=' ) continue;
+      if ( p >= html.size() || html[p] != '=' )
+      {
+        tag.attributes.append( { name, nameEnd, 0, false } );
+        continue;
+      }
       ++p;
       while ( p < html.size() && html[p].isSpace() ) ++p;
       if ( p == html.size() ) break;
@@ -117,6 +122,7 @@ inline QVector< Tag > htmlTags( QString const & html, QVector< TextSpan > * cssS
 enum class UrlContext
 {
   Css,
+  CssUnquoted,
   HtmlAttribute
 };
 
@@ -131,16 +137,70 @@ inline QString decodeHtmlAttributeValue( QString const & raw )
                                            + QStringLiteral( "</pre>" ) ).toPlainText();
 }
 
+// Nested attribute grammars consume decoded characters. Keep the original
+// boundary of each decoded UTF-16 unit so only changed URL tokens are written
+// back; entity-encoded separators, quotes and descriptors retain their spelling.
+struct DecodedAttribute
+{
+  QString text;
+  QVector< qsizetype > boundaries{ 0 };
+};
+
+inline DecodedAttribute decodeAttributeWithOffsets( QString const & raw )
+{
+  DecodedAttribute result;
+  qsizetype p = 0;
+  while ( p < raw.size() )
+  {
+    if ( raw[p] == '&' )
+    {
+      auto end = p + 1;
+      const bool numeric = end < raw.size() && raw[end] == '#';
+      if ( numeric ) ++end;
+      const bool hex = numeric && end < raw.size() && raw[end].toLower() == 'x';
+      if ( hex ) ++end;
+      const auto digits = end;
+      while ( end < raw.size() && ( numeric
+              ? ( raw[end] >= '0' && raw[end] <= '9' )
+                || ( hex && raw[end].toLower() >= 'a' && raw[end].toLower() <= 'f' )
+              : raw[end].isLetterOrNumber() ) ) ++end;
+      const bool semicolon = end < raw.size() && raw[end] == ';';
+      if ( semicolon ) ++end;
+      // An un-terminated named reference followed by '=' is literal in an
+      // attribute (for example an ordinary query parameter named 'copy').
+      if ( end > digits && ( numeric || semicolon || end == raw.size() || raw[end] != '=' ) )
+      {
+        const QString token = raw.mid( p, end - p );
+        const QString decoded = decodeHtmlAttributeValue( token );
+        if ( !decoded.isEmpty() && decoded != token )
+        {
+          result.text += decoded;
+          for ( qsizetype i = 1; i < decoded.size(); ++i ) result.boundaries.append( p );
+          result.boundaries.append( end );
+          p = end;
+          continue;
+        }
+      }
+    }
+    result.text += raw[p++];
+    result.boundaries.append( p );
+  }
+  return result;
+}
+
 inline QString serializeTarget( QString value, UrlContext context )
 {
-  if ( context != UrlContext::HtmlAttribute ) return value;
-
-  // URL query separators and other ampersands must survive HTML attribute
-  // parsing as data, not as a new character reference. QUrl already fully
-  // encodes quote characters in generated URLs.
-  value.replace( '&', QStringLiteral( "&amp;" ) )
-       .replace( '<', QStringLiteral( "&lt;" ) )
-       .replace( '>', QStringLiteral( "&gt;" ) );
+  // FullyEncoded still permits apostrophes and parentheses in URL paths. They
+  // are delimiters in HTML/CSS embeddings, so encode them as URL data first.
+  value.replace( '\'', QStringLiteral( "%27" ) )
+       .replace( '"', QStringLiteral( "%22" ) )
+       .replace( '\\', QStringLiteral( "%5C" ) );
+  if ( context == UrlContext::CssUnquoted )
+    value.replace( '(', QStringLiteral( "%28" ) ).replace( ')', QStringLiteral( "%29" ) );
+  if ( context == UrlContext::HtmlAttribute )
+    value.replace( '&', QStringLiteral( "&amp;" ) )
+         .replace( '<', QStringLiteral( "&lt;" ) )
+         .replace( '>', QStringLiteral( "&gt;" ) );
   return value;
 }
 
@@ -165,8 +225,7 @@ inline QString resolvedTarget( QString const & raw, QUrl const & base,
        + raw.mid( start + rawTarget.size() );
 }
 
-inline QString resolveCss( QString const & css, QUrl const & base,
-                           UrlContext context = UrlContext::Css )
+inline QVector< UrlEdit > cssUrlEdits( QString const & css, QUrl const & base )
 {
   QVector< UrlEdit > edits;
   qsizetype p = 0;
@@ -180,12 +239,14 @@ inline QString resolveCss( QString const & css, QUrl const & base,
     }
     return qMin( end, css.size() );
   };
-  auto add = [&]( qsizetype start, qsizetype end ) {
+  auto add = [&]( qsizetype start, qsizetype end, bool unquoted = false ) {
     const QString raw = css.mid( start, end - start );
     // Leave CSS-escaped URLs alone instead of misinterpreting escape syntax.
     if ( raw.contains( '\\' ) ) return;
-    const QString value = resolvedTarget( raw, base, context );
-    if ( value != raw ) edits.append( { start, end - start, value } );
+    const QString target = raw.trimmed();
+    if ( target.isEmpty() ) return;
+    const QString value = resolvedTarget( target, base, unquoted ? UrlContext::CssUnquoted : UrlContext::Css );
+    if ( value != target ) edits.append( { start + raw.indexOf( target ), target.size(), value } );
   };
   while ( p < css.size() )
   {
@@ -224,15 +285,20 @@ inline QString resolveCss( QString const & css, QUrl const & base,
           p = end + 1; continue;
         }
         const auto end = css.indexOf( ')', value );
-        if ( end >= 0 ) { add( value, end ); p = end + 1; continue; }
+        if ( end >= 0 ) { add( value, end, true ); p = end + 1; continue; }
       }
     }
     ++p;
   }
-  return applyEdits( css, edits );
+  return edits;
 }
 
-inline QString resolveSrcset( QString const & text, QUrl const & base )
+inline QString resolveCss( QString const & css, QUrl const & base )
+{
+  return applyEdits( css, cssUrlEdits( css, base ) );
+}
+
+inline QVector< UrlEdit > srcsetUrlEdits( QString const & text, QUrl const & base )
 {
   QVector< UrlEdit > edits;
   qsizetype p = 0;
@@ -240,25 +306,53 @@ inline QString resolveSrcset( QString const & text, QUrl const & base )
   {
     while ( p < text.size() && ( text[p].isSpace() || text[p] == ',' ) ) ++p;
     const auto start = p;
-    // The HTML parser decodes the attribute before srcset tokenization. Do
-    // the same for the data: discriminator so an entity-encoded data URL's
-    // comma remains part of that candidate rather than starting a new one.
-    const bool data = startsAt( text, p, QStringLiteral( "data:" ) )
-                   || startsAt( decodeHtmlAttributeValue( text.mid( start ) ), 0,
-                                QStringLiteral( "data:" ) );
+    const bool data = startsAt( text, p, QStringLiteral( "data:" ) );
     while ( p < text.size() && !text[p].isSpace() && ( data || text[p] != ',' ) ) ++p;
     auto targetEnd = p;
     // A data URL may contain commas, but trailing commas delimit candidates
     // without descriptors rather than becoming part of the next candidate.
     while ( targetEnd > start && text[targetEnd - 1] == ',' ) --targetEnd;
     const QString raw = text.mid( start, targetEnd - start );
-    const QString value = resolvedTarget( raw, base, UrlContext::HtmlAttribute );
+    const QString value = resolvedTarget( raw, base );
     if ( raw != value ) edits.append( { start, targetEnd - start, value } );
     if ( targetEnd < p ) continue;
     if ( p < text.size() && text[p] == ',' ) { ++p; continue; }
     while ( p < text.size() && text[p] != ',' ) ++p;
   }
-  return applyEdits( text, edits );
+  return edits;
+}
+
+inline QString resolveNestedAttribute( QString const & raw, QUrl const & base, bool css )
+{
+  const auto decoded = decodeAttributeWithOffsets( raw );
+  const auto decodedEdits = css ? cssUrlEdits( decoded.text, base ) : srcsetUrlEdits( decoded.text, base );
+  QVector< UrlEdit > sourceEdits;
+  for ( auto const & edit : decodedEdits )
+  {
+    const auto start = decoded.boundaries[edit.start];
+    const auto end = decoded.boundaries[edit.start + edit.length];
+    sourceEdits.append( { start, end - start, serializeTarget( edit.value, UrlContext::HtmlAttribute ) } );
+  }
+  return applyEdits( raw, sourceEdits );
+}
+
+inline QString resolveSrcset( QString const & raw, QUrl const & base )
+{
+  return resolveNestedAttribute( raw, base, false );
+}
+
+inline void replaceUrlPlaceholder( QByteArray & result, QString const & word,
+                                   QByteArray const & placeholder, QString const & name )
+{
+  if ( !result.contains( placeholder ) ) return;
+  const auto warn = [&] {
+    qWarning( "Encoding: URL placeholder %s not representable in %s",
+              placeholder.constData(), qPrintable( name ) );
+  };
+  const auto codec = Encoding::byName( name );
+  if ( !codec ) { warn(); return; }
+  try { result.replace( placeholder, codec->encode( word ).toPercentEncoding() ); }
+  catch ( Encoding::exUnrepresentable const & ) { warn(); }
 }
 
 inline QByteArray substituteUrlPlaceholders( QByteArray const & urlTemplate, QString const & word )
@@ -266,11 +360,7 @@ inline QByteArray substituteUrlPlaceholders( QByteArray const & urlTemplate, QSt
   QByteArray result = urlTemplate;
   result.replace( "%25GDWORD%25", word.toUtf8().toPercentEncoding() );
   const auto replace = [&]( QByteArray const & placeholder, QString const & name ) {
-    if ( !result.contains( placeholder ) ) return;
-    const auto codec = Encoding::byName( name );
-    if ( !codec ) return;
-    try { result.replace( placeholder, codec->encode( word ).toPercentEncoding() ); }
-    catch ( Encoding::exUnrepresentable const & ) { /* Leave only this placeholder intact. */ }
+    replaceUrlPlaceholder( result, word, placeholder, name );
   };
   replace( "%25GD1251%25", QStringLiteral( "Windows-1251" ) );
   replace( "%25GDBIG5%25", QStringLiteral( "Big-5" ) );
@@ -312,24 +402,37 @@ inline QString resolveInlineUrls( QString const & html, QUrl const & documentUrl
   QVector< detail::UrlEdit > edits;
   for ( auto const & tag : tags )
   {
+    bool hasAction = false;
     for ( auto const & attr : tag.attributes )
     {
+      if ( attr.name == QStringLiteral( "action" ) ) hasAction = true;
       const QString raw = html.mid( attr.start, attr.length );
       QString value = raw;
       if ( attr.name == QStringLiteral( "style" ) )
-        value = detail::resolveCss( raw, base, detail::UrlContext::HtmlAttribute );
+        value = detail::resolveNestedAttribute( raw, base, true );
       else if ( attr.name == QStringLiteral( "srcset" ) ) value = detail::resolveSrcset( raw, base );
       else if ( attr.name == QStringLiteral( "src" ) || attr.name == QStringLiteral( "href" )
                 || attr.name == QStringLiteral( "action" ) || attr.name == QStringLiteral( "poster" ) )
       {
-        if ( tag.name == QStringLiteral( "form" ) && attr.name == QStringLiteral( "action" ) && raw.isEmpty() )
-          value = documentUrl.toString( QUrl::FullyEncoded );
+        if ( tag.name == QStringLiteral( "form" ) && attr.name == QStringLiteral( "action" )
+             && detail::decodeHtmlAttributeValue( raw ).isEmpty() )
+        {
+          value = detail::serializeTarget( documentUrl.toString( QUrl::FullyEncoded ), detail::UrlContext::HtmlAttribute );
+          if ( !attr.hasValue ) value = QStringLiteral( "=\"" ) + value + '"';
+        }
         else
           value = detail::resolvedTarget( raw,
                                           tag.name == QStringLiteral( "base" ) ? documentUrl : base,
                                           detail::UrlContext::HtmlAttribute );
       }
       if ( raw != value ) edits.append( { attr.start, attr.length, value } );
+    }
+    if ( tag.name == QStringLiteral( "form" ) && !hasAction )
+    {
+      auto at = tag.end - 1;
+      if ( at > tag.start && html[at - 1] == '/' ) --at;
+      const QString action = detail::serializeTarget( documentUrl.toString( QUrl::FullyEncoded ), detail::UrlContext::HtmlAttribute );
+      edits.append( { at, 0, QStringLiteral( " action=\"" ) + action + '"' } );
     }
   }
   for ( auto const & span : cssSpans )

@@ -18,8 +18,12 @@
 
 #include "encoding.hh"
 #include "gddebug.hh"
+#include "epwing_book.hh"
 #include "support/fixtures.hh"
 #include "website.hh"
+// The SLOB reader and formatter are private to their production module. Include
+// that module so these tests exercise the header-selection boundary directly.
+#include "slob.cc"
 #include <clocale>
 
 namespace {
@@ -63,9 +67,18 @@ private slots:
     void htmlDetectionSameLevelSourceOrder();
     void recoveryWarnsOncePerOperation();
     void localeValueIsDecodeOnly();
-    void localeTransitionShimDecodes();
+    void localeTransitionApiIsRetired();
+    void ownedParserPatternsAreValid();
+    void invalidOwnedParserPatternFailsOperation_data();
+    void invalidOwnedParserPatternFailsOperation();
+    void slobArticleFormattingPreservesNul();
     void websiteTemplateLeavesFailedEncodingPlaceholder();
+    void websiteTemplateWarnsForEveryFailedEncoding();
+    void websiteUnavailablePlaceholderCodecIsDiagnosed();
     void epwingRetryDoesNotFallBackToUtf8();
+    void epwingSkippedCharsetIsDiagnosed();
+    void slobHeaderCharsetFallback_data();
+    void slobHeaderCharsetFallback();
     void slobLegacyDecodePreservesBytes();
     void zipRawFilenameIsNotDisplayText();
     void loggingEmitsUtf8WithoutLocaleMutation();
@@ -518,17 +531,103 @@ void TstEncoding::localeValueIsDecodeOnly()
     }
 }
 
-void TstEncoding::localeTransitionShimDecodes()
+void TstEncoding::localeTransitionApiIsRetired()
 {
-    // Retain compatibility coverage for the decode-only logging shim even
-    // though indexedzip.cc and epwing_book.cc now consume Encoding values.
-    QTextCodec * const codec = gdCodecForLocale();
+    for ( const QString & name : { QStringLiteral( "gddebug.hh" ), QStringLiteral( "gddebug.cc" ) } )
+    {
+        QFile source( TestSupport::repositoryRoot() + '/' + name );
+        QVERIFY( source.open( QIODevice::ReadOnly ) );
+        const QByteArray text = source.readAll();
+        for ( const QByteArray & retired : { QByteArray( "GdLocaleDecodeOnlyCodec" ),
+                                            QByteArray( "QText" ) + "Codec", QByteArray( "gdCodecForLocale" ) } )
+            QVERIFY2( !text.contains( retired ), qPrintable( name + ": " + QString::fromLatin1( retired ) ) );
+    }
+}
+
+void TstEncoding::ownedParserPatternsAreValid()
+{
+    const auto & patterns = Slob::detail::articlePatterns();
+    const QRegularExpression * slobPatterns[] = { &patterns.resourceSource, &patterns.resourceLink,
+        &patterns.link, &patterns.pathPrefix, &patterns.htmlSuffix, &patterns.texImage,
+        &patterns.texFraction, &patterns.texSpaces, &patterns.texMultiplier };
+    for ( const auto * pattern : slobPatterns )
+        QVERIFY2( pattern->isValid(), qPrintable( pattern->pattern() + ": " + pattern->errorString() ) );
+    QVERIFY( patterns.resourceSource.match( QStringLiteral( "<img src=\"foo.png\">" ) ).hasMatch() );
+    QCOMPARE( patterns.link.match( QStringLiteral( "<a href=\"dir/title.html\">" ) ).captured( 3 ),
+              QStringLiteral( "dir/title.html" ) );
+    QVERIFY( patterns.texFraction.match( QStringLiteral( "\\dfrac" ) ).hasMatch() );
+    QCOMPARE( patterns.texMultiplier.match( QStringLiteral( "*{3}{cr}" ) ).captured( 3 ), QStringLiteral( "cr" ) );
+    QVERIFY( Epwing::Book::detail::badLinksPattern().isValid() );
+    QVERIFY( Epwing::Book::detail::badLinksPattern().match( QStringLiteral( "#v1" ) ).hasMatch() );
+    QVERIFY( Epwing::Book::detail::pronunciationPattern().isValid() );
+    QVERIFY( Epwing::Book::detail::pronunciationPattern().match( QStringLiteral( "word/pron/" ) ).hasMatch() );
+    QVERIFY( Epwing::Book::detail::referenceOpenPattern().isValid() );
+    QVERIFY( Epwing::Book::detail::referenceOpenPattern().match( QStringLiteral( "<R1>" ) ).hasMatch() );
+    QVERIFY( Epwing::Book::detail::referenceClosePattern().isValid() );
+    QVERIFY( Epwing::Book::detail::referenceClosePattern().match( QStringLiteral( "</R1>" ) ).hasMatch() );
+}
+
+void TstEncoding::invalidOwnedParserPatternFailsOperation_data()
+{
+    QTest::addColumn< bool >( "slob" );
+    QTest::newRow( "slob" ) << true;
+    QTest::newRow( "epwing" ) << false;
+}
+
+void TstEncoding::invalidOwnedParserPatternFailsOperation()
+{
+    QFETCH( bool, slob );
+    QTest::failOnWarning();
+    const QRegularExpression invalid( QStringLiteral( "(" ) );
+    const QByteArray diagnostic = ( slob ? QByteArray( "Slob" ) : QByteArray( "Epwing" ) )
+        + ": invalid pattern '(': " + invalid.errorString().toUtf8();
+    QTest::ignoreMessage( QtWarningMsg, diagnostic.constData() );
+    bool failed = false;
+    try
+    {
+        if ( slob ) Slob::detail::parserPattern( QStringLiteral( "(" ) );
+        else Epwing::Book::detail::parserPattern( QStringLiteral( "(" ) );
+    }
+    catch ( Slob::exCantDecodeFile const & error )
+    {
+        QVERIFY( slob );
+        QVERIFY( QString::fromUtf8( error.what() ).contains( invalid.errorString() ) );
+        failed = true;
+    }
+    catch ( Epwing::exEpwing const & error )
+    {
+        QVERIFY( !slob );
+        QVERIFY( QString::fromUtf8( error.what() ).contains( invalid.errorString() ) );
+        failed = true;
+    }
+    QVERIFY2( failed, "an invalid built-in must fail its operation in release builds" );
+}
+
+void TstEncoding::slobArticleFormattingPreservesNul()
+{
+    const auto codec = Encoding::byName( QStringLiteral( "WINDOWS-1251" ) );
     QVERIFY( codec );
-    const Encoding locale = Encoding::forLocale();
-    const QByteArray input = QByteArray::fromHex( "4100ffff42" );
-    QCOMPARE( codec->toUnicode( input.constData(), input.size() ), locale.decode( input ) );
-    QCOMPARE( codec->toUnicode( input ), locale.decode( input ) );
-    QCOMPARE( codec->toUnicode( "locale" ), locale.decode( QByteArrayLiteral( "locale" ) ) );
+    const QByteArray decoded = EncodingCallers::slobTextToUtf8( *codec, QByteArray::fromHex( "cf00f0" ) );
+    const std::string input( decoded.constData(), decoded.size() );
+    const Slob::RefEntry entry{};
+    const auto output = Slob::detail::convertArticle( input, entry, "dict", QString(), QString() );
+    QCOMPARE( QByteArray( output.data(), output.size() ), decoded + "<br style=\"clear:both;\" />" );
+    const std::string markup = input + "<a href=\"dir/A_B.html\">link</a><img src=\"icon.png\">";
+    const auto rewritten = Slob::detail::convertArticle( markup, entry, "dict", QString(), QString() );
+    QCOMPARE( QByteArray( rewritten.data(), rewritten.size() ), decoded
+        + "<a href=\"gdlookup://localhost/A%20B\" >link</a><img src=\"bres://dict/icon.png\"><br style=\"clear:both;\" />" );
+}
+
+void TstEncoding::websiteUnavailablePlaceholderCodecIsDiagnosed()
+{
+    QByteArray result( "%25GDUNKNOWN%25|%25GDWORD%25" );
+    QTest::failOnWarning();
+    QTest::ignoreMessage( QtWarningMsg,
+        "Encoding: URL placeholder %25GDUNKNOWN%25 not representable in x-final-unknown" );
+    WebSite::detail::replaceUrlPlaceholder( result, QString::fromUtf8( "中" ), "%25GDUNKNOWN%25",
+                                           QStringLiteral( "x-final-unknown" ) );
+    QCOMPARE( WebSite::detail::substituteUrlPlaceholders( result, QString::fromUtf8( "中" ) ),
+              QByteArray( "%25GDUNKNOWN%25|%E4%B8%AD" ) );
 }
 
 void TstEncoding::websiteTemplateLeavesFailedEncodingPlaceholder()
@@ -538,6 +637,91 @@ void TstEncoding::websiteTemplateLeavesFailedEncodingPlaceholder()
 
     QCOMPARE( WebSite::detail::substituteUrlPlaceholders( templ, word ),
               QByteArrayLiteral( "%25GD1251%25|%A4%A4|%E4%B8%AD" ) );
+}
+
+void TstEncoding::websiteTemplateWarnsForEveryFailedEncoding()
+{
+    QTest::failOnWarning();
+    QTest::ignoreMessage( QtWarningMsg,
+        "Encoding: URL placeholder %25GD1251%25 not representable in Windows-1251" );
+    QTest::ignoreMessage( QtWarningMsg,
+        "Encoding: URL placeholder %25GDISO1%25 not representable in ISO-8859-1" );
+    QCOMPARE( WebSite::detail::substituteUrlPlaceholders(
+                  "%25GD1251%25|%25GD1251%25|%25GDISO1%25|%25GDBIG5%25|%25GDWORD%25",
+                  QString::fromUtf8( "中" ) ),
+              QByteArray( "%25GD1251%25|%25GD1251%25|%25GDISO1%25|%A4%A4|%E4%B8%AD" ) );
+}
+
+void TstEncoding::epwingSkippedCharsetIsDiagnosed()
+{
+    QTest::failOnWarning();
+    const auto euc = Encoding::byName( QStringLiteral( "EUC-JP" ) );
+    const auto gb = Encoding::byName( QStringLiteral( "GB2312" ) );
+    QVERIFY( euc && gb );
+    QTest::ignoreMessage( QtWarningMsg, "Encoding: EPWING search skipped charset=EUC-JP" );
+    QCOMPARE( EncodingCallers::epwingSearchBytes( *euc, QString::fromUtf8( "汉" ) ), QByteArray() );
+    QCOMPARE( EncodingCallers::epwingSearchBytes( *gb, QString::fromUtf8( "汉" ) ).toHex(), QByteArray( "baba" ) );
+    QTest::ignoreMessage( QtWarningMsg, "Encoding: EPWING search skipped charset=EUC-JP" );
+    QCOMPARE( EncodingCallers::epwingSearchBytes( *euc, QString::fromUtf8( "😀" ) ), QByteArray() );
+    QTest::ignoreMessage( QtWarningMsg, "Encoding: EPWING search skipped charset=GB2312" );
+    QCOMPARE( EncodingCallers::epwingSearchBytes( *gb, QString::fromUtf8( "😀" ) ), QByteArray() );
+}
+
+void TstEncoding::slobHeaderCharsetFallback_data()
+{
+    QTest::addColumn< QByteArray >( "charset" );
+    QTest::addColumn< QByteArray >( "label" );
+    QTest::addColumn< QString >( "expectedName" );
+    QTest::addColumn< QString >( "expectedLabel" );
+    QTest::newRow( "utf8" ) << QByteArray( "UTF-8" ) << QByteArray::fromHex( "d09fd180" )
+        << QStringLiteral( "UTF-8" ) << QString::fromUtf8( "Пр" );
+    QTest::newRow( "cp1251" ) << QByteArray( "WINDOWS-1251" ) << QByteArray::fromHex( "cff0" )
+        << QStringLiteral( "WINDOWS-1251" ) << QString::fromUtf8( "Пр" );
+    QTest::newRow( "unknown" ) << QByteArray( "x-final-unknown" ) << QByteArray::fromHex( "d09fd180" )
+        << QStringLiteral( "UTF-8" ) << QString::fromUtf8( "Пр" );
+    QTest::newRow( "unknown-malformed" ) << QByteArray( "x-final-unknown" ) << QByteArray::fromHex( "41ff42" )
+        << QStringLiteral( "UTF-8" ) << QStringLiteral( "A\ufffdB" );
+}
+
+void TstEncoding::slobHeaderCharsetFallback()
+{
+    QFETCH( QByteArray, charset );
+    QFETCH( QByteArray, label );
+    QFETCH( QString, expectedName );
+    QFETCH( QString, expectedLabel );
+    QTemporaryDir directory;
+    QVERIFY( directory.isValid() );
+    QByteArray bytes = QByteArray::fromHex( "212d31534c4f421f" ) + QByteArray( 16, '\0' );
+    const auto tiny = [&]( QByteArray const & value ) { bytes += char( value.size() ); bytes += value; };
+    const auto big32 = [&]( quint32 value ) {
+        value = qToBigEndian( value );
+        bytes.append( reinterpret_cast< char const * >( &value ), sizeof( value ) );
+    };
+    const auto big64 = [&]( quint64 value ) {
+        value = qToBigEndian( value );
+        bytes.append( reinterpret_cast< char const * >( &value ), sizeof( value ) );
+    };
+    tiny( charset ); tiny( "none" );
+    bytes += char( 1 ); tiny( "label" ); tiny( label );
+    bytes += char( 0 ); // no content types or blobs
+    big32( 0 );
+    const quint64 storeOffset = bytes.size() + 8 + 8 + 4;
+    big64( storeOffset ); big64( storeOffset + 4 ); big32( 0 ); big32( 0 );
+    const QString path = directory.filePath( QStringLiteral( "header.slob" ) );
+    QFile output( path );
+    QVERIFY( output.open( QIODevice::WriteOnly ) );
+    QCOMPARE( output.write( bytes ), bytes.size() );
+    output.close();
+    QTest::failOnWarning();
+    if ( charset == "x-final-unknown" )
+        QTest::ignoreMessage( QtWarningMsg, "Encoding: unknown charset x-final-unknown; using UTF-8" );
+    if ( label.contains( char( 0xff ) ) )
+        QTest::ignoreMessage( QtWarningMsg, "Encoding decode recovered invalid input in UTF-8" );
+    Slob::SlobFile reader;
+    try { reader.open( path ); }
+    catch ( std::exception const & error ) { QFAIL( error.what() ); }
+    QCOMPARE( reader.getCodec().name(), expectedName );
+    QCOMPARE( reader.getDictionaryName(), expectedLabel );
 }
 
 void TstEncoding::epwingRetryDoesNotFallBackToUtf8()

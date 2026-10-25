@@ -13,6 +13,8 @@
 
 #include <QString>
 #include "encoding.hh"
+#include <QRegularExpression>
+#include "gddebug.hh"
 #include <QStack>
 #include <QMap>
 #include <QVector>
@@ -34,6 +36,45 @@ void initialize();
 void finalize();
 
 namespace Book {
+
+namespace detail {
+inline QRegularExpression parserPattern( QString const & source,
+    QRegularExpression::PatternOptions options = QRegularExpression::NoPatternOption )
+{
+  QRegularExpression pattern( source, options );
+  if( !pattern.isValid() )
+  {
+    const QString error = QStringLiteral( "invalid pattern '%1': %2" ).arg( source, pattern.errorString() );
+    gdWarning( "Epwing: %s", qPrintable( error ) );
+    throw exEpwing( error.toUtf8().toStdString() );
+  }
+  return pattern;
+}
+
+inline QRegularExpression const & badLinksPattern()
+{
+  static const auto pattern = parserPattern( QStringLiteral( "#(v|n)\\d" ) );
+  return pattern;
+}
+
+inline QRegularExpression const & pronunciationPattern()
+{
+  static const auto pattern = parserPattern( QStringLiteral( "/[^/]+/" ) );
+  return pattern;
+}
+
+inline QRegularExpression const & referenceOpenPattern()
+{
+  static const auto pattern = parserPattern( QStringLiteral( "<R[^<]*>" ) );
+  return pattern;
+}
+
+inline QRegularExpression const & referenceClosePattern()
+{
+  static const auto pattern = parserPattern( QStringLiteral( "</R[^<]*>" ) );
+  return pattern;
+}
+}
 
 using std::vector;
 using std::string;
