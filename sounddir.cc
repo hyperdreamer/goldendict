@@ -12,11 +12,11 @@
 #include "audiolink.hh"
 #include "wstring_qt.hh"
 #include "fsencoding.hh"
-#include "qt4x5.hh"
 
 #include <set>
 #include <QDir>
 #include <QFileInfo>
+#include <QUrl>
 #include <QDebug>
 
 namespace SoundDir {
@@ -31,6 +31,16 @@ using BtreeIndexing::IndexedWords;
 using BtreeIndexing::IndexInfo;
 
 namespace {
+
+/// The one structural leading slash of a resource URL.
+///
+/// Qt 6's QUrl::setPath() takes the path literally instead of making it
+/// absolute, so a URL with a host has to spell that slash out. A name which
+/// already starts with it is left unchanged, so the emitter never doubles it.
+QString resourceUrlPath( QString const & name )
+{
+  return name.startsWith( QLatin1Char( '/' ) ) ? name : QLatin1Char( '/' ) + name;
+}
 
 enum
 {
@@ -222,7 +232,7 @@ sptr< Dictionary::DataRequest > SoundDirDictionary::getArticle( wstring const & 
     QUrl url;
     url.setScheme( "gdau" );
     url.setHost( QString::fromUtf8( getId().c_str() ) );
-    url.setPath( Qt4x5::Url::ensureLeadingSlash( QString::number( chain[ i->second ].articleOffset ) ) );
+    url.setPath( resourceUrlPath( QString::number( chain[ i->second ].articleOffset ) ) );
 
     string ref = string( "\"" ) + url.toEncoded().data() + "\"";
 
@@ -266,7 +276,7 @@ sptr< Dictionary::DataRequest > SoundDirDictionary::getArticle( wstring const & 
     QUrl url;
     url.setScheme( "gdau" );
     url.setHost( QString::fromUtf8( getId().c_str() ) );
-    url.setPath( Qt4x5::Url::ensureLeadingSlash( QString::number( chain[ i->second ].articleOffset ) ) );
+    url.setPath( resourceUrlPath( QString::number( chain[ i->second ].articleOffset ) ) );
 
     string ref = string( "\"" ) + url.toEncoded().data() + "\"";
 

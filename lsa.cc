@@ -25,8 +25,6 @@
 #include <QDebug>
 #include <QFile>
 
-#include "qt4x5.hh"
-
 namespace Lsa {
 
 using std::string;
@@ -39,6 +37,16 @@ using BtreeIndexing::IndexedWords;
 using BtreeIndexing::IndexInfo;
 
 namespace {
+
+/// The one structural leading slash of a resource URL.
+///
+/// Qt 6's QUrl::setPath() takes the path literally instead of making it
+/// absolute, so a URL with a host has to spell that slash out. A name which
+/// already starts with it is left unchanged, so the emitter never doubles it.
+QString resourceUrlPath( QString const & name )
+{
+  return name.startsWith( QLatin1Char( '/' ) ) ? name : QLatin1Char( '/' ) + name;
+}
 
 DEF_EX( exInvalidData, "Invalid data encountered", Dictionary::Ex )
 DEF_EX( exFailedToOpenVorbisData, "Failed to open Vorbis data", Dictionary::Ex )
@@ -280,7 +288,7 @@ sptr< Dictionary::DataRequest > LsaDictionary::getArticle( wstring const & word,
     QUrl url;
     url.setScheme( "gdau" );
     url.setHost( QString::fromUtf8( getId().c_str() ) );
-    url.setPath( Qt4x5::Url::ensureLeadingSlash( QString::fromUtf8( i->second.c_str() ) ) );
+    url.setPath( resourceUrlPath( QString::fromUtf8( i->second.c_str() ) ) );
 
     string ref = string( "\"" ) + url.toEncoded().data() + "\"";
 
@@ -298,7 +306,7 @@ sptr< Dictionary::DataRequest > LsaDictionary::getArticle( wstring const & word,
     QUrl url;
     url.setScheme( "gdau" );
     url.setHost( QString::fromUtf8( getId().c_str() ) );
-    url.setPath( Qt4x5::Url::ensureLeadingSlash( QString::fromUtf8( i->second.c_str() ) ) );
+    url.setPath( resourceUrlPath( QString::fromUtf8( i->second.c_str() ) ) );
 
     string ref = string( "\"" ) + url.toEncoded().data() + "\"";
 
