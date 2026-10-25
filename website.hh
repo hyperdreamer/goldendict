@@ -2538,7 +2538,8 @@ inline QString resolvedTarget( QString const & raw, QUrl const & base,
   const QUrl relative( target );
   // Qt reports a leading NBSP before a colon as invalid but relative. The base
   // URL path still needs to be resolved when this opt-in is requested.
-  if ( ( !relative.isValid() && ( !allowInvalidRelative || !relative.isRelative() ) )
+  const bool allowInvalidNbspRelative = allowInvalidRelative && target.startsWith( QChar( 0x00a0 ) );
+  if ( ( !relative.isValid() && ( !allowInvalidNbspRelative || !relative.isRelative() ) )
        || !relative.scheme().isEmpty() ) return raw;
   const QUrl absolute = base.resolved( relative );
   if ( !absolute.isValid() || absolute.isRelative() ) return raw;
@@ -2716,7 +2717,9 @@ inline QString resolveInlineUrls( QString const & html, QUrl const & documentUrl
       const QString decoded = detail::asciiTrimmed( detail::decodeHtmlAttributeValue( raw ) );
       const QUrl candidate( decoded );
       const QUrl resolved = documentUrl.resolved( candidate );
-      if ( ( candidate.isValid() || candidate.isRelative() ) && resolved.isValid() && !resolved.isRelative()
+      const bool candidateIsInvalidNbspRelative = !candidate.isValid() && candidate.isRelative()
+        && decoded.startsWith( QChar( 0x00a0 ) );
+      if ( ( candidate.isValid() || candidateIsInvalidNbspRelative ) && resolved.isValid() && !resolved.isRelative()
            && ( resolved.scheme() == QStringLiteral( "http" ) || resolved.scheme() == QStringLiteral( "https" ) ) )
       { base = resolved; foundBase = true; break; }
     }
