@@ -21,7 +21,7 @@
 void FavoritesPaneWidget::setUp( Config::Class * cfg, QMenu * menu )
 {
   m_cfg = cfg;
-  m_favoritesTree = static_cast< TreeView * >( findChild< QTreeView * >( "favoritesTree" ) );
+  m_favoritesTree = findChild< TreeView * >( "favoritesTree" );
   QDockWidget * favoritesPane = qobject_cast< QDockWidget * >( parentWidget() );
   m_favoritesTree->setHeaderHidden( true );
 
