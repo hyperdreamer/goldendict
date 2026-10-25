@@ -40,3 +40,6 @@ GoldenDict.xcodeproj/
 *.opensdf
 *.suo
 *.vcxproj.user
+
+# CodeGraph index
+.codegraph/
