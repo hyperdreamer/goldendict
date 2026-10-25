@@ -239,14 +239,18 @@ void SplitZipFile::setFileName( const QString & name )
 
 QDateTime SplitZipFile::lastModified() const
 {
-  unsigned long ts = 0;
+  quint32 ts = 0;
   for( QVector< QFile * >::const_iterator i = files.begin(); i != files.end(); ++i )
   {
-    unsigned long t = QFileInfo( (*i)->fileName() ).lastModified().toTime_t();
+    quint32 t = 0;
+    if( !toOnDiskSeconds( QFileInfo( (*i)->fileName() ).lastModified(), t ) )
+      // The stored width cannot represent this part's time: report no
+      // timestamp at all rather than a truncated, different date.
+      return QDateTime();
     if( t > ts )
       ts = t;
   }
-  return QDateTime::fromTime_t( ts );
+  return QDateTime::fromSecsSinceEpoch( ts );
 }
 
 qint64 SplitZipFile::calcAbsoluteOffset( qint64 offset, quint16 partNo )
