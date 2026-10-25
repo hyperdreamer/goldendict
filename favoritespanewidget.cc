@@ -15,14 +15,13 @@
 #include "favoritespanewidget.hh"
 #include "gddebug.hh"
 #include "atomic_rename.hh"
-#include "qt4x5.hh"
 
 /************************************************** FavoritesPaneWidget *********************************************/
 
 void FavoritesPaneWidget::setUp( Config::Class * cfg, QMenu * menu )
 {
   m_cfg = cfg;
-  m_favoritesTree = findChild< TreeView * >( "favoritesTree" );
+  m_favoritesTree = static_cast< TreeView * >( findChild< QTreeView * >( "favoritesTree" ) );
   QDockWidget * favoritesPane = qobject_cast< QDockWidget * >( parentWidget() );
   m_favoritesTree->setHeaderHidden( true );
 
@@ -986,7 +985,7 @@ bool FavoritesModel::addNewHeadword( const QString & path, const QString & headw
 
   // Find or create target folder
 
-  QStringList folders = path.split( "/", Qt4x5::skipEmptyParts() );
+  QStringList folders = path.split( "/", Qt::SkipEmptyParts );
   QStringList::const_iterator it = folders.begin();
   for( ; it != folders.end(); ++it )
     parentIdx = forceFolder( *it, parentIdx );
@@ -1002,7 +1001,7 @@ bool FavoritesModel::removeHeadword( const QString & path, const QString & headw
 
   // Find target folder
 
-  QStringList folders = path.split( "/", Qt4x5::skipEmptyParts() );
+  QStringList folders = path.split( "/", Qt::SkipEmptyParts );
   QStringList::const_iterator it = folders.begin();
   for( ; it != folders.end(); ++it )
   {
@@ -1032,7 +1031,7 @@ bool FavoritesModel::isHeadwordPresent( const QString & path, const QString & he
 
   // Find target folder
 
-  QStringList folders = path.split( "/", Qt4x5::skipEmptyParts() );
+  QStringList folders = path.split( "/", Qt::SkipEmptyParts );
   QStringList::const_iterator it = folders.begin();
   for( ; it != folders.end(); ++it )
   {

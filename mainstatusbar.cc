@@ -43,11 +43,7 @@ MainStatusBar::MainStatusBar( QWidget *parent ) : QWidget( parent )
 
 bool MainStatusBar::hasImage() const
 {
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 15, 0 )
   return !picWidget->pixmap( Qt::ReturnByValue ).isNull();
-#else
-  return !picWidget->pixmap()->isNull();
-#endif
 }
 
 void MainStatusBar::clearMessage()

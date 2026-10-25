@@ -5,8 +5,6 @@
 #include <QtGui>
 #include <QSysInfo>
 
-#include "qt4x5.hh"
-
 About::About( QWidget * parent ): QDialog( parent )
 {
   ui.setupUi( this );
@@ -44,7 +42,7 @@ About::About( QWidget * parent ): QDialog( parent )
   {
     QStringList creditsList =
       QString::fromUtf8(
-        creditsFile.readAll() ).split( '\n', Qt4x5::skipEmptyParts() );
+        creditsFile.readAll() ).split( '\n', Qt::SkipEmptyParts );
 
     QString html = "<html><body style='color: black; background: #f4f4f4;'>";
 
@@ -54,7 +52,7 @@ About::About( QWidget * parent ): QDialog( parent )
 
       str.replace( "\\", "@" );
 
-      str = Qt4x5::escape( str );
+      str = str.toHtmlEscaped();
 
       int colon = str.indexOf( ":" );
 
