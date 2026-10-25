@@ -804,7 +804,14 @@ void TstLinkRewrite::websiteNonAsciiWhitespaceIsUrlData_data()
         << QStringLiteral( "<img src='  image.png\t'>" ) << QStringLiteral( "src" )
         << QStringLiteral( "<img src='  https://example.test/dir/image.png\t'>" )
         << QStringLiteral( "  https://example.test/dir/image.png\t" );
+    // A base href's NBSP is URL data: the base used for other URLs must match
+    // the value the browser would see.
+    QTest::newRow( "base-href-nbsp-is-data" )
+        << QStringLiteral( "<base href='&#160;other/'><img src='image.png'>" ) << QStringLiteral( "src" )
+        << QStringLiteral( "<base href='https://example.test/dir/%C2%A0other/'><img src='https://example.test/dir/%C2%A0other/image.png'>" )
+        << QStringLiteral( "https://example.test/dir/%C2%A0other/image.png" );
 }
+
 
 void TstLinkRewrite::websiteNonAsciiWhitespaceIsUrlData()
 {

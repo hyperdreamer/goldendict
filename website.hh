@@ -2708,8 +2708,8 @@ inline QString resolveInlineUrls( QString const & html, QUrl const & documentUrl
     for ( auto const & attr : tag.attributes )
     {
       if ( attr.name != QStringLiteral( "href" ) ) continue;
-      const QString raw = html.mid( attr.start, attr.length ).trimmed();
-      const QString decoded = detail::decodeHtmlAttributeValue( raw ).trimmed();
+      const QString raw = detail::asciiTrimmed( html.mid( attr.start, attr.length ) );
+      const QString decoded = detail::asciiTrimmed( detail::decodeHtmlAttributeValue( raw ) );
       const QUrl candidate( decoded );
       const QUrl resolved = documentUrl.resolved( candidate );
       if ( candidate.isValid() && resolved.isValid() && !resolved.isRelative()
@@ -2774,16 +2774,26 @@ inline QString mapStylesheets( QString const & html, QString const & dictionaryI
     for ( auto const & attr : tag.attributes )
       if ( attr.name == QStringLiteral( "rel" ) )
       {
-        const QString rel = html.mid( attr.start, attr.length ).simplified();
-        stylesheet = rel.split( ' ', Qt::SkipEmptyParts )
-                         .contains( QStringLiteral( "stylesheet" ), Qt::CaseInsensitive );
+        // rel is an ASCII-whitespace-separated keyword list; U+00A0 belongs to a
+        // token rather than separating one.
+        QString const rel = detail::decodeHtmlAttributeValue(
+            detail::asciiTrimmed( html.mid( attr.start, attr.length ) ) );
+        QStringList keywords;
+        QString current;
+        for ( QChar const c : rel )
+        {
+          if ( detail::isAsciiSpace( c ) ) { if ( !current.isEmpty() ) { keywords.append( current ); current.clear(); } }
+          else current.append( c );
+        }
+        if ( !current.isEmpty() ) keywords.append( current );
+        stylesheet = keywords.contains( QStringLiteral( "stylesheet" ), Qt::CaseInsensitive );
       }
     if ( !stylesheet ) continue;
     for ( auto const & attr : tag.attributes )
       if ( attr.name == QStringLiteral( "href" ) )
       {
         const QString raw = html.mid( attr.start, attr.length );
-        const QString target = raw.trimmed();
+        const QString target = detail::asciiTrimmed( raw );
         // The browser normally decodes character references in href. Once the
         // URL is nested in a percent-encoded path, perform that step explicitly
         // so &amp; remains a remote query separator rather than an "amp;" key.
