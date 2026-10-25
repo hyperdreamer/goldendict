@@ -40,6 +40,7 @@
 #include "audiolink.hh"
 #include "linkrewrite.hh"
 #include "support/fixtures.hh"
+#include "website.hh"
 
 namespace
 {
@@ -280,6 +281,9 @@ class TstLinkRewrite : public QObject
 
     void fixtureLedgerIsComplete();
     void fixtureRowsMatchProduction();
+    void websiteResolverUsesProductionBase();
+    void websiteResolverRowsMatchProduction();
+    void websiteStylesheetMappingPreservesRemoteUrl();
 
     void gdLookupPreservesStructureAndIsIdempotent();
     void gdLookupNormalizesOnlyThePathHeadword();
@@ -451,6 +455,66 @@ void TstLinkRewrite::fixtureRowsMatchProduction()
                 .arg( problems.size() )
                 .arg( rowCount )
                 .arg( details ) ) );
+}
+
+void TstLinkRewrite::websiteResolverUsesProductionBase()
+{
+    const QUrl base( QStringLiteral( "http://127.0.0.1:43127/dir/page?q=1" ) );
+    QCOMPARE( WebSite::resolveInlineUrls( QStringLiteral( "<img src=\"../img.png\"><form action=\"\">" ), base ),
+              QStringLiteral( "<img src=\"http://127.0.0.1:43127/img.png\"><form action=\"http://127.0.0.1:43127/dir/page?q=1\">" ) );
+}
+
+void TstLinkRewrite::websiteResolverRowsMatchProduction()
+{
+    const QJsonObject cases = loadCases();
+    const QJsonArray rows = cases.value( QStringLiteral( "websiteResolver" ) ).toArray();
+    QVERIFY2( !rows.isEmpty(), "websiteResolver fixture section has no rows" );
+
+    QStringList problems;
+    for ( QJsonValue const & value : rows )
+    {
+        const QJsonObject row = value.toObject();
+        const QString id = row.value( QStringLiteral( "id" ) ).toString();
+        const QString input = row.value( QStringLiteral( "input" ) ).toString();
+        const QString expected = row.value( QStringLiteral( "expected" ) ).toString();
+        const QUrl documentUrl( row.value( QStringLiteral( "documentUrl" ) ).toString() );
+        const QString actual = WebSite::resolveInlineUrls( input, documentUrl );
+
+        if ( actual != expected )
+        {
+            problems << diff( QStringLiteral( "websiteResolver/%1" ).arg( id ),
+                              QStringLiteral( "output" ), actual, expected );
+            continue;
+        }
+
+        if ( row.value( QStringLiteral( "twice" ) ).toBool( false ) )
+        {
+            const QString again = WebSite::resolveInlineUrls( expected, documentUrl );
+            if ( again != expected )
+                problems << diff( id, QStringLiteral( "second pass" ), again, expected );
+        }
+    }
+
+    QVERIFY2( problems.isEmpty(), qPrintable( problems.join( '\n' ) ) );
+}
+
+void TstLinkRewrite::websiteStylesheetMappingPreservesRemoteUrl()
+{
+    const QUrl base( QStringLiteral( "http://127.0.0.1:43127/dir/page?q=1" ) );
+    const QString source = QStringLiteral( "<link href='../css/site%20a.css?q=1&amp;x=2#part' rel='alternate\tSTYLESHEET'>" );
+    const QString resolved = WebSite::resolveInlineUrls( source, base );
+    QCOMPARE( resolved, QStringLiteral( "<link href='http://127.0.0.1:43127/css/site%20a.css?q=1&amp;x=2#part' rel='alternate\tSTYLESHEET'>" ) );
+    const QString mapped = WebSite::detail::mapStylesheets( resolved, QStringLiteral( "dict-id" ) );
+    QCOMPARE( mapped, QStringLiteral( "<link href='bres://dict-id/http%3A%2F%2F127.0.0.1%3A43127%2Fcss%2Fsite%2520a.css%3Fq%3D1%26x%3D2%23part' rel='alternate\tSTYLESHEET'>" ) );
+    QCOMPARE( WebSite::detail::mapStylesheets( mapped, QStringLiteral( "dict-id" ) ), mapped );
+    QCOMPARE( WebSite::detail::mapStylesheets(
+                  QStringLiteral( "<link rel=stylesheet href='  https://example.test/site.css  '>" ),
+                  QStringLiteral( "dict-id" ) ),
+              QStringLiteral( "<link rel=stylesheet href='  bres://dict-id/https%3A%2F%2Fexample.test%2Fsite.css  '>" ) );
+    QCOMPARE( WebSite::detail::resolveCss(
+                  QStringLiteral( "@import '../theme.css'; .x{background:url(../img.png)}" ),
+                  QUrl( QStringLiteral( "http://127.0.0.1:43127/css/final/site.css" ) ) ),
+              QStringLiteral( "@import 'http://127.0.0.1:43127/css/theme.css'; .x{background:url(http://127.0.0.1:43127/css/img.png)}" ) );
 }
 
 void TstLinkRewrite::gdLookupPreservesStructureAndIsIdempotent()

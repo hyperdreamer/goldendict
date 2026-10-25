@@ -12,7 +12,8 @@
 #include "mutex.hh"
 
 #include <QString>
-#include <QTextCodec>
+#include "encoding.hh"
+#include <QStack>
 #include <QMap>
 #include <QVector>
 #include <vector>
@@ -68,7 +69,7 @@ class EpwingBook
   QString mainCacheDir, rootDir;
   QString cacheImagesDir, cacheSoundsDir, cacheMoviesDir, cacheFontsDir;
   QString dictID;
-  QTextCodec * codec_ISO, * codec_GB, * codec_Euc;
+  Encoding codec_ISO, codec_GB, codec_Euc;
   QStack< unsigned int > decorationStack;
   int monoWidth, monoHeight;
   QStringList imageCacheList, soundsCacheList, moviesCacheList, fontsCacheList;
@@ -120,13 +121,13 @@ public:
   QString const &errorString() const
   { return error_string; }
 
-  QTextCodec * codecISO()
+  Encoding const & codecISO() const
   { return codec_ISO; }
 
-  QTextCodec * codecGB()
+  Encoding const & codecGB() const
   { return codec_GB; }
 
-  QTextCodec *codecEuc()
+  Encoding const & codecEuc() const
   { return codec_Euc; }
 
   int getSubBookCount()

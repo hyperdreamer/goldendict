@@ -5,6 +5,7 @@
 #include "zipfile.hh"
 #include <zlib.h>
 #include "gddebug.hh"
+#include "encoding.hh"
 #include "utf8.hh"
 #include "iconv.hh"
 #include "wstring_qt.hh"
@@ -133,7 +134,7 @@ bool IndexedZip::indexFile( BtreeIndexing::IndexedWords &zipFileNames, quint32 *
     // File seems to be a valid zip file
 
 
-    QTextCodec * const localeCodec = gdCodecForLocale();
+    const Encoding localeCodec = Encoding::forLocale();
 
     ZipFile::CentralDirEntry entry;
 
@@ -209,10 +210,9 @@ bool IndexedZip::indexFile( BtreeIndexing::IndexedWords &zipFileNames, quint32 *
           wstring nameInSystemLocale;
 
           // System locale
-          if( localeCodec )
+          if( localeCodec.isValid() )
           {
-            QString name = localeCodec->toUnicode( entry.fileName.constData(),
-                                                   entry.fileName.size() );
+            const QString name = EncodingCallers::zipFilenameForDisplay( localeCodec, entry.fileName );
             nameInSystemLocale = gd::toWString( name );
             if( !nameInSystemLocale.empty() )
             {

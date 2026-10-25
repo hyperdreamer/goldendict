@@ -19,6 +19,8 @@
 #include "encoding.hh"
 #include "gddebug.hh"
 #include "support/fixtures.hh"
+#include "website.hh"
+#include <clocale>
 
 namespace {
 
@@ -62,6 +64,11 @@ private slots:
     void recoveryWarnsOncePerOperation();
     void localeValueIsDecodeOnly();
     void localeTransitionShimDecodes();
+    void websiteTemplateLeavesFailedEncodingPlaceholder();
+    void epwingRetryDoesNotFallBackToUtf8();
+    void slobLegacyDecodePreservesBytes();
+    void zipRawFilenameIsNotDisplayText();
+    void loggingEmitsUtf8WithoutLocaleMutation();
     void immutableValueConvertsInParallel();
 };
 
@@ -513,8 +520,8 @@ void TstEncoding::localeValueIsDecodeOnly()
 
 void TstEncoding::localeTransitionShimDecodes()
 {
-    // Keep the exact pointer spelling and overloads used by indexedzip.cc and
-    // epwing_book.cc until their owning task migrates the callers.
+    // Retain compatibility coverage for the decode-only logging shim even
+    // though indexedzip.cc and epwing_book.cc now consume Encoding values.
     QTextCodec * const codec = gdCodecForLocale();
     QVERIFY( codec );
     const Encoding locale = Encoding::forLocale();
@@ -522,6 +529,71 @@ void TstEncoding::localeTransitionShimDecodes()
     QCOMPARE( codec->toUnicode( input.constData(), input.size() ), locale.decode( input ) );
     QCOMPARE( codec->toUnicode( input ), locale.decode( input ) );
     QCOMPARE( codec->toUnicode( "locale" ), locale.decode( QByteArrayLiteral( "locale" ) ) );
+}
+
+void TstEncoding::websiteTemplateLeavesFailedEncodingPlaceholder()
+{
+    const QString word = QString::fromUtf8( "\xe4\xb8\xad" );
+    const QByteArray templ = QByteArrayLiteral( "%25GD1251%25|%25GDBIG5%25|%25GDWORD%25" );
+
+    QCOMPARE( WebSite::detail::substituteUrlPlaceholders( templ, word ),
+              QByteArrayLiteral( "%25GD1251%25|%A4%A4|%E4%B8%AD" ) );
+}
+
+void TstEncoding::epwingRetryDoesNotFallBackToUtf8()
+{
+    const auto euc = Encoding::byName( QStringLiteral( "EUC-JP" ) );
+    const auto gb = Encoding::byName( QStringLiteral( "GB2312" ) );
+    QVERIFY( euc );
+    QVERIFY( gb );
+
+    // Traditional Han has no GB2312 representation; simplified Han requires
+    // the second (GB2312) attempt. Neither failure may become UTF-8 bytes.
+    const QString traditional = QString::fromUtf8( "\xe6\xbc\xa2" );
+    QCOMPARE( EncodingCallers::epwingSearchBytes( *euc, traditional ).toHex(), QByteArrayLiteral( "b4c1" ) );
+    QCOMPARE( EncodingCallers::epwingSearchBytes( *gb, traditional ), QByteArray() );
+    const QString han = QString::fromUtf8( "\xe6\xb1\x89" );
+    QCOMPARE( EncodingCallers::epwingSearchBytes( *euc, han ), QByteArray() );
+    QCOMPARE( EncodingCallers::epwingSearchBytes( *gb, han ).toHex(), QByteArrayLiteral( "baba" ) );
+    const QString emoji = QString::fromUtf8( "\xf0\x9f\x98\x80" );
+    QCOMPARE( EncodingCallers::epwingSearchBytes( *euc, emoji ), QByteArray() );
+    QCOMPARE( EncodingCallers::epwingSearchBytes( *gb, emoji ), QByteArray() );
+}
+
+void TstEncoding::slobLegacyDecodePreservesBytes()
+{
+    const auto windows1251 = Encoding::byName( QStringLiteral( "WINDOWS-1251" ) );
+    QVERIFY( windows1251 );
+    const QByteArray raw = QByteArray::fromHex( "cff0e8e2e5f2" );
+    const QByteArray snapshot = raw;
+
+    QCOMPARE( EncodingCallers::slobTextToUtf8( *windows1251, raw ).toHex(),
+              QByteArrayLiteral( "d09fd180d0b8d0b2d0b5d182" ) );
+    QCOMPARE( EncodingCallers::slobTextToUtf8( *windows1251, QByteArray::fromHex( "cf00f0" ) ).toHex(),
+              QByteArrayLiteral( "d09f00d180" ) );
+    QCOMPARE( raw, snapshot );
+    QCOMPARE( raw.toHex(), QByteArrayLiteral( "cff0e8e2e5f2" ) );
+}
+
+void TstEncoding::zipRawFilenameIsNotDisplayText()
+{
+    const QByteArray raw = QByteArray::fromHex( "cff0e8e2e5f22e747874" );
+    const auto codec = Encoding::byName( QStringLiteral( "WINDOWS-1251" ) );
+    QVERIFY( codec );
+    QCOMPARE( EncodingCallers::zipFilenameForDisplay( *codec, raw ).toUtf8().toHex(),
+              QByteArrayLiteral( "d09fd180d0b8d0b2d0b5d1822e747874" ) );
+    QCOMPARE( raw.toHex(), QByteArrayLiteral( "cff0e8e2e5f22e747874" ) );
+}
+
+void TstEncoding::loggingEmitsUtf8WithoutLocaleMutation()
+{
+    const QByteArray processLocale = std::setlocale( LC_ALL, nullptr );
+    const QString encodingName = Encoding::forLocale().name();
+    QTest::ignoreMessage( QtWarningMsg, "UTF-8: \xe4\xb8\xad" );
+    const QByteArray message = QString::fromUtf8( "\xe4\xb8\xad" ).toUtf8();
+    gdWarning( "UTF-8: %s", message.constData() );
+    QCOMPARE( QByteArray( std::setlocale( LC_ALL, nullptr ) ), processLocale );
+    QCOMPARE( Encoding::forLocale().name(), encodingName );
 }
 
 void TstEncoding::immutableValueConvertsInParallel()

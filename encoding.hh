@@ -62,4 +62,13 @@ private:
     bool decodeOnly_;
 };
 
+// Private conversion policies shared by the legacy engine callers and their
+// pure tests. Raw container bytes are always inputs, never rewritten in place.
+namespace EncodingCallers
+{
+QByteArray epwingSearchBytes( Encoding const & codec, QString const & word );
+QByteArray slobTextToUtf8( Encoding const & codec, QByteArray const & bytes );
+QString zipFilenameForDisplay( Encoding const & locale, QByteArray const & bytes );
+}
+
 #endif // GOLDENDICT_ENCODING_HH_INCLUDED

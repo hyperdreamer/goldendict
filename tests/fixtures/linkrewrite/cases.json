@@ -7,6 +7,107 @@
     "Every rule tokenizes the original input once: tags are recognized by their complete name, attribute values are classified individually, and 'url(' is CSS only outside tags and inside style attribute values. The rows below pin that no rule edits text another rule emitted, and that no attribute value is rescanned as markup or CSS."
   ],
 
+  "websiteResolver": [
+    {
+      "id": "first-valid-base-ignores-later-base",
+      "documentUrl": "https://example.test/dir/page",
+      "input": "<base href='javascript:void(0)'><base href='/first/'><base href='/second/'><img src=a.png>",
+      "expected": "<base href='javascript:void(0)'><base href='https://example.test/first/'><base href='https://example.test/second/'><img src=https://example.test/first/a.png>",
+      "twice": true
+    },
+    {
+      "id": "srcset-data-candidate-without-descriptor",
+      "documentUrl": "https://example.test/dir/page",
+      "input": "<img srcset='data:image/png;base64,AAAA, next.png 2x'>",
+      "expected": "<img srcset='data:image/png;base64,AAAA, https://example.test/dir/next.png 2x'>",
+      "twice": true
+    },
+    {
+      "id": "css-only-outside-tags-or-style-values",
+      "documentUrl": "https://example.test/dir/page",
+      "input": "url( bg.png )<div title=\"url(untouched.png)\" style=\"background:url( icon.png )\"></div><!-- url(comment.png) --><script>url(script.png)</script><textarea>url(text.png)<img src=ignored.png></textarea><title>url(title.png)</title>",
+      "expected": "url( https://example.test/dir/bg.png )<div title=\"url(untouched.png)\" style=\"background:url( https://example.test/dir/icon.png )\"></div><!-- url(comment.png) --><script>url(script.png)</script><textarea>url(text.png)<img src=ignored.png></textarea><title>url(title.png)</title>",
+      "twice": true
+    },
+    {
+      "id": "url-padding-and-stylesheet-end-boundary",
+      "documentUrl": "https://example.test/dir/page",
+      "input": "<img src='  ../img.png  '><style>.x{content:'</stylesheet>';background:url(bg.png)}</style>",
+      "expected": "<img src='  https://example.test/img.png  '><style>.x{content:'</stylesheet>';background:url(https://example.test/dir/bg.png)}</style>",
+      "twice": true
+    },
+    {
+      "id": "css-quotes-escapes-and-trailing-import",
+      "documentUrl": "https://example.test/dir/page",
+      "input": "<style>.x{background:url('a(b).png');content:'url(ignored.png)'}/* url(no.png) */ @import </style>",
+      "expected": "<style>.x{background:url('https://example.test/dir/a(b).png');content:'url(ignored.png)'}/* url(no.png) */ @import </style>",
+      "twice": true
+    },
+    {
+      "id": "first-relative-and-empty-form-action",
+      "documentUrl": "http://127.0.0.1:43127/dir/page?q=1",
+      "input": "<img src=\"../img.png\"><form action=\"\">",
+      "expected": "<img src=\"http://127.0.0.1:43127/img.png\"><form action=\"http://127.0.0.1:43127/dir/page?q=1\">",
+      "twice": true
+    },
+    {
+      "id": "query-and-root-relative-preserve-page-and-port",
+      "documentUrl": "http://127.0.0.1:43127/dir/page?q=1",
+      "input": "<img src=\"?q=2\"><img src=\"/other/image.png\">",
+      "expected": "<img src=\"http://127.0.0.1:43127/dir/page?q=2\"><img src=\"http://127.0.0.1:43127/other/image.png\">",
+      "twice": true
+    },
+    {
+      "id": "first-valid-base-wins",
+      "documentUrl": "http://127.0.0.1:43127/dir/page?q=1",
+      "input": "<base href=\"://invalid\"><base href=\"/other/\"><img src=\"image.png\">",
+      "expected": "<base href=\"://invalid\"><base href=\"http://127.0.0.1:43127/other/\"><img src=\"http://127.0.0.1:43127/other/image.png\">",
+      "twice": true
+    },
+    {
+      "id": "protocol-relative-and-fragment-exclusion",
+      "documentUrl": "https://example.test/dir/page",
+      "input": "<img src=\"//cdn.example.test/image.png\"><a href=\"#part\">part</a>",
+      "expected": "<img src=\"https://cdn.example.test/image.png\"><a href=\"#part\">part</a>",
+      "twice": true
+    },
+    {
+      "id": "mixed-case-quotes-and-unquoted-attributes",
+      "documentUrl": "https://example.test/dir/page",
+      "input": "<IMG SRC='image.png'><script src=script.js></script><FORM ACTION=submit><video POSTER=poster.png></video>",
+      "expected": "<IMG SRC='https://example.test/dir/image.png'><script src=https://example.test/dir/script.js></script><FORM ACTION=https://example.test/dir/submit><video POSTER=https://example.test/dir/poster.png></video>",
+      "twice": true
+    },
+    {
+      "id": "srcset-candidates-and-data-exclusion",
+      "documentUrl": "https://example.test/dir/page",
+      "input": "<img srcset=\"one.png 1x, /two.png 2x, data:image/png;base64,AAAA 3x\"><div data-src=\"raw.png\"></div>",
+      "expected": "<img srcset=\"https://example.test/dir/one.png 1x, https://example.test/two.png 2x, data:image/png;base64,AAAA 3x\"><div data-src=\"raw.png\"></div>",
+      "twice": true
+    },
+    {
+      "id": "css-url-import-and-comment-tokenization",
+      "documentUrl": "https://example.test/dir/page",
+      "input": "<style>/* url(ignored.png) */ @import \"theme.css\"; .x{background:url('../img/a.png')}</style><div style=\"background:url(data:image/png;base64,AAAA)\"></div>",
+      "expected": "<style>/* url(ignored.png) */ @import \"https://example.test/dir/theme.css\"; .x{background:url('https://example.test/img/a.png')}</style><div style=\"background:url(data:image/png;base64,AAAA)\"></div>",
+      "twice": true
+    },
+    {
+      "id": "stylesheet-keeps-complete-absolute-url",
+      "documentUrl": "http://127.0.0.1:43127/dir/page?q=1",
+      "input": "<link href=\"../css/site.css\" rel=\"stylesheet\">",
+      "expected": "<link href=\"http://127.0.0.1:43127/css/site.css\" rel=\"stylesheet\">",
+      "twice": true
+    },
+    {
+      "id": "absolute-and-script-comment-text-untouched",
+      "documentUrl": "https://example.test/dir/page",
+      "input": "<!-- <img src=\"ignored.png\"> --><script>\"<img src='ignored.png'>\"</script><img src=\"https://cdn.example/a.png\"><a href=\"mailto:a@example.test\">mail</a><a href=\"tel:+1\">tel</a><a href=\"javascript:void(0)\">js</a>",
+      "expected": "<!-- <img src=\"ignored.png\"> --><script>\"<img src='ignored.png'>\"</script><img src=\"https://cdn.example/a.png\"><a href=\"mailto:a@example.test\">mail</a><a href=\"tel:+1\">tel</a><a href=\"javascript:void(0)\">js</a>",
+      "twice": true
+    }
+  ],
+
   "gdLookup": [
     {
       "id": "entity-nbsp-headword",

@@ -28,17 +28,14 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QDir>
-#include <QTextCodec>
+#include "encoding.hh"
 #include <QMap>
 #include <QPair>
-#include <QRegExp>
 #include <QProcess>
 #include <QVector>
 #include <QtAlgorithms>
 
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
 #include <QRegularExpression>
-#endif
 
 #include <string>
 #include <vector>
@@ -132,7 +129,7 @@ private:
   Compressions compression;
   QString encoding;
   unsigned char uuid[ 16 ];
-  QTextCodec *codec;
+  Encoding codec;
   QMap< QString, QString > tags;
   QVector< QString > contentTypes;
   quint32 blobCount;
@@ -152,7 +149,6 @@ private:
 public:
   SlobFile() :
     compression( UNKNOWN )
-  , codec( 0 )
   , blobCount( 0 )
   , storeOffset( 0 )
   , fileSize( 0 )
@@ -188,7 +184,7 @@ public:
   quint32 getContentTypesCount() const
   { return contentTypesCount; }
 
-  QTextCodec * getCodec() const
+  Encoding const & getCodec() const
   { return codec; }
 
   const RefOffsetsVector & getSortedRefOffsets();
@@ -221,10 +217,10 @@ QString SlobFile::readString( unsigned length )
   QByteArray data = file.read( length );
   QString str;
 
-  if( codec != 0 && !data.isEmpty() )
-    str = codec->toUnicode( data );
+  if( codec.isValid() && !data.isEmpty() )
+    str = codec.decode( data );
   else
-    str = QString( data );
+    str = QString::fromUtf8( data );
 
   char term = 0;
   int n = str.indexOf( term );
@@ -303,12 +299,13 @@ QString error( name + ": " );
 
     encoding = readTinyText();
 
-    codec = QTextCodec::codecForName( encoding.toLatin1() );
-    if( codec == 0 )
+    const auto selectedCodec = Encoding::byName( encoding );
+    if( !selectedCodec )
     {
       error = QString( "for encoding \"") + encoding + "\"";
       throw exNoCodecFound( string( error.toUtf8().data() ) );
     }
+    codec = *selectedCodec;
 
     // Read compression type
 
@@ -823,12 +820,13 @@ string SlobDictionary::convert( const string & in, RefEntry const & entry )
 
 #if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
   // pattern of img and script
-  text.replace( QRegularExpression( "<\\s*(img|script)\\s+([^>]*)src=\"(?!(?:data|https?|ftp):)(|/)([^\"]*)\"" ),
-                QString( "<\\1 \\2src=\"bres://%1/\\4\"").arg( getId().c_str() ) );
+  static const QRegularExpression resourceSource( QStringLiteral( "<\\s*(img|script)\\s+([^>]*)src=\"(?!(?:data|https?|ftp):)(|/)([^\"]*)\"" ) );
+  static const QRegularExpression resourceLink( QStringLiteral( "<\\s*link\\s+([^>]*)href=\"(?!(?:data|https?|ftp):)" ) );
+  Q_ASSERT( resourceSource.isValid() && resourceLink.isValid() );
+  text.replace( resourceSource, QString( "<\\1 \\2src=\"bres://%1/\\4\"").arg( getId().c_str() ) );
 
   // pattern <link... href="..." ...>
-  text.replace( QRegularExpression( "<\\s*link\\s+([^>]*)href=\"(?!(?:data|https?|ftp):)" ),
-                QString( "<link \\1href=\"bres://%1/").arg( getId().c_str() ) );
+  text.replace( resourceLink, QString( "<link \\1href=\"bres://%1/").arg( getId().c_str() ) );
 #else
   // pattern of img and script
   text.replace( QRegExp( "<\\s*(img|script)\\s+([^>]*)src=\"(?!(?:data|https?|ftp):)(|/)([^\"]*)\"" ),
@@ -843,7 +841,8 @@ string SlobDictionary::convert( const string & in, RefEntry const & entry )
   // these links will be translated into local definitions
   QString anchor;
 #if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-  QRegularExpression rxLink( "<\\s*a\\s+([^>]*)href=\"(?!(?:\\w+://|#|mailto:|tel:))(/|)([^\"]*)\"\\s*(title=\"[^\"]*\")?[^>]*>" );
+  static const QRegularExpression rxLink( QStringLiteral( "<\\s*a\\s+([^>]*)href=\"(?!(?:\\w+://|#|mailto:|tel:))(/|)([^\"]*)\"\\s*(title=\"[^\"]*\")?[^>]*>" ) );
+  Q_ASSERT( rxLink.isValid() );
   QRegularExpressionMatchIterator it = rxLink.globalMatch( text );
   int pos = 0;
   QString newText;
@@ -851,11 +850,11 @@ string SlobDictionary::convert( const string & in, RefEntry const & entry )
   {
     QRegularExpressionMatch match = it.next();
 
-    newText += text.midRef( pos, match.capturedStart() - pos );
+    newText += text.mid( pos, match.capturedStart() - pos );
     pos = match.capturedEnd();
 
     QStringList list = match.capturedTexts();
-    // Add empty strings for compatibility with QRegExp behaviour
+    // Keep optional captures present for the legacy field indexes.
     for( int i = match.lastCapturedIndex() + 1; i < 5; i++ )
       list.append( QString() );
 #else
@@ -882,8 +881,12 @@ string SlobDictionary::convert( const string & in, RefEntry const & entry )
     else
       anchor.clear();
 
-    tag.remove( QRegExp(".*/") ).
-        remove( QRegExp( "\\.(s|)htm(l|)$", Qt::CaseInsensitive ) ).
+    static const QRegularExpression pathPrefix( QStringLiteral( ".*/" ) );
+    static const QRegularExpression htmlSuffix( QStringLiteral( "\\.(s|)htm(l|)$" ),
+                                                QRegularExpression::CaseInsensitiveOption );
+    Q_ASSERT( pathPrefix.isValid() && htmlSuffix.isValid() );
+    tag.remove( pathPrefix ).
+        remove( htmlSuffix ).
         replace( "_", "%20" ).
         prepend( "<a href=\"gdlookup://localhost/" ).
         append( anchor + "\" " + list[4] + ">" );
@@ -893,7 +896,7 @@ string SlobDictionary::convert( const string & in, RefEntry const & entry )
   }
   if( pos )
   {
-    newText += text.midRef( pos );
+    newText += text.mid( pos );
     text = newText;
   }
   newText.clear();
@@ -908,9 +911,10 @@ string SlobDictionary::convert( const string & in, RefEntry const & entry )
   if( !texCgiPath.isEmpty() )
   {
 #if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-      QRegularExpression texImage( "<\\s*img\\s+class=\"([^\"]+)\"\\s*([^>]*)alt=\"([^\"]+)\"[^>]*>" );
-      QRegularExpression regFrac( "\\\\[dt]frac" );
-      QRegularExpression regSpaces( "\\s+([\\{\\(\\[\\}\\)\\]])" );
+    static const QRegularExpression texImage( QStringLiteral( "<\\s*img\\s+class=\"([^\"]+)\"\\s*([^>]*)alt=\"([^\"]+)\"[^>]*>" ) );
+    static const QRegularExpression regFrac( QStringLiteral( "\\\\[dt]frac" ) );
+    static const QRegularExpression regSpaces( QStringLiteral( "\\s+([\\{\\(\\[\\}\\)\\]])" ) );
+    Q_ASSERT( texImage.isValid() && regFrac.isValid() && regSpaces.isValid() );
 #else
     QRegExp texImage( "<\\s*img\\s+class=\"([^\"]+)\"\\s*([^>]*)alt=\"([^\"]+)\"[^>]*>",
                       Qt::CaseSensitive,
@@ -918,7 +922,8 @@ string SlobDictionary::convert( const string & in, RefEntry const & entry )
     QRegExp regFrac = QRegExp( "\\\\[dt]frac" );
     QRegExp regSpaces = QRegExp( "\\s+([\\{\\(\\[\\}\\)\\]])", Qt::CaseSensitive, QRegExp::RegExp2 );
 #endif
-    QRegExp multReg = QRegExp( "\\*\\{(\\d+)\\}([^\\{]|\\{([^\\}]+)\\})", Qt::CaseSensitive, QRegExp::RegExp2 );
+    static const QRegularExpression multReg( QStringLiteral( "\\*\\{(\\d+)\\}([^\\{]|\\{([^\\}]+)\\})" ) );
+    Q_ASSERT( multReg.isValid() );
 
     QString arrayDesc( "\\begin{array}{" );
     pos = 0;
@@ -932,7 +937,7 @@ string SlobDictionary::convert( const string & in, RefEntry const & entry )
     {
       QRegularExpressionMatch match = it.next();
 
-      newText += text.midRef( pos, match.capturedStart() - pos );
+      newText += text.mid( pos, match.capturedStart() - pos );
       pos = match.capturedEnd();
 
       QStringList list = match.capturedTexts();
@@ -1011,10 +1016,11 @@ string SlobDictionary::convert( const string & in, RefEntry const & entry )
                 int pos2 = 0;
                 while( pos2 >= 0 )
                 {
-                  pos2 = multReg.indexIn( newDesc, pos2 );
-                  if( pos2 >= 0 )
+                  const auto multiplier = multReg.match( newDesc, pos2 );
+                  if( multiplier.hasMatch() )
                   {
-                    QStringList list = multReg.capturedTexts();
+                    pos2 = multiplier.capturedStart();
+                    QStringList list = multiplier.capturedTexts();
                     int n = list[ 1 ].toInt();
                     for( int i = 0; i < n; i++ )
                       newStr += list[ 3 ].isEmpty() ? list[ 2 ] : list[ 3 ];
@@ -1063,7 +1069,7 @@ string SlobDictionary::convert( const string & in, RefEntry const & entry )
 #if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
     if( pos )
     {
-      newText += text.midRef( pos );
+      newText += text.mid( pos );
       text = newText;
     }
     newText.clear();
@@ -1125,9 +1131,9 @@ quint32 SlobDictionary::readArticle( quint32 articleNumber, std::string & result
       || contentType.contains( "/javascript", Qt::CaseInsensitive )
       || contentType.contains( "/json", Qt::CaseInsensitive ))
   {
-    QTextCodec *codec = sf.getCodec();
-    QString content = codec->toUnicode( data.c_str(), data.size() );
-    result = string( content.toUtf8().data() );
+    const QByteArray content = EncodingCallers::slobTextToUtf8(
+      sf.getCodec(), QByteArray( data.data(), data.size() ) );
+    result.assign( content.constData(), content.size() );
   }
   else
     result = data;
