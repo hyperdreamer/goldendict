@@ -7,22 +7,12 @@
 // Lots of changes have been made to Qt's implementation of categorized logging in versions 5.3 and 5.4.
 // __VA_ARGS__ was introduced in C++11.
 //
-// The condition below is always true on the Qt 6 target, so GD_CATEGORIZED_LOGGING
-// is always defined there and the compatibility branch at the bottom of this file
-// is dead code in the final build. It is kept on purpose: gddebug.cc (not owned by
-// this task) selects the definition of dictionaryResourceLc plus gdCWarningImpl()
-// and gdCDebugImpl() with `#ifdef GD_CATEGORIZED_LOGGING` and provides the
-// GdLoggingCategory shim implementations in its `#else` branches. Removing the
-// gate or the shim here without changing gddebug.cc in the same commit leaves that
-// translation unit uncompilable -- the unconditional function-like gdCWarning
-// macro below would swallow the shim's `void gdCWarning( GdLoggingCategory, ... )`
-// definition and the category would have no definition at all.
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 4, 0 ) && __cplusplus >= 201103L
+// Keep the selector defined until gddebug.cc's owning task collapses its
+// consumer branches. The Qt 6 logging declarations live here; this header no
+// longer provides the legacy GdLoggingCategory fallback.
 #include <QLoggingCategory>
 #define GD_CATEGORIZED_LOGGING
-#endif
 
-#ifdef GD_CATEGORIZED_LOGGING
 Q_DECLARE_LOGGING_CATEGORY( dictionaryResourceLc )
 
 #if !defined(QT_NO_WARNING_OUTPUT)
@@ -45,27 +35,5 @@ Q_DECLARE_LOGGING_CATEGORY( dictionaryResourceLc )
 
 void gdCWarningImpl( QLoggingCategory const & category, char const * message, ... ) Q_ATTRIBUTE_FORMAT_PRINTF( 2, 3 );
 void gdCDebugImpl( QLoggingCategory const & category, char const * message, ... ) Q_ATTRIBUTE_FORMAT_PRINTF( 2, 3 );
-
-#else // GD_CATEGORIZED_LOGGING
-// Compatibility shims.
-
-enum GdLoggingCategory
-{
-  dictionaryResourceLc,
-};
-
-/// Equivalent to gdWarning( @p message, ... )
-void gdCWarning( GdLoggingCategory, char const * message, ... )
-#if defined(Q_CC_GNU) && !defined(__INSURE__)
-__attribute__ ((format (printf, 2, 3)))
-#endif
-;
-/// Equivalent to gdDebug( @p message, ... )
-void gdCDebug( GdLoggingCategory, char const * message, ... )
-#if defined(Q_CC_GNU) && !defined(__INSURE__)
-__attribute__ ((format (printf, 2, 3)))
-#endif
-;
-#endif // GD_CATEGORIZED_LOGGING
 
 #endif // CATEGORIZED_LOGGING_HH_INCLUDED
