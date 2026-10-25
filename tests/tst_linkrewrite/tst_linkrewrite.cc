@@ -837,6 +837,44 @@ void TstLinkRewrite::websiteNonAsciiWhitespaceIsUrlData_data()
         << QStringLiteral( "<base href='&#8195;https://cdn.example.test/assets/'><img src='image.png'>" ) << QStringLiteral( "src" )
         << QStringLiteral( "<base href='https://example.test/dir/%E2%80%83https://cdn.example.test/assets/'><img src='https://example.test/dir/%E2%80%83https://cdn.example.test/assets/image.png'>" )
         << QStringLiteral( "https://example.test/dir/%E2%80%83https://cdn.example.test/assets/image.png" );
+    // Each NBSP spelling must work as the *first* effective base on its own.
+    QTest::newRow( "base-first-entity-nbsp" )
+        << QStringLiteral( "<base href='&#160;https://cdn.example.test/assets/'><img src='image.png'>" ) << QStringLiteral( "src" )
+        << QStringLiteral( "<base href='https://example.test/dir/%C2%A0https://cdn.example.test/assets/'><img src='https://example.test/dir/%C2%A0https://cdn.example.test/assets/image.png'>" )
+        << QStringLiteral( "https://example.test/dir/%C2%A0https://cdn.example.test/assets/image.png" );
+    QTest::newRow( "base-first-literal-nbsp" )
+        << QStringLiteral( "<base href='\u00a0https://cdn.example.test/assets/'><img src='image.png'>" ) << QStringLiteral( "src" )
+        << QStringLiteral( "<base href='https://example.test/dir/%C2%A0https://cdn.example.test/assets/'><img src='https://example.test/dir/%C2%A0https://cdn.example.test/assets/image.png'>" )
+        << QStringLiteral( "https://example.test/dir/%C2%A0https://cdn.example.test/assets/image.png" );
+    QTest::newRow( "base-first-numeric-nbsp" )
+        << QStringLiteral( "<base href='&#xa0;https://cdn.example.test/assets/'><img src='image.png'>" ) << QStringLiteral( "src" )
+        << QStringLiteral( "<base href='https://example.test/dir/%C2%A0https://cdn.example.test/assets/'><img src='https://example.test/dir/%C2%A0https://cdn.example.test/assets/image.png'>" )
+        << QStringLiteral( "https://example.test/dir/%C2%A0https://cdn.example.test/assets/image.png" );
+    // A literal percent that is not a %HH escape must not merge with the
+    // escapes generated for the non-ASCII data around it.
+    QTest::newRow( "literal-percent-before-unicode" )
+        << QStringLiteral( "<img src='image%\u00e9.png'>" ) << QStringLiteral( "src" )
+        << QStringLiteral( "<img src='https://example.test/dir/image%25%C3%A9.png'>" )
+        << QStringLiteral( "https://example.test/dir/image%25%C3%A9.png" );
+    // Valid existing escapes stay untouched.
+    QTest::newRow( "existing-percent-escape-unchanged" )
+        << QStringLiteral( "<img src='image%20name.png'>" ) << QStringLiteral( "src" )
+        << QStringLiteral( "<img src='https://example.test/dir/image%20name.png'>" )
+        << QStringLiteral( "https://example.test/dir/image%20name.png" );
+    // CSS escapes denote the character, so an escaped spelling of an ordinary
+    // filename resolves like the unescaped one.
+    QTest::newRow( "css-escaped-hex-filename" )
+        << QStringLiteral( "<div style=\"background:url(im\\61 ge.png)\"></div>" ) << QStringLiteral( "style" )
+        << QStringLiteral( "<div style=\"background:url(https://example.test/dir/image.png)\"></div>" )
+        << QStringLiteral( "background:url(https://example.test/dir/image.png)" );
+    QTest::newRow( "css-escaped-six-digit-hex" )
+        << QStringLiteral( "<div style=\"background:url(im\\000061 ge.png)\"></div>" ) << QStringLiteral( "style" )
+        << QStringLiteral( "<div style=\"background:url(https://example.test/dir/image.png)\"></div>" )
+        << QStringLiteral( "background:url(https://example.test/dir/image.png)" );
+    QTest::newRow( "css-escaped-delimiter" )
+        << QStringLiteral( "<div style=\"background:url(im\\ age.png)\"></div>" ) << QStringLiteral( "style" )
+        << QStringLiteral( "<div style=\"background:url(https://example.test/dir/im%20age.png)\"></div>" )
+        << QStringLiteral( "background:url(https://example.test/dir/im%20age.png)" );
     QTest::newRow( "empty-scheme-is-not-a-url" )
         << QStringLiteral( "<base href='://invalid'><img src='image.png'>" ) << QStringLiteral( "src" )
         << QStringLiteral( "<base href='://invalid'><img src='https://example.test/dir/image.png'>" )

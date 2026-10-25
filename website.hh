@@ -2531,15 +2531,86 @@ inline QString serializeTarget( QString value, UrlContext context )
 // instead of special-casing U+00A0.
 inline QString urlAsciiForm( QString const & text )
 {
-  QString out;
-  out.reserve( text.size() + 8 );
+  // Percent syntax and Unicode are normalised together: a '%' that does not
+  // already start a valid %HH escape is data, so it is escaped first. Otherwise
+  // the escapes generated below would merge with the literal percent and QUrl
+  // would treat the whole run as literal text (double encoding).
+  auto isHex = []( QChar c ) {
+    return ( c >= QLatin1Char( '0' ) && c <= QLatin1Char( '9' ) )
+        || ( c >= QLatin1Char( 'a' ) && c <= QLatin1Char( 'f' ) )
+        || ( c >= QLatin1Char( 'A' ) && c <= QLatin1Char( 'F' ) );
+  };
+  QString escaped;
+  escaped.reserve( text.size() + 8 );
+  for ( qsizetype i = 0; i < text.size(); ++i )
+  {
+    QChar const c = text[i];
+    if ( c != QLatin1Char( '%' ) ) { escaped.append( c ); continue; }
+    const bool validEscape = i + 2 < text.size() && isHex( text[i + 1] ) && isHex( text[i + 2] );
+    if ( validEscape ) { escaped.append( c ); continue; }
+    escaped.append( QStringLiteral( "%25" ) );
+  }
   // Convert the complete string so UTF-16 surrogate pairs stay intact.
-  QByteArray const utf8 = text.toUtf8();
+  QByteArray const utf8 = escaped.toUtf8();
+  QString out;
+  out.reserve( utf8.size() + 8 );
   for ( unsigned char const c : utf8 )
   {
     if ( c < 0x80 ) { out.append( QLatin1Char( c ) ); continue; }
     out.append( QLatin1Char( '%' ) )
        .append( QString::number( c, 16 ).toUpper().rightJustified( 2, QLatin1Char( '0' ) ) );
+  }
+  return out;
+}
+
+// CSS escapes a URL token: \HHHHHH (with an optional terminating space) or
+// \<char>. Decoding before resolution is what lets "im\61 ge.png" resolve to
+// the same target a browser computes.
+inline QString decodeCssEscapes( QString const & text )
+{
+  QString out;
+  out.reserve( text.size() );
+  for ( qsizetype i = 0; i < text.size(); ++i )
+  {
+    if ( text[i] != QLatin1Char( '\\' ) ) { out.append( text[i] ); continue; }
+    if ( i + 1 >= text.size() ) { out.append( text[i] ); continue; }
+    auto isHex = []( QChar c ) {
+      return ( c >= QLatin1Char( '0' ) && c <= QLatin1Char( '9' ) )
+          || ( c >= QLatin1Char( 'a' ) && c <= QLatin1Char( 'f' ) )
+          || ( c >= QLatin1Char( 'A' ) && c <= QLatin1Char( 'F' ) );
+    };
+    qsizetype j = i + 1;
+    if ( !isHex( text[j] ) )
+    {
+      // Escaped delimiter: the next character is literal data.
+      out.append( text[j] );
+      i = j;
+      continue;
+    }
+    uint value = 0;
+    qsizetype digits = 0;
+    while ( j < text.size() && digits < 6 && isHex( text[j] ) )
+    {
+      QChar const c = text[j];
+      uint const d = ( c >= QLatin1Char( '0' ) && c <= QLatin1Char( '9' ) ) ? uint( c.unicode() - '0' )
+                   : ( c >= QLatin1Char( 'a' ) && c <= QLatin1Char( 'f' ) ) ? uint( c.unicode() - 'a' + 10 )
+                   : uint( c.unicode() - 'A' + 10 );
+      value = value * 16 + d;
+      ++j; ++digits;
+    }
+    // One trailing whitespace character terminates the escape.
+    if ( j < text.size() && isAsciiSpace( text[j] ) ) ++j;
+    if ( value == 0 || value > 0x10FFFF || ( value >= 0xD800 && value <= 0xDFFF ) )
+      out.append( QChar( 0xFFFD ) );
+    else if ( value <= 0xFFFF )
+      out.append( QChar( char16_t( value ) ) );
+    else
+    {
+      uint const v = value - 0x10000;
+      out.append( QChar( char16_t( 0xD800 + ( v >> 10 ) ) ) );
+      out.append( QChar( char16_t( 0xDC00 + ( v & 0x3FF ) ) ) );
+    }
+    i = j - 1;
   }
   return out;
 }
@@ -2584,12 +2655,16 @@ inline QVector< UrlEdit > cssUrlEdits( QString const & css, QUrl const & base )
   };
   auto add = [&]( qsizetype start, qsizetype end, bool unquoted = false ) {
     const QString raw = css.mid( start, end - start );
-    // Leave CSS-escaped URLs alone instead of misinterpreting escape syntax.
-    if ( raw.contains( '\\' ) ) return;
-    const QString target = asciiTrimmed( raw );
-    if ( target.isEmpty() ) return;
-    const QString value = resolvedTarget( target, base, unquoted ? UrlContext::CssUnquoted : UrlContext::Css );
-    if ( value != target ) edits.append( { start + raw.indexOf( target ), target.size(), value } );
+    // Padding is located in the source text, then the escaped spelling is
+    // decoded for resolution. The whole trimmed source span is replaced, since
+    // an escape is shorter or longer than the character it denotes.
+    const QString sourceTarget = asciiTrimmed( raw );
+    if ( sourceTarget.isEmpty() ) return;
+    const QString decoded = asciiTrimmed( decodeCssEscapes( sourceTarget ) );
+    if ( decoded.isEmpty() ) return;
+    const QString value = resolvedTarget( decoded, base, unquoted ? UrlContext::CssUnquoted : UrlContext::Css );
+    if ( value != decoded )
+      edits.append( { start + raw.indexOf( sourceTarget ), sourceTarget.size(), value } );
   };
   while ( p < css.size() )
   {
