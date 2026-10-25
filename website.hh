@@ -2524,7 +2524,8 @@ inline QString serializeTarget( QString value, UrlContext context )
 }
 
 inline QString resolvedTarget( QString const & raw, QUrl const & base,
-                               UrlContext context = UrlContext::Css )
+                               UrlContext context = UrlContext::Css,
+                               bool allowInvalidRelative = false )
 {
   const QString rawTarget = asciiTrimmed( raw );
   if ( rawTarget.isEmpty() ) return raw;
@@ -2535,7 +2536,10 @@ inline QString resolvedTarget( QString const & raw, QUrl const & base,
   if ( target.isEmpty() || target.startsWith( '#' ) ) return raw;
 
   const QUrl relative( target );
-  if ( !relative.isValid() || !relative.scheme().isEmpty() ) return raw;
+  // Qt reports a leading NBSP before a colon as invalid but relative. The base
+  // URL path still needs to be resolved when this opt-in is requested.
+  if ( ( !relative.isValid() && ( !allowInvalidRelative || !relative.isRelative() ) )
+       || !relative.scheme().isEmpty() ) return raw;
   const QUrl absolute = base.resolved( relative );
   if ( !absolute.isValid() || absolute.isRelative() ) return raw;
 
@@ -2712,7 +2716,7 @@ inline QString resolveInlineUrls( QString const & html, QUrl const & documentUrl
       const QString decoded = detail::asciiTrimmed( detail::decodeHtmlAttributeValue( raw ) );
       const QUrl candidate( decoded );
       const QUrl resolved = documentUrl.resolved( candidate );
-      if ( candidate.isValid() && resolved.isValid() && !resolved.isRelative()
+      if ( ( candidate.isValid() || candidate.isRelative() ) && resolved.isValid() && !resolved.isRelative()
            && ( resolved.scheme() == QStringLiteral( "http" ) || resolved.scheme() == QStringLiteral( "https" ) ) )
       { base = resolved; foundBase = true; break; }
     }
@@ -2742,7 +2746,8 @@ inline QString resolveInlineUrls( QString const & html, QUrl const & documentUrl
         else
           value = detail::resolvedTarget( raw,
                                           tag.name == QStringLiteral( "base" ) ? documentUrl : base,
-                                          detail::UrlContext::HtmlAttribute );
+                                          detail::UrlContext::HtmlAttribute,
+                                          tag.name == QStringLiteral( "base" ) );
       }
       if ( raw != value ) edits.append( { attr.start, attr.length, value } );
     }
