@@ -13,8 +13,8 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QCryptographicHash>
-
-#include "qt4x5.hh"
+#include <QUrl>
+#include <QUrlQuery>
 
 namespace VoiceEngines
 {
@@ -22,6 +22,20 @@ namespace VoiceEngines
 using namespace Dictionary;
 using std::string;
 using std::map;
+
+namespace {
+
+/// The one structural leading slash of a resource URL.
+///
+/// Qt 6's QUrl::setPath() takes the path literally instead of making it
+/// absolute, so a URL with a host has to spell that slash out. A name which
+/// already starts with it is left unchanged, so the emitter never doubles it.
+QString resourceUrlPath( QString const & name )
+{
+  return name.startsWith( QLatin1Char( '/' ) ) ? name : QLatin1Char( '/' ) + name;
+}
+
+}
 
 inline string toMd5( QByteArray const & b )
 {
@@ -91,10 +105,10 @@ sptr< Dictionary::DataRequest > VoiceEnginesDictionary::getArticle(
   QUrl url;
   url.setScheme( "gdtts" );
   url.setHost( "localhost" );
-  url.setPath( Qt4x5::Url::ensureLeadingSlash( QString::fromUtf8( wordUtf8.c_str() ) ) );
-  QList< QPair<QString, QString> > query;
-  query.push_back( QPair<QString, QString>( "engine", QString::fromStdString( getId() ) ) );
-  Qt4x5::Url::setQueryItems( url, query );
+  url.setPath( resourceUrlPath( QString::fromUtf8( wordUtf8.c_str() ) ) );
+  QUrlQuery query;
+  query.addQueryItem( QStringLiteral( "engine" ), QString::fromStdString( getId() ) );
+  url.setQuery( query );
 
   string encodedUrl = url.toEncoded().data();
   string ref = string( "\"" ) + encodedUrl + "\"";
