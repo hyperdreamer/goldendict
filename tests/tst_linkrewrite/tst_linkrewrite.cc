@@ -838,6 +838,12 @@ void TstLinkRewrite::websiteNonAsciiWhitespaceIsUrlData_data()
         << QStringLiteral( "<base href='https://example.test/dir/%E2%80%83https://cdn.example.test/assets/'><img src='https://example.test/dir/%E2%80%83https://cdn.example.test/assets/image.png'>" )
         << QStringLiteral( "https://example.test/dir/%E2%80%83https://cdn.example.test/assets/image.png" );
     // Each NBSP spelling must work as the *first* effective base on its own.
+    // Mutation coverage is per spelling, and it is deliberately uneven: only the
+    // literal U+00A0 spelling carries non-ASCII data in the *raw* attribute, so
+    // only it fails if base extraction regresses to Unicode QString::trimmed().
+    // The entity and numeric spellings are ASCII before decoding and therefore
+    // pin the decode-then-trim order instead. Verified by isolating that one
+    // production mutation, which kills exactly base-first-literal-nbsp.
     QTest::newRow( "base-first-entity-nbsp" )
         << QStringLiteral( "<base href='&#160;https://cdn.example.test/assets/'><img src='image.png'>" ) << QStringLiteral( "src" )
         << QStringLiteral( "<base href='https://example.test/dir/%C2%A0https://cdn.example.test/assets/'><img src='https://example.test/dir/%C2%A0https://cdn.example.test/assets/image.png'>" )
