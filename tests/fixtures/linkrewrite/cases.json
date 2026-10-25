@@ -617,7 +617,35 @@
       "input": "<audio src=\"a.wav\"><span title=\"<img src=x>\">Play</span></audio>",
       "expected": "<script type=\"text/javascript\">gdAudioLinks.first = gdAudioLinks.first || \"gdau://d/a.wav\";gdAudioLinks['d'] = gdAudioLinks['d'] || \"gdau://d/a.wav\";</script><span class=\"sdict_h_wav\"><a href=\"gdau://d/a.wav\"><span title=\"<img src=x>\">Play</span> <img src=\"qrcx://localhost/icons/playsound.png\" border=\"0\" alt=\"Play\"></a></span>",
       "twice": true
-    }
+    },
+  {
+    "id": "audio-source-close-script-cannot-end-wrapper",
+    "dictId": "d",
+    "input": "<audio src='</script><script>globalThis.injected=1</script>'></audio>",
+    "expected": "<script type=\"text/javascript\">gdAudioLinks.first = gdAudioLinks.first || \"gdau://d/\\x3C/script\\x3E\\x3Cscript\\x3EglobalThis.injected=1\\x3C/script\\x3E\";gdAudioLinks['d'] = gdAudioLinks['d'] || \"gdau://d/\\x3C/script\\x3E\\x3Cscript\\x3EglobalThis.injected=1\\x3C/script\\x3E\";</script><span class=\"sdict_h_wav\"><a href=\"gdau://d/&lt;/script&gt;&lt;script&gt;globalThis.injected=1&lt;/script&gt;\"> <img src=\"qrcx://localhost/icons/playsound.png\" border=\"0\" alt=\"Play\"></a></span>",
+    "twice": true
+  },
+  {
+    "id": "audio-source-uppercase-close-script-cannot-end-wrapper",
+    "dictId": "d",
+    "input": "<audio src='</SCRIPT ><script>globalThis.injected=1</script>'></audio>",
+    "expected": "<script type=\"text/javascript\">gdAudioLinks.first = gdAudioLinks.first || \"gdau://d/\\x3C/SCRIPT \\x3E\\x3Cscript\\x3EglobalThis.injected=1\\x3C/script\\x3E\";gdAudioLinks['d'] = gdAudioLinks['d'] || \"gdau://d/\\x3C/SCRIPT \\x3E\\x3Cscript\\x3EglobalThis.injected=1\\x3C/script\\x3E\";</script><span class=\"sdict_h_wav\"><a href=\"gdau://d/&lt;/SCRIPT &gt;&lt;script&gt;globalThis.injected=1&lt;/script&gt;\"> <img src=\"qrcx://localhost/icons/playsound.png\" border=\"0\" alt=\"Play\"></a></span>",
+    "twice": true
+  },
+  {
+    "id": "audio-source-comment-open-cannot-change-tokenizer-state",
+    "dictId": "d",
+    "input": "<audio src='<!--<script>globalThis.injected=1</script>'></audio>",
+    "expected": "<script type=\"text/javascript\">gdAudioLinks.first = gdAudioLinks.first || \"gdau://d/\\x3C!--\\x3Cscript\\x3EglobalThis.injected=1\\x3C/script\\x3E\";gdAudioLinks['d'] = gdAudioLinks['d'] || \"gdau://d/\\x3C!--\\x3Cscript\\x3EglobalThis.injected=1\\x3C/script\\x3E\";</script><span class=\"sdict_h_wav\"><a href=\"gdau://d/&lt;!--&lt;script&gt;globalThis.injected=1&lt;/script&gt;\"> <img src=\"qrcx://localhost/icons/playsound.png\" border=\"0\" alt=\"Play\"></a></span>",
+    "twice": true
+  },
+  {
+    "id": "audio-source-comment-close-cannot-change-tokenizer-state",
+    "dictId": "d",
+    "input": "<audio src='--><script>globalThis.injected=1</script>'></audio>",
+    "expected": "<script type=\"text/javascript\">gdAudioLinks.first = gdAudioLinks.first || \"gdau://d/--\\x3E\\x3Cscript\\x3EglobalThis.injected=1\\x3C/script\\x3E\";gdAudioLinks['d'] = gdAudioLinks['d'] || \"gdau://d/--\\x3E\\x3Cscript\\x3EglobalThis.injected=1\\x3C/script\\x3E\";</script><span class=\"sdict_h_wav\"><a href=\"gdau://d/--&gt;&lt;script&gt;globalThis.injected=1&lt;/script&gt;\"> <img src=\"qrcx://localhost/icons/playsound.png\" border=\"0\" alt=\"Play\"></a></span>",
+    "twice": true
+  }
   ],
 
   "engineSeam": [

@@ -634,7 +634,13 @@ std::optional<QString> gicoTarget( QString const & value, QString const & dictId
 }
 
 /// Escapes one resource name for the body of a double-quoted JavaScript string
-/// literal. Single quotes are deliberately left for `makeAudioLinkScript`, which
+/// literal that is embedded in a generated `<script>` element. Two grammars end
+/// at this text, not one: the JavaScript literal ends at an unescaped `"`, and
+/// the HTML script element ends at a case-insensitive `</script` end tag
+/// (`<!--`/`-->` additionally select the tokenizer's escaped script states). The
+/// angle brackets are therefore escaped for the HTML terminator exactly as the
+/// quote is escaped for the literal, and `\uXXXX` cannot reintroduce either
+/// spelling. Single quotes are deliberately left for `makeAudioLinkScript`, which
 /// keeps its own escaping contract and therefore the pinned wrapper output.
 QString jsStringBody( QString const & value )
 {
@@ -653,6 +659,19 @@ QString jsStringBody( QString const & value )
 
             case '"':
                 escaped += QLatin1String( "\\\"" );
+                break;
+
+            // The wrapper is emitted inside a `<script>` element, so `<` and `>`
+            // are as load-bearing as the string delimiter: a raw `</script`
+            // would end the HTML element early, and `<!--` / `-->` would change
+            // the tokenizer state. `\x3C` / `\x3E` evaluate to the original
+            // characters, so the URL the player receives is unchanged.
+            case '<':
+                escaped += QLatin1String( "\\x3C" );
+                break;
+
+            case '>':
+                escaped += QLatin1String( "\\x3E" );
                 break;
 
             case '\n':

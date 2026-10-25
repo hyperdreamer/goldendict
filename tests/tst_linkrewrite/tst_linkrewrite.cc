@@ -12,7 +12,9 @@
  * idempotence for every rule. The named tests also state the two structural
  * invariants the ledger rests on: every span is classified in the original
  * input (a rewritten value is never rescanned as markup or CSS), and the two
- * serialization contexts of the audio wrapper are escaped separately.
+ * serialization contexts of the audio wrapper are escaped separately -- the
+ * script context has two terminators, so the HTML `</script` end tag is escaped
+ * as well as the JavaScript string delimiter.
  *
  * Fixed expected values live in fixtures/linkrewrite/cases.json so a caller
  * cannot "fix" a regression by editing the suite alone; the named tests below
@@ -26,11 +28,13 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QRegularExpression>
 #include <QSet>
 #include <QStringList>
 #include <QUrl>
 #include <QUrlQuery>
 
+#include <optional>
 #include <string>
 
 #include "audiolink.hh"
@@ -123,6 +127,147 @@ QString diff( QString const & id, QString const & what, QString const & actual, 
         .arg( id, what, display( actual ), display( expected ) );
 }
 
+/// Returns the source text of the first `<script ...>` element: everything up to
+/// the first `</script` sequence the HTML parser accepts as that element's end
+/// tag, i.e. one followed by whitespace, `/` or `>`. A second such sequence
+/// inside the body is exactly the injection the audio wrapper must not allow,
+/// whatever its case.
+std::optional<QString> scriptText( QString const & markup )
+{
+    static QRegularExpression const startTag( QStringLiteral( "<script(?:\\s[^>]*)?>" ),
+        QRegularExpression::CaseInsensitiveOption );
+    static QRegularExpression const endTag( QStringLiteral( "</script(?=[\\s/>])" ),
+        QRegularExpression::CaseInsensitiveOption );
+
+    QRegularExpressionMatch const open = startTag.match( markup );
+    if ( !open.hasMatch() )
+        return std::nullopt;
+
+    qsizetype const bodyStart = open.capturedEnd();
+    QRegularExpressionMatch const close = endTag.match( markup, bodyStart );
+    if ( !close.hasMatch() )
+        return std::nullopt;
+
+    return markup.mid( bodyStart, close.capturedStart() - bodyStart );
+}
+
+/// Decodes the escape grammar `jsStringBody` emits for the wrapper's
+/// double-quoted JavaScript literal. The point is not that the spelling is
+/// inert, but that it still evaluates to the original URL: `\x3C` and `\x3E`
+/// must survive as the characters the player needs.
+std::optional<QString> decodeJsStringLiteral( QString const & literal )
+{
+    QString decoded;
+    decoded.reserve( literal.size() );
+
+    for ( qsizetype index = 0; index < literal.size(); ++index )
+    {
+        QChar const character = literal.at( index );
+
+        if ( character != QLatin1Char( '\\' ) )
+        {
+            decoded += character;
+            continue;
+        }
+
+        if ( ++index >= literal.size() )
+            return std::nullopt;
+
+        QChar const escape = literal.at( index );
+
+        switch ( escape.unicode() )
+        {
+            case '\\':
+                decoded += QLatin1Char( '\\' );
+                break;
+            case '"':
+                decoded += QLatin1Char( '"' );
+                break;
+            case '\'':
+                decoded += QLatin1Char( '\'' );
+                break;
+            case 'n':
+                decoded += QLatin1Char( '\n' );
+                break;
+            case 'r':
+                decoded += QLatin1Char( '\r' );
+                break;
+            case 't':
+                decoded += QLatin1Char( '\t' );
+                break;
+            case 'x':
+            case 'u':
+            {
+                qsizetype const digits = escape == QLatin1Char( 'x' ) ? 2 : 4;
+                if ( index + digits >= literal.size() )
+                    return std::nullopt;
+
+                bool ok = false;
+                ushort const value = literal.mid( index + 1, digits ).toUShort( &ok, 16 );
+                if ( !ok )
+                    return std::nullopt;
+
+                decoded += QChar( value );
+                index += digits;
+                break;
+            }
+            default:
+                return std::nullopt;
+        }
+    }
+
+    return decoded;
+}
+
+/// Decodes the character references `htmlAttributeValue` emits, so the anchor's
+/// `href` and the script literal are proven to carry the same target.
+std::optional<QString> decodeHtmlAttributeValue( QString const & value )
+{
+    QString decoded;
+    decoded.reserve( value.size() );
+
+    for ( qsizetype index = 0; index < value.size(); ++index )
+    {
+        QChar const character = value.at( index );
+
+        if ( character != QLatin1Char( '&' ) )
+        {
+            decoded += character;
+            continue;
+        }
+
+        qsizetype const semicolon = value.indexOf( QLatin1Char( ';' ), index );
+        if ( semicolon < 0 )
+            return std::nullopt;
+
+        QString const reference = value.mid( index + 1, semicolon - index - 1 );
+
+        if ( reference == QLatin1String( "amp" ) )
+            decoded += QLatin1Char( '&' );
+        else if ( reference == QLatin1String( "quot" ) )
+            decoded += QLatin1Char( '"' );
+        else if ( reference == QLatin1String( "lt" ) )
+            decoded += QLatin1Char( '<' );
+        else if ( reference == QLatin1String( "gt" ) )
+            decoded += QLatin1Char( '>' );
+        else if ( reference.startsWith( QLatin1Char( '#' ) ) )
+        {
+            bool ok = false;
+            ushort const code = reference.mid( 1 ).toUShort( &ok );
+            if ( !ok )
+                return std::nullopt;
+
+            decoded += QChar( code );
+        }
+        else
+            return std::nullopt;
+
+        index = semicolon;
+    }
+
+    return decoded;
+}
+
 } // namespace
 
 class TstLinkRewrite : public QObject
@@ -160,6 +305,7 @@ class TstLinkRewrite : public QObject
     void quotedCssUrlsKeepParenthesesAndEscapes();
     void audioTagBoundariesAreRealTags();
     void audioSourceTextCannotBecomeScript();
+    void audioSourceCannotTerminateTheWrapperScript();
 };
 
 void TstLinkRewrite::initTestCase()
@@ -762,6 +908,86 @@ void TstLinkRewrite::audioSourceTextCannotBecomeScript()
     QVERIFY( !control.contains( QChar( 0x01 ) ) );
     QVERIFY( control.contains( QStringLiteral( "\"gdau://d/a\\u0001b.wav\";" ) ) );
     QVERIFY( control.contains( QStringLiteral( "href=\"gdau://d/a&#1;b.wav\"" ) ) );
+}
+
+void TstLinkRewrite::audioSourceCannotTerminateTheWrapperScript()
+{
+    // The wrapper is not only a JavaScript string literal: it is emitted inside a
+    // generated `<script>` element. Escaping the quote was necessary but not
+    // sufficient — the HTML terminator is a second delimiter, and `<!--`/`-->`
+    // select the tokenizer's escaped script states. Each payload therefore has
+    // to be unable to spell `<` or `>` in the script body at all, while the
+    // escaped spelling still decodes to the exact URL the player must receive.
+    struct ScriptPayload
+    {
+        char const * source;      // article text that used to leave the script
+        char const * jsBody;      // its exact escaped spelling in the literal
+        char const * attribute;   // its exact escaped spelling in the `href`
+    };
+
+    ScriptPayload const payloads[] = {
+        { "</script><script>globalThis.injected=1</script>",
+            "\\x3C/script\\x3E\\x3Cscript\\x3EglobalThis.injected=1\\x3C/script\\x3E",
+            "&lt;/script&gt;&lt;script&gt;globalThis.injected=1&lt;/script&gt;" },
+        { "</SCRIPT ><script>globalThis.injected=1</script>",
+            "\\x3C/SCRIPT \\x3E\\x3Cscript\\x3EglobalThis.injected=1\\x3C/script\\x3E",
+            "&lt;/SCRIPT &gt;&lt;script&gt;globalThis.injected=1&lt;/script&gt;" },
+        { "<!--<script>globalThis.injected=1</script>",
+            "\\x3C!--\\x3Cscript\\x3EglobalThis.injected=1\\x3C/script\\x3E",
+            "&lt;!--&lt;script&gt;globalThis.injected=1&lt;/script&gt;" },
+        { "--><script>globalThis.injected=1</script>",
+            "--\\x3E\\x3Cscript\\x3EglobalThis.injected=1\\x3C/script\\x3E",
+            "--&gt;&lt;script&gt;globalThis.injected=1&lt;/script&gt;" },
+    };
+
+    for ( ScriptPayload const & payload : payloads )
+    {
+        QString const source = QString::fromLatin1( payload.source );
+        QString const target = QStringLiteral( "gdau://d/" ) + source;
+        QString const rewritten = LinkRewrite::applyGdau(
+            QStringLiteral( "<audio src='" ) + source + QStringLiteral( "'></audio>" ),
+            QStringLiteral( "d" ) );
+
+        // One element, one terminator: the wrapper's own. A second start tag or a
+        // second case-insensitive `</script` would be a script the parser runs
+        // independently of the wrapper.
+        QCOMPARE( rewritten.count( QStringLiteral( "<script" ), Qt::CaseInsensitive ), qsizetype( 1 ) );
+        QCOMPARE( rewritten.count( QStringLiteral( "</script" ), Qt::CaseInsensitive ), qsizetype( 1 ) );
+
+        std::optional<QString> const body = scriptText( rewritten );
+        QVERIFY2( body.has_value(), qPrintable( QStringLiteral( "no closed script for %1" ).arg( source ) ) );
+
+        // The HTML terminator and the comment markers cannot be spelled inside the
+        // script body, whatever their case.
+        QVERIFY2( !body->contains( QLatin1Char( '<' ) ) && !body->contains( QLatin1Char( '>' ) ),
+            qPrintable( QStringLiteral( "raw angle bracket in the script body for %1: %2" )
+                            .arg( source, *body ) ) );
+        QVERIFY( !body->contains( QStringLiteral( "<!--" ) ) );
+        QVERIFY( !body->contains( QStringLiteral( "-->" ) ) );
+        QVERIFY( body->contains( QStringLiteral( "\\x3C" ) ) );
+        QVERIFY( body->contains( QStringLiteral( "\\x3E" ) ) );
+
+        // The escaped spelling is the one the wrapper consumes, and it decodes to
+        // the untouched target rather than merely to something inert.
+        QString const expectedScript = QString::fromStdString( addAudioLink(
+            "\"gdau://d/" + std::string( payload.jsBody ) + "\"", "d" ) );
+        QVERIFY2( rewritten.startsWith( expectedScript ),
+            qPrintable( diff( source, QStringLiteral( "script wrapper" ),
+                rewritten.left( expectedScript.size() ), expectedScript ) ) );
+        std::optional<QString> const decoded = decodeJsStringLiteral(
+            QStringLiteral( "gdau://d/" ) + QString::fromLatin1( payload.jsBody ) );
+        QVERIFY2( decoded.has_value(), qPrintable( source ) );
+        QCOMPARE( *decoded, target );
+
+        // The anchor carries the same target through the HTML attribute context.
+        QRegularExpressionMatch const href =
+            QRegularExpression( QStringLiteral( "<a href=\"([^\"]*)\">" ) ).match( rewritten );
+        QVERIFY( href.hasMatch() );
+        std::optional<QString> const attribute = decodeHtmlAttributeValue( href.captured( 1 ) );
+        QVERIFY2( attribute.has_value(), qPrintable( href.captured( 1 ) ) );
+        QCOMPARE( *attribute, target );
+        QCOMPARE( href.captured( 1 ), QStringLiteral( "gdau://d/" ) + QString::fromLatin1( payload.attribute ) );
+    }
 }
 
 QTEST_GUILESS_MAIN( TstLinkRewrite )
