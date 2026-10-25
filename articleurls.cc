@@ -136,16 +136,18 @@ QStringList splitNames( QString const & value )
 
 /// Compiles the user's FTS pattern.
 ///
-/// A wildcard pattern is converted with NonPathWildcardConversion, so `*` is
-/// not restricted to a path segment, and the original source syntax is kept in
-/// the spec because the compiled expression cannot reconstruct it. The pattern
-/// options are the ones the baseline highlight path used; `matchCase` only
-/// decides whether the case-insensitive option is added.
+/// A wildcard pattern is converted without whole-subject anchors so highlights
+/// can match within article text. NonPathWildcardConversion lets `*` cross path
+/// separators, and the original source syntax is kept in the spec because the
+/// compiled expression cannot reconstruct it. The pattern options are the ones
+/// the baseline highlight path used; `matchCase` only decides whether the
+/// case-insensitive option is added.
 QRegularExpression compileHighlight( QString const & sourcePattern, bool wildcards, bool matchCase )
 {
   QString const pattern =
     wildcards ? QRegularExpression::wildcardToRegularExpression(
-                  sourcePattern, QRegularExpression::NonPathWildcardConversion )
+                  sourcePattern, QRegularExpression::NonPathWildcardConversion
+                                   | QRegularExpression::UnanchoredWildcardConversion )
               : sourcePattern;
 
   QRegularExpression expression( pattern );

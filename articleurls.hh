@@ -39,9 +39,11 @@ enum class NavigationKind
 ///
 /// `sourcePattern` is the pattern exactly as the user wrote it; `expression` is
 /// that pattern compiled with `wildcards` applied through
-/// QRegularExpression::NonPathWildcardConversion and with `matchCase` folded
-/// into the pattern options. Both the original syntax and the compiled PCRE are
-/// kept because a QRegularExpression cannot remember wildcard syntax, and a
+/// QRegularExpression::NonPathWildcardConversion combined with
+/// QRegularExpression::UnanchoredWildcardConversion, so highlights match inside
+/// article text and wildcards can cross slashes. `matchCase` is folded into the
+/// pattern options. Both the original syntax and the compiled PCRE are kept
+/// because a QRegularExpression cannot remember wildcard syntax, and a
 /// consumer that still has to transform the source (diacritics folding) must
 /// rebuild the expression from `sourcePattern` instead of from `expression`.
 struct FtsHighlightSpec

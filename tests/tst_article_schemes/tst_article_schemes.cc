@@ -228,6 +228,8 @@ private slots:
     void contextsRejectsNonCanonicalBase64();
 
     void highlightSpecCompilesWildcards();
+    void highlightSpecFindsWildcardSpans_data();
+    void highlightSpecFindsWildcardSpans();
     void highlightSpecRejectsInvalidUserPattern();
 
     void readerContractIsImplementable();
@@ -1165,13 +1167,17 @@ void TstArticleSchemes::highlightSpecCompilesWildcards()
     // The source pattern is retained separately from the compiled expression.
     QCOMPARE( wildcard.lookup.highlight.sourcePattern, QStringLiteral( "a*.txt" ) );
     QVERIFY( wildcard.lookup.highlight.wildcards );
-    QCOMPARE( wildcard.lookup.highlight.expression.pattern(),
-              QRegularExpression( QRegularExpression::wildcardToRegularExpression(
-                QStringLiteral( "a*.txt" ), QRegularExpression::NonPathWildcardConversion ) )
-                .pattern() );
-    QVERIFY2( !wildcard.lookup.highlight.expression.pattern().contains( QStringLiteral( "[^/]" ) ),
-              "wildcards must use NonPathWildcardConversion" );
+    QVERIFY( !wildcard.lookup.highlight.matchCase );
+    QVERIFY( wildcard.lookup.highlight.expression.isValid() );
+
+    // Highlight inside ordinary text, allowing '*' to cross a slash. Literal
+    // offsets catch whole-subject anchoring without repeating the converter.
+    const auto embedded = wildcard.lookup.highlight.expression.match( QStringLiteral( "see a/b.txt today" ) );
+    QVERIFY( embedded.hasMatch() );
+    QCOMPARE( embedded.capturedStart(), 4 );
+    QCOMPARE( embedded.capturedLength(), 7 );
     QVERIFY( wildcard.lookup.highlight.expression.match( QStringLiteral( "ab.txt" ) ).hasMatch() );
+    QVERIFY( !wildcard.lookup.highlight.expression.match( QStringLiteral( "abXtxt" ) ).hasMatch() );
     // matchCase defaults to false, so the compiled expression is case
     // insensitive.
     QVERIFY( wildcard.lookup.highlight.expression.match( QStringLiteral( "AB.TXT" ) ).hasMatch() );
@@ -1195,6 +1201,67 @@ void TstArticleSchemes::highlightSpecCompilesWildcards()
     QVERIFY( !regexp.lookup.highlight.wildcards );
     QVERIFY( regexp.lookup.highlight.expression.match( QStringLiteral( "abc" ) ).hasMatch() );
     QVERIFY( !regexp.lookup.highlight.expression.match( QStringLiteral( "xyz" ) ).hasMatch() );
+}
+
+void TstArticleSchemes::highlightSpecFindsWildcardSpans_data()
+{
+    QTest::addColumn< QString >( "sourcePattern" );
+    QTest::addColumn< bool >( "matchCase" );
+    QTest::addColumn< QString >( "subject" );
+    QTest::addColumn< QList< qsizetype > >( "expectedStarts" );
+    QTest::addColumn< QList< qsizetype > >( "expectedLengths" );
+
+    // Whole-subject anchoring loses every embedded match in these fixtures.
+    // Expectations are literal positions in text, independent of conversion.
+    QTest::newRow( "embedded-repeated-literal" )
+      << QStringLiteral( "cat" ) << false << QStringLiteral( "one cat and another cat" )
+      << QList< qsizetype >{ 4, 20 } << QList< qsizetype >{ 3, 3 };
+    QTest::newRow( "embedded-case-insensitive" )
+      << QStringLiteral( "cat" ) << false << QStringLiteral( "one CAT and another cat" )
+      << QList< qsizetype >{ 4, 20 } << QList< qsizetype >{ 3, 3 };
+    QTest::newRow( "embedded-case-sensitive" )
+      << QStringLiteral( "cat" ) << true << QStringLiteral( "one CAT and another cat" )
+      << QList< qsizetype >{ 20 } << QList< qsizetype >{ 3 };
+    QTest::newRow( "embedded-star-crosses-slash" )
+      << QStringLiteral( "a*.txt" ) << false << QStringLiteral( "see a/b.txt then a/c.txt now" )
+      << QList< qsizetype >{ 4, 17 } << QList< qsizetype >{ 7, 7 };
+    QTest::newRow( "embedded-question-crosses-slash" )
+      << QStringLiteral( "a?b" ) << false << QStringLiteral( "see a/b and a-b now" )
+      << QList< qsizetype >{ 4, 12 } << QList< qsizetype >{ 3, 3 };
+}
+
+void TstArticleSchemes::highlightSpecFindsWildcardSpans()
+{
+    QFETCH( QString, sourcePattern );
+    QFETCH( bool, matchCase );
+    QFETCH( QString, subject );
+    QFETCH( QList< qsizetype >, expectedStarts );
+    QFETCH( QList< qsizetype >, expectedLengths );
+
+    QUrl url( QStringLiteral( "gdlookup://localhost/?word=cat&group=1&wildcards=1" ) );
+    QUrlQuery query( url );
+    query.addQueryItem( QStringLiteral( "regexp" ), sourcePattern );
+    query.addQueryItem( QStringLiteral( "matchcase" ), matchCase ? QStringLiteral( "1" ) : QStringLiteral( "0" ) );
+    url.setQuery( query );
+
+    const Parsed parsed = ArticleUrls::parse( url, Use::DocumentLoad );
+    QCOMPARE( parsed.kind, Kind::LookupDocument );
+    const FtsHighlightSpec & highlight = parsed.lookup.highlight;
+    QCOMPARE( highlight.sourcePattern, sourcePattern );
+    QVERIFY( highlight.wildcards );
+    QCOMPARE( highlight.matchCase, matchCase );
+    QVERIFY2( highlight.expression.isValid(), qPrintable( highlight.expression.errorString() ) );
+
+    QList< qsizetype > starts, lengths;
+    auto matches = highlight.expression.globalMatch( subject );
+    while( matches.hasNext() )
+    {
+        const auto match = matches.next();
+        starts.append( match.capturedStart() );
+        lengths.append( match.capturedLength() );
+    }
+    QCOMPARE( starts, expectedStarts );
+    QCOMPARE( lengths, expectedLengths );
 }
 
 void TstArticleSchemes::highlightSpecRejectsInvalidUserPattern()
