@@ -269,6 +269,26 @@ std::optional<QString> decodeHtmlAttributeValue( QString const & value )
     return decoded;
 }
 
+/// Reads the browser-visible value of the first named HTML attribute from the
+/// resolver output. The production resolver deliberately preserves source
+/// spelling, so the test decodes the emitted attribute independently rather
+/// than accepting the source spelling as proof of the URL the browser sees.
+std::optional<QString> firstHtmlAttributeValue( QString const & markup, QString const & name )
+{
+    for ( WebSite::detail::Tag const & tag : WebSite::detail::htmlTags( markup ) )
+    {
+        for ( WebSite::detail::Attribute const & attribute : tag.attributes )
+        {
+            if ( attribute.name != name )
+                continue;
+
+            return decodeHtmlAttributeValue( markup.mid( attribute.start, attribute.length ) );
+        }
+    }
+
+    return std::nullopt;
+}
+
 } // namespace
 
 class TstLinkRewrite : public QObject
@@ -492,6 +512,26 @@ void TstLinkRewrite::websiteResolverRowsMatchProduction()
             const QString again = WebSite::resolveInlineUrls( expected, documentUrl );
             if ( again != expected )
                 problems << diff( id, QStringLiteral( "second pass" ), again, expected );
+        }
+
+        for ( QJsonValue const & browserValue : row.value( QStringLiteral( "browserVisible" ) ).toArray() )
+        {
+            const QJsonObject browserCheck = browserValue.toObject();
+            const QString attribute = browserCheck.value( QStringLiteral( "attribute" ) ).toString();
+            const QString browserExpected = browserCheck.value( QStringLiteral( "expected" ) ).toString();
+            const std::optional<QString> browserActual = firstHtmlAttributeValue( actual, attribute );
+
+            if ( !browserActual.has_value() )
+            {
+                problems << QStringLiteral( "%1/%2: browser-visible %3 attribute is missing" )
+                                .arg( QStringLiteral( "websiteResolver" ), id, attribute );
+            }
+            else if ( *browserActual != browserExpected )
+            {
+                problems << diff( QStringLiteral( "websiteResolver/%1" ).arg( id ),
+                                  QStringLiteral( "browser-visible %1" ).arg( attribute ),
+                                  *browserActual, browserExpected );
+            }
         }
     }
 

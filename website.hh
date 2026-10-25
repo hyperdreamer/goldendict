@@ -50,8 +50,6 @@ inline QVector< Tag > htmlTags( QString const & html, QVector< TextSpan > * cssS
   while ( p < html.size() )
   {
     const auto nextTag = html.indexOf( '<', p );
-    const auto textEnd = nextTag < 0 ? html.size() : nextTag;
-    if ( cssSpans && textEnd > p ) cssSpans->append( { p, textEnd - p } );
     if ( nextTag < 0 ) break;
     p = nextTag;
     if ( html.mid( p, 4 ) == QStringLiteral( "<!--" ) )
@@ -116,19 +114,59 @@ inline QVector< Tag > htmlTags( QString const & html, QVector< TextSpan > * cssS
   return tags;
 }
 
-inline QString resolvedTarget( QString const & raw, QUrl const & base )
+enum class UrlContext
 {
-  const QString target = raw.trimmed();
+  Css,
+  HtmlAttribute
+};
+
+inline QString decodeHtmlAttributeValue( QString const & raw )
+{
+  // QTextDocumentFragment decodes named and numeric character references. The
+  // angle brackets are escaped first so a URL value cannot become markup while
+  // it is being decoded.
+  QString escaped = raw;
+  escaped.replace( '<', QStringLiteral( "&lt;" ) ).replace( '>', QStringLiteral( "&gt;" ) );
+  return QTextDocumentFragment::fromHtml( QStringLiteral( "<pre>" ) + escaped
+                                           + QStringLiteral( "</pre>" ) ).toPlainText();
+}
+
+inline QString serializeTarget( QString value, UrlContext context )
+{
+  if ( context != UrlContext::HtmlAttribute ) return value;
+
+  // URL query separators and other ampersands must survive HTML attribute
+  // parsing as data, not as a new character reference. QUrl already fully
+  // encodes quote characters in generated URLs.
+  value.replace( '&', QStringLiteral( "&amp;" ) )
+       .replace( '<', QStringLiteral( "&lt;" ) )
+       .replace( '>', QStringLiteral( "&gt;" ) );
+  return value;
+}
+
+inline QString resolvedTarget( QString const & raw, QUrl const & base,
+                               UrlContext context = UrlContext::Css )
+{
+  const QString rawTarget = raw.trimmed();
+  if ( rawTarget.isEmpty() ) return raw;
+
+  const QString target = context == UrlContext::HtmlAttribute
+    ? decodeHtmlAttributeValue( rawTarget ).trimmed()
+    : rawTarget;
   if ( target.isEmpty() || target.startsWith( '#' ) ) return raw;
+
   const QUrl relative( target );
   if ( !relative.isValid() || !relative.scheme().isEmpty() ) return raw;
   const QUrl absolute = base.resolved( relative );
   if ( !absolute.isValid() || absolute.isRelative() ) return raw;
-  const auto start = raw.indexOf( target );
-  return raw.left( start ) + absolute.toString( QUrl::FullyEncoded ) + raw.mid( start + target.size() );
+
+  const auto start = raw.indexOf( rawTarget );
+  return raw.left( start ) + serializeTarget( absolute.toString( QUrl::FullyEncoded ), context )
+       + raw.mid( start + rawTarget.size() );
 }
 
-inline QString resolveCss( QString const & css, QUrl const & base )
+inline QString resolveCss( QString const & css, QUrl const & base,
+                           UrlContext context = UrlContext::Css )
 {
   QVector< UrlEdit > edits;
   qsizetype p = 0;
@@ -146,7 +184,7 @@ inline QString resolveCss( QString const & css, QUrl const & base )
     const QString raw = css.mid( start, end - start );
     // Leave CSS-escaped URLs alone instead of misinterpreting escape syntax.
     if ( raw.contains( '\\' ) ) return;
-    const QString value = resolvedTarget( raw, base );
+    const QString value = resolvedTarget( raw, base, context );
     if ( value != raw ) edits.append( { start, end - start, value } );
   };
   while ( p < css.size() )
@@ -202,14 +240,19 @@ inline QString resolveSrcset( QString const & text, QUrl const & base )
   {
     while ( p < text.size() && ( text[p].isSpace() || text[p] == ',' ) ) ++p;
     const auto start = p;
-    const bool data = startsAt( text, p, QStringLiteral( "data:" ) );
+    // The HTML parser decodes the attribute before srcset tokenization. Do
+    // the same for the data: discriminator so an entity-encoded data URL's
+    // comma remains part of that candidate rather than starting a new one.
+    const bool data = startsAt( text, p, QStringLiteral( "data:" ) )
+                   || startsAt( decodeHtmlAttributeValue( text.mid( start ) ), 0,
+                                QStringLiteral( "data:" ) );
     while ( p < text.size() && !text[p].isSpace() && ( data || text[p] != ',' ) ) ++p;
     auto targetEnd = p;
     // A data URL may contain commas, but trailing commas delimit candidates
     // without descriptors rather than becoming part of the next candidate.
     while ( targetEnd > start && text[targetEnd - 1] == ',' ) --targetEnd;
     const QString raw = text.mid( start, targetEnd - start );
-    const QString value = resolvedTarget( raw, base );
+    const QString value = resolvedTarget( raw, base, UrlContext::HtmlAttribute );
     if ( raw != value ) edits.append( { start, targetEnd - start, value } );
     if ( targetEnd < p ) continue;
     if ( p < text.size() && text[p] == ',' ) { ++p; continue; }
@@ -256,7 +299,9 @@ inline QString resolveInlineUrls( QString const & html, QUrl const & documentUrl
     for ( auto const & attr : tag.attributes )
     {
       if ( attr.name != QStringLiteral( "href" ) ) continue;
-      const QUrl candidate( html.mid( attr.start, attr.length ).trimmed() );
+      const QString raw = html.mid( attr.start, attr.length ).trimmed();
+      const QString decoded = detail::decodeHtmlAttributeValue( raw ).trimmed();
+      const QUrl candidate( decoded );
       const QUrl resolved = documentUrl.resolved( candidate );
       if ( candidate.isValid() && resolved.isValid() && !resolved.isRelative()
            && ( resolved.scheme() == QStringLiteral( "http" ) || resolved.scheme() == QStringLiteral( "https" ) ) )
@@ -271,14 +316,18 @@ inline QString resolveInlineUrls( QString const & html, QUrl const & documentUrl
     {
       const QString raw = html.mid( attr.start, attr.length );
       QString value = raw;
-      if ( attr.name == QStringLiteral( "style" ) ) value = detail::resolveCss( raw, base );
+      if ( attr.name == QStringLiteral( "style" ) )
+        value = detail::resolveCss( raw, base, detail::UrlContext::HtmlAttribute );
       else if ( attr.name == QStringLiteral( "srcset" ) ) value = detail::resolveSrcset( raw, base );
       else if ( attr.name == QStringLiteral( "src" ) || attr.name == QStringLiteral( "href" )
                 || attr.name == QStringLiteral( "action" ) || attr.name == QStringLiteral( "poster" ) )
       {
         if ( tag.name == QStringLiteral( "form" ) && attr.name == QStringLiteral( "action" ) && raw.isEmpty() )
           value = documentUrl.toString( QUrl::FullyEncoded );
-        else value = detail::resolvedTarget( raw, tag.name == QStringLiteral( "base" ) ? documentUrl : base );
+        else
+          value = detail::resolvedTarget( raw,
+                                          tag.name == QStringLiteral( "base" ) ? documentUrl : base,
+                                          detail::UrlContext::HtmlAttribute );
       }
       if ( raw != value ) edits.append( { attr.start, attr.length, value } );
     }

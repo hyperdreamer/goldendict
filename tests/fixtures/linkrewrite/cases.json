@@ -26,7 +26,21 @@
       "id": "css-only-outside-tags-or-style-values",
       "documentUrl": "https://example.test/dir/page",
       "input": "url( bg.png )<div title=\"url(untouched.png)\" style=\"background:url( icon.png )\"></div><!-- url(comment.png) --><script>url(script.png)</script><textarea>url(text.png)<img src=ignored.png></textarea><title>url(title.png)</title>",
-      "expected": "url( https://example.test/dir/bg.png )<div title=\"url(untouched.png)\" style=\"background:url( https://example.test/dir/icon.png )\"></div><!-- url(comment.png) --><script>url(script.png)</script><textarea>url(text.png)<img src=ignored.png></textarea><title>url(title.png)</title>",
+      "expected": "url( bg.png )<div title=\"url(untouched.png)\" style=\"background:url( https://example.test/dir/icon.png )\"></div><!-- url(comment.png) --><script>url(script.png)</script><textarea>url(text.png)<img src=ignored.png></textarea><title>url(title.png)</title>",
+      "twice": true
+    },
+    {
+      "id": "ordinary-html-text-url-is-not-css",
+      "documentUrl": "https://example.test/dir/page",
+      "input": "<p>Write url(../sample.png) literally.</p>",
+      "expected": "<p>Write url(../sample.png) literally.</p>",
+      "twice": true
+    },
+    {
+      "id": "ordinary-html-text-import-is-not-css",
+      "documentUrl": "https://example.test/dir/page",
+      "input": "<p>@import 'sample.css'; is CSS syntax.</p>",
+      "expected": "<p>@import 'sample.css'; is CSS syntax.</p>",
       "twice": true
     },
     {
@@ -90,6 +104,68 @@
       "documentUrl": "https://example.test/dir/page",
       "input": "<style>/* url(ignored.png) */ @import \"theme.css\"; .x{background:url('../img/a.png')}</style><div style=\"background:url(data:image/png;base64,AAAA)\"></div>",
       "expected": "<style>/* url(ignored.png) */ @import \"https://example.test/dir/theme.css\"; .x{background:url('https://example.test/img/a.png')}</style><div style=\"background:url(data:image/png;base64,AAAA)\"></div>",
+      "twice": true
+    },
+    {
+      "id": "entity-root-relative-url",
+      "documentUrl": "http://127.0.0.1:43127/dir/page?q=1",
+      "input": "<img alt=\"keep\" src='&#47;img.png'>",
+      "expected": "<img alt=\"keep\" src='http://127.0.0.1:43127/img.png'>",
+      "browserVisible": [
+        { "attribute": "src", "expected": "http://127.0.0.1:43127/img.png" }
+      ],
+      "twice": true
+    },
+    {
+      "id": "entity-base-href-controls-relative-resolution",
+      "documentUrl": "http://127.0.0.1:43127/dir/page?q=1",
+      "input": "<base href='&#47;other/'><img src='image.png'>",
+      "expected": "<base href='http://127.0.0.1:43127/other/'><img src='http://127.0.0.1:43127/other/image.png'>",
+      "browserVisible": [
+        { "attribute": "href", "expected": "http://127.0.0.1:43127/other/" },
+        { "attribute": "src", "expected": "http://127.0.0.1:43127/other/image.png" }
+      ],
+      "twice": true
+    },
+    {
+      "id": "entity-srcset-candidates-are-decoded-individually",
+      "documentUrl": "https://example.test/dir/page",
+      "input": "<img srcset='data&#58;image/png;base64,AAAA 1x, &#47;one.png 2x, two&amp;part.png 3x, file&quot;name.png 4x' alt='keep'>",
+      "expected": "<img srcset='data&#58;image/png;base64,AAAA 1x, https://example.test/one.png 2x, https://example.test/dir/two&amp;part.png 3x, https://example.test/dir/file%22name.png 4x' alt='keep'>",
+      "browserVisible": [
+        { "attribute": "srcset", "expected": "data:image/png;base64,AAAA 1x, https://example.test/one.png 2x, https://example.test/dir/two&part.png 3x, https://example.test/dir/file%22name.png 4x" }
+      ],
+      "twice": true
+    },
+    {
+      "id": "entity-ampersand-is-safe-in-relative-url",
+      "documentUrl": "https://example.test/dir/page",
+      "input": "<img src='asset&amp;part.png' alt='keep'>",
+      "expected": "<img src='https://example.test/dir/asset&amp;part.png' alt='keep'>",
+      "browserVisible": [
+        { "attribute": "src", "expected": "https://example.test/dir/asset&part.png" }
+      ],
+      "twice": true
+    },
+    {
+      "id": "entity-quote-is-encoded-in-relative-url",
+      "documentUrl": "https://example.test/dir/page",
+      "input": "<img src='file&quot;name.png' alt='keep'>",
+      "expected": "<img src='https://example.test/dir/file%22name.png' alt='keep'>",
+      "browserVisible": [
+        { "attribute": "src", "expected": "https://example.test/dir/file%22name.png" }
+      ],
+      "twice": true
+    },
+    {
+      "id": "entity-absolute-and-fragment-targets-stay-verbatim",
+      "documentUrl": "https://example.test/dir/page",
+      "input": "<img src='https&#58;//remote.test/img.png'><a href='&#35;part'>part</a>",
+      "expected": "<img src='https&#58;//remote.test/img.png'><a href='&#35;part'>part</a>",
+      "browserVisible": [
+        { "attribute": "src", "expected": "https://remote.test/img.png" },
+        { "attribute": "href", "expected": "#part" }
+      ],
       "twice": true
     },
     {
