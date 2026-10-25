@@ -307,6 +307,10 @@ class TstLinkRewrite : public QObject
     void websiteGeneratedUrlsCannotCloseQuotes();
     void websiteAbsentFormActionTargetsDocument_data();
     void websiteAbsentFormActionTargetsDocument();
+    void websiteAttributeReferences_data();
+    void websiteAttributeReferences();
+    void websiteReferenceDecodingPrecedesTokenization_data();
+    void websiteReferenceDecodingPrecedesTokenization();
     void websiteNestedGrammarDecodesEntities_data();
     void websiteNestedGrammarDecodesEntities();
 
@@ -617,6 +621,109 @@ void TstLinkRewrite::websiteAbsentFormActionTargetsDocument()
     QCOMPARE( parsedAction.authority(), document.authority() );
     QCOMPARE( parsedAction.path(), document.path() );
     QCOMPARE( parsedAction.query( QUrl::FullyDecoded ), document.query( QUrl::FullyDecoded ) );
+    QCOMPARE( WebSite::resolveInlineUrls( output, document ), output );
+}
+
+void TstLinkRewrite::websiteAttributeReferences_data()
+{
+    QTest::addColumn< QString >( "input" );
+    QTest::addColumn< QString >( "expected" );
+    QTest::newRow( "isolated-numeric-lf" ) << QStringLiteral( "&#10;" ) << QStringLiteral( "\n" );
+    QTest::newRow( "isolated-numeric-cr" ) << QStringLiteral( "&#13;" ) << QStringLiteral( "\r" );
+    QTest::newRow( "isolated-numeric-space" ) << QStringLiteral( "&#32;" ) << QStringLiteral( " " );
+    QTest::newRow( "named-newline" ) << QStringLiteral( "&NewLine;" ) << QStringLiteral( "\n" );
+    QTest::newRow( "named-tab" ) << QStringLiteral( "&Tab;" ) << QStringLiteral( "\t" );
+    QTest::newRow( "named-css-delimiters" ) << QStringLiteral( "&lpar;&rpar;&comma;&sol;&colon;" )
+        << QStringLiteral( "(),/:" );
+    QTest::newRow( "named-two-codepoints" ) << QStringLiteral( "&NotEqualTilde;" )
+        << QStringLiteral( "\u2242\u0338" );
+    QTest::newRow( "named-supplementary" ) << QStringLiteral( "&Afr;" ) << QStringLiteral( "\U0001d504" );
+    QTest::newRow( "longest-named-reference" ) << QStringLiteral( "&notin;" ) << QStringLiteral( "\u2209" );
+    QTest::newRow( "legacy-without-semicolon" ) << QStringLiteral( "&copy!" ) << QStringLiteral( "\u00a9!" );
+    QTest::newRow( "ambiguous-legacy-letter" ) << QStringLiteral( "&notit;" ) << QStringLiteral( "&notit;" );
+    QTest::newRow( "ambiguous-legacy-equals" ) << QStringLiteral( "&copy=1" ) << QStringLiteral( "&copy=1" );
+    QTest::newRow( "nonlegacy-needs-semicolon" ) << QStringLiteral( "&NewLine" ) << QStringLiteral( "&NewLine" );
+    QTest::newRow( "case-sensitive-name" ) << QStringLiteral( "&newLine;" ) << QStringLiteral( "&newLine;" );
+    QTest::newRow( "invalid-named-reference" ) << QStringLiteral( "&notARealEntity;" )
+        << QStringLiteral( "&notARealEntity;" );
+    QTest::newRow( "invalid-numeric-reference" ) << QStringLiteral( "&#x; &#;" ) << QStringLiteral( "&#x; &#;" );
+    QTest::newRow( "numeric-control" ) << QStringLiteral( "&#1;&#11;&#31;&#127;" )
+        << QStringLiteral( "\u0001\u000b\u001f\u007f" );
+    QTest::newRow( "numeric-c1-remapping" ) << QStringLiteral( "&#128;&#x82;&#x9F;" )
+        << QStringLiteral( "\u20ac\u201a\u0178" );
+    QTest::newRow( "numeric-unmapped-c1" ) << QStringLiteral( "&#129;&#141;&#143;&#144;&#157;" )
+        << QStringLiteral( "\u0081\u008d\u008f\u0090\u009d" );
+    QTest::newRow( "numeric-bom" ) << QStringLiteral( "&#xFEFF;" ) << QStringLiteral( "\ufeff" );
+    QTest::newRow( "numeric-bom-and-reversed-bom" ) << QStringLiteral( "&#xFEFF;&#xFFFE;" )
+        << QStringLiteral( "\ufeff\ufffe" );
+    QTest::newRow( "numeric-noncharacter" ) << QStringLiteral( "&#xFFFF;" ) << QStringLiteral( "\uffff" );
+    QTest::newRow( "numeric-supplementary" ) << QStringLiteral( "&#X1F600;" ) << QStringLiteral( "\U0001f600" );
+    QTest::newRow( "numeric-without-semicolon" ) << QStringLiteral( "&#65x&#x42!" ) << QStringLiteral( "AxB!" );
+    QTest::newRow( "numeric-null-surrogate-and-out-of-range" ) << QStringLiteral( "&#0;&#xD800;&#1114112;" )
+        << QStringLiteral( "\ufffd\ufffd\ufffd" );
+    QTest::newRow( "numeric-overflow" ) << QStringLiteral( "&#99999999999999999999999999999999999999;" )
+        << QStringLiteral( "\ufffd" );
+    QTest::newRow( "numeric-leading-zeroes" ) << QStringLiteral( "&#00000000000000000000000000000000000065;" )
+        << QStringLiteral( "A" );
+    QTest::newRow( "decode-once" ) << QStringLiteral( "&amp;#10;&amp;NewLine;" )
+        << QStringLiteral( "&#10;&NewLine;" );
+    QTest::newRow( "markup-is-plain-attribute-text" ) << QStringLiteral( "<b>one</b>&lt;two&gt;" )
+        << QStringLiteral( "<b>one</b><two>" );
+}
+
+void TstLinkRewrite::websiteAttributeReferences()
+{
+    QFETCH( QString, input );
+    QFETCH( QString, expected );
+    QCOMPARE( WebSite::detail::decodeHtmlAttributeValue( input ), expected );
+    const auto decoded = WebSite::detail::decodeAttributeWithOffsets( input );
+    QCOMPARE( decoded.text, expected );
+    QCOMPARE( decoded.boundaries.size(), expected.size() + 1 );
+    QCOMPARE( decoded.boundaries.first(), qsizetype( 0 ) );
+    QCOMPARE( decoded.boundaries.last(), input.size() );
+    QVERIFY( std::is_sorted( decoded.boundaries.cbegin(), decoded.boundaries.cend() ) );
+}
+
+void TstLinkRewrite::websiteReferenceDecodingPrecedesTokenization_data()
+{
+    QTest::addColumn< QString >( "input" );
+    QTest::addColumn< QString >( "expected" );
+    QTest::newRow( "srcset-isolated-space" )
+        << QStringLiteral( "<img srcset='one.png&#32;1x, two.png 2x'>" )
+        << QStringLiteral( "<img srcset='https://example.test/dir/one.png&#32;1x, https://example.test/dir/two.png 2x'>" );
+    QTest::newRow( "srcset-isolated-lf" )
+        << QStringLiteral( "<img srcset='one.png&#10;1x, two.png 2x'>" )
+        << QStringLiteral( "<img srcset='https://example.test/dir/one.png&#10;1x, https://example.test/dir/two.png 2x'>" );
+    QTest::newRow( "srcset-isolated-cr" )
+        << QStringLiteral( "<img srcset='one.png&#13;1x, two.png 2x'>" )
+        << QStringLiteral( "<img srcset='https://example.test/dir/one.png&#13;1x, https://example.test/dir/two.png 2x'>" );
+    QTest::newRow( "srcset-named-newline" )
+        << QStringLiteral( "<img srcset='one.png&NewLine;1x&comma; two.png 2x'>" )
+        << QStringLiteral( "<img srcset='https://example.test/dir/one.png&NewLine;1x&comma; https://example.test/dir/two.png 2x'>" );
+    QTest::newRow( "css-named-delimiters" )
+        << QStringLiteral( "<div style='background:url&lpar;&quot;one.png&quot;&rpar;'></div>" )
+        << QStringLiteral( "<div style='background:url&lpar;&quot;https://example.test/dir/one.png&quot;&rpar;'></div>" );
+    QTest::newRow( "css-numeric-whitespace" )
+        << QStringLiteral( "<div style='background:url(&#10;&quot;one.png&quot;&#13;)'></div>" )
+        << QStringLiteral( "<div style='background:url(&#10;&quot;https://example.test/dir/one.png&quot;&#13;)'></div>" );
+    QTest::newRow( "url-named-two-codepoints" )
+        << QStringLiteral( "<img src='one&NotEqualTilde;.png'>" )
+        << QStringLiteral( "<img src='https://example.test/dir/one%E2%89%82%CC%B8.png'>" );
+    QTest::newRow( "url-numeric-c1" )
+        << QStringLiteral( "<img src='one&#128;.png'>" )
+        << QStringLiteral( "<img src='https://example.test/dir/one%E2%82%AC.png'>" );
+    QTest::newRow( "invalid-reference-stays-literal" )
+        << QStringLiteral( "<img srcset='https://example.test/one&notARealEntity;.png 1x'>" )
+        << QStringLiteral( "<img srcset='https://example.test/one&notARealEntity;.png 1x'>" );
+}
+
+void TstLinkRewrite::websiteReferenceDecodingPrecedesTokenization()
+{
+    QFETCH( QString, input );
+    QFETCH( QString, expected );
+    const QUrl document( QStringLiteral( "https://example.test/dir/page" ) );
+    const QString output = WebSite::resolveInlineUrls( input, document );
+    QCOMPARE( output, expected );
     QCOMPARE( WebSite::resolveInlineUrls( output, document ), output );
 }
 
