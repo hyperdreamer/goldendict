@@ -1,0 +1,32 @@
+{
+  "vectors": [
+    {"encoding": "UTF-8", "bytes": "e4b8ad", "text": "\u4e2d", "encoded": "e4b8ad"},
+    {"encoding": "UTF-8", "bytes": "f09f9880", "text": "\ud83d\ude00", "encoded": "f09f9880"},
+    {"encoding": "UTF-16LE", "bytes": "2d4e", "text": "\u4e2d", "encoded": "2d4e"},
+    {"encoding": "UTF-16BE", "bytes": "4e2d", "text": "\u4e2d", "encoded": "4e2d"},
+    {"encoding": "UTF-32LE", "bytes": "2d4e0000", "text": "\u4e2d", "encoded": "2d4e0000"},
+    {"encoding": "UTF-32BE", "bytes": "00004e2d", "text": "\u4e2d", "encoded": "00004e2d"},
+    {"encoding": "SHIFT_JIS", "bytes": "93fa967b", "text": "\u65e5\u672c", "encoded": "93fa967b"},
+    {"encoding": "BIG5", "bytes": "a4a4a4e5", "text": "\u4e2d\u6587", "encoded": "a4a4a4e5"},
+    {"encoding": "BIG5-HKSCS", "bytes": "a4a4a4e58745", "text": "\u4e2d\u6587\ud85c\ude67", "encoded": "a4a4a4e58745"},
+    {"encoding": "GB18030", "bytes": "d6d0cec49439fc36", "text": "\u4e2d\u6587\ud83d\ude00", "encoded": "d6d0cec49439fc36"},
+    {"encoding": "GB2312", "bytes": "d6d0cec4", "text": "\u4e2d\u6587", "encoded": "d6d0cec4"},
+    {"encoding": "EUC-JP", "bytes": "c6fccbdc", "text": "\u65e5\u672c", "encoded": "c6fccbdc"},
+    {"encoding": "WINDOWS-1251", "bytes": "cff0e8e2e5f2", "text": "\u041f\u0440\u0438\u0432\u0435\u0442", "encoded": "cff0e8e2e5f2"},
+    {"encoding": "ISO-8859-1", "bytes": "e9", "text": "\u00e9", "encoded": "e9"},
+    {"encoding": "ISO-8859-2", "bytes": "a1", "text": "\u0104", "encoded": "a1"},
+    {"encoding": "ISO-8859-3", "bytes": "a1", "text": "\u0126", "encoded": "a1"},
+    {"encoding": "ISO-8859-4", "bytes": "a1", "text": "\u0104", "encoded": "a1"},
+    {"encoding": "ISO-8859-5", "bytes": "b0", "text": "\u0410", "encoded": "b0"},
+    {"encoding": "ISO-8859-6", "bytes": "c7", "text": "\u0627", "encoded": "c7"},
+    {"encoding": "ISO-8859-7", "bytes": "c1", "text": "\u0391", "encoded": "c1"},
+    {"encoding": "ISO-8859-8", "bytes": "e0", "text": "\u05d0", "encoded": "e0"},
+    {"encoding": "ISO-8859-9", "bytes": "d0", "text": "\u011e", "encoded": "d0"},
+    {"encoding": "ISO-8859-10", "bytes": "a1", "text": "\u0104", "encoded": "a1"},
+    {"encoding": "ISO-8859-11", "bytes": "a1", "text": "\u0e01", "encoded": "a1"},
+    {"encoding": "ISO-8859-13", "bytes": "c0", "text": "\u0104", "encoded": "c0"},
+    {"encoding": "ISO-8859-14", "bytes": "a1", "text": "\u1e02", "encoded": "a1"},
+    {"encoding": "ISO-8859-15", "bytes": "a4", "text": "\u20ac", "encoded": "a4"},
+    {"encoding": "ISO-8859-16", "bytes": "a4", "text": "\u20ac", "encoded": "a4"}
+  ]
+}
