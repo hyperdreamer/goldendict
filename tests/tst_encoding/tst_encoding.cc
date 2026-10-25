@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "encoding.hh"
+#include "gddebug.hh"
 #include "support/fixtures.hh"
 
 namespace {
@@ -48,14 +49,16 @@ private slots:
     void cleanupTestCase();
 
     void allNamedConvertersOpen();
+    void edgeVectorInventory();
+    void fixedVectors_data();
     void fixedVectors();
     void aliasesAndUnknownNames();
-    void recoveryProducesOneReplacementPerStep();
-    void endianBomAndEmbeddedNul();
-    void statefulFlushAndOutputGrowth();
     void encoderRejectsUnrepresentableText();
     void htmlDetectionPrecedenceAndBounds();
+    void htmlDetectionSameLevelSourceOrder_data();
+    void htmlDetectionSameLevelSourceOrder();
     void localeValueIsDecodeOnly();
+    void localeTransitionShimDecodes();
     void immutableValueConvertsInParallel();
 };
 
@@ -102,25 +105,86 @@ void TstEncoding::allNamedConvertersOpen()
     QVERIFY( !Encoding::byName( QStringLiteral( "ISO-8859-12" ) ) );
 }
 
-void TstEncoding::fixedVectors()
+void TstEncoding::edgeVectorInventory()
 {
+    const QStringList requiredIds = {
+        QStringLiteral( "utf8-no-bom" ), QStringLiteral( "utf8-bom" ),
+        QStringLiteral( "utf16le-no-bom" ), QStringLiteral( "utf16le-bom" ),
+        QStringLiteral( "utf16be-no-bom" ), QStringLiteral( "utf16be-bom" ),
+        QStringLiteral( "utf32le-no-bom" ), QStringLiteral( "utf32le-bom" ),
+        QStringLiteral( "utf32be-no-bom" ), QStringLiteral( "utf32be-bom" ),
+        QStringLiteral( "utf16-generic-no-bom" ), QStringLiteral( "utf16-generic-le-bom" ),
+        QStringLiteral( "utf16-generic-be-bom" ),
+        QStringLiteral( "utf32-generic-no-bom" ), QStringLiteral( "utf32-generic-le-bom" ),
+        QStringLiteral( "utf32-generic-be-bom" ),
+        QStringLiteral( "utf8-embedded-nul" ), QStringLiteral( "utf8-bad-bytes" ),
+        QStringLiteral( "utf8-incomplete-tail" ), QStringLiteral( "utf8-bad-bytes-between-text" ),
+        QStringLiteral( "invalid-value-utf8-fallback" ), QStringLiteral( "invalid-value-bad-bytes" ),
+        QStringLiteral( "utf16le-unpaired-high" ), QStringLiteral( "utf16le-unpaired-low" ),
+        QStringLiteral( "utf16le-incomplete-unit" ),
+        QStringLiteral( "utf16be-unpaired-high" ), QStringLiteral( "utf16be-unpaired-low" ),
+        QStringLiteral( "utf16be-incomplete-unit" ),
+        QStringLiteral( "iso2022jp-final-flush" ), QStringLiteral( "iso2022jp-unflushed-input" ),
+        QStringLiteral( "utf8-output-growth" )
+    };
+    QSet< QString > ids;
+    for ( QJsonValue const & value : loadVectors() )
+    {
+        const QString id = jsonString( value.toObject(), QStringLiteral( "id" ) );
+        if ( !id.isEmpty() )
+        {
+            QVERIFY2( !ids.contains( id ), qPrintable( QStringLiteral( "duplicate fixture: %1" ).arg( id ) ) );
+            ids.insert( id );
+        }
+    }
+    for ( QString const & id : requiredIds )
+        QVERIFY2( ids.contains( id ), qPrintable( QStringLiteral( "missing edge fixture: %1" ).arg( id ) ) );
+}
+
+void TstEncoding::fixedVectors_data()
+{
+    QTest::addColumn< QJsonObject >( "vector" );
     const QJsonArray vectors = loadVectors();
-    QCOMPARE( vectors.size(), 28 );
+    QVERIFY2( !vectors.isEmpty(), "encoding/vectors.json must contain fixed vectors" );
 
     for ( QJsonValue const & value : vectors )
     {
         const QJsonObject vector = value.toObject();
-        const QString name = jsonString( vector, QStringLiteral( "encoding" ) );
-        const std::unique_ptr< Encoding > encoding = Encoding::byName( name );
-        QVERIFY2( encoding, qPrintable( name ) );
-
-        const QByteArray bytes = QByteArray::fromHex( jsonString( vector, QStringLiteral( "bytes" ) ).toLatin1() );
-        const QString expected = jsonString( vector, QStringLiteral( "text" ) );
-        QCOMPARE( encoding->decode( bytes ), expected );
-
-        const QByteArray encoded = encoding->encode( expected );
-        QCOMPARE( encoded.toHex(), jsonString( vector, QStringLiteral( "encoded" ) ).toLatin1() );
+        for ( QString const & key : { QStringLiteral( "encoding" ), QStringLiteral( "bytes" ),
+                                      QStringLiteral( "text" ) } )
+            QVERIFY2( vector.value( key ).isString(), qPrintable( QStringLiteral( "missing string field: %1" ).arg( key ) ) );
+        QVERIFY2( vector.value( QStringLiteral( "encoded" ) ).isString()
+                      || vector.value( QStringLiteral( "encodeError" ) ).toBool(),
+                  "each fixture must specify reverse bytes or an encoding failure" );
+        const QString id = vector.contains( QStringLiteral( "id" ) )
+            ? jsonString( vector, QStringLiteral( "id" ) )
+            : jsonString( vector, QStringLiteral( "encoding" ) ) + QLatin1Char( '-' )
+                + jsonString( vector, QStringLiteral( "bytes" ) );
+        QTest::newRow( qPrintable( id ) ) << vector;
     }
+}
+
+void TstEncoding::fixedVectors()
+{
+    QFETCH( QJsonObject, vector );
+    const QString name = jsonString( vector, QStringLiteral( "encoding" ) );
+    const bool invalidValue = vector.value( QStringLiteral( "invalidValue" ) ).toBool();
+    const std::unique_ptr< Encoding > encoding = invalidValue
+        ? std::make_unique< Encoding >() : Encoding::byName( name );
+    QVERIFY2( encoding, qPrintable( name ) );
+    QCOMPARE( encoding->isValid(), !invalidValue );
+
+    const int repeat = vector.value( QStringLiteral( "repeat" ) ).toInt( 1 );
+    QVERIFY( repeat > 0 );
+    const QByteArray bytes = QByteArray::fromHex( jsonString( vector, QStringLiteral( "bytes" ) ).toLatin1() ).repeated( repeat );
+    const QString expected = jsonString( vector, QStringLiteral( "text" ) ).repeated( repeat );
+    QCOMPARE( encoding->decode( bytes ), expected );
+
+    if ( vector.value( QStringLiteral( "encodeError" ) ).toBool() )
+        QVERIFY_THROWS_EXCEPTION( Encoding::exUnrepresentable, encoding->encode( expected ) );
+    else
+        QCOMPARE( encoding->encode( expected ),
+                  QByteArray::fromHex( jsonString( vector, QStringLiteral( "encoded" ) ).toLatin1() ).repeated( repeat ) );
 }
 
 void TstEncoding::aliasesAndUnknownNames()
@@ -164,67 +228,6 @@ void TstEncoding::aliasesAndUnknownNames()
     QVERIFY( latin1 );
     QVERIFY_THROWS_EXCEPTION( Encoding::exUnrepresentable,
                               latin1->encode( QString::fromUtf8( "\xe4\xb8\xad" ) ) );
-}
-
-void TstEncoding::recoveryProducesOneReplacementPerStep()
-{
-    QCOMPARE( Encoding::utf8().decode( QByteArray::fromHex( "ffff" ) ), QString( 2, QChar( 0xfffd ) ) );
-    QCOMPARE( Encoding::utf8().decode( QByteArray::fromHex( "e282" ) ), QString( QChar( 0xfffd ) ) );
-
-    const QByteArray badUtf8 = QByteArray::fromHex( "41ffff42" );
-    QCOMPARE( Encoding::utf8().decode( badUtf8 ), QStringLiteral( "A\ufffd\ufffdB" ) );
-
-    const Encoding invalid;
-    QCOMPARE( invalid.decode( QByteArray::fromHex( "e282ac" ) ), QStringLiteral( "\u20ac" ) );
-    QCOMPARE( invalid.decode( QByteArray::fromHex( "ffff" ) ), QString( 2, QChar( 0xfffd ) ) );
-}
-
-void TstEncoding::endianBomAndEmbeddedNul()
-{
-    const Encoding utf8 = Encoding::utf8();
-    QCOMPARE( utf8.decode( QByteArray::fromHex( "efbbbfe4b8ad" ) ), QStringLiteral( "\u4e2d" ) );
-
-    const auto utf16le = Encoding::byName( QStringLiteral( "UTF-16LE" ) );
-    const auto utf16be = Encoding::byName( QStringLiteral( "UTF-16BE" ) );
-    const auto utf32le = Encoding::byName( QStringLiteral( "UTF-32LE" ) );
-    const auto utf32be = Encoding::byName( QStringLiteral( "UTF-32BE" ) );
-    QVERIFY( utf16le && utf16be && utf32le && utf32be );
-
-    QCOMPARE( utf16le->decode( QByteArray::fromHex( "2d4e" ) ), QStringLiteral( "\u4e2d" ) );
-    QCOMPARE( utf16be->decode( QByteArray::fromHex( "4e2d" ) ), QStringLiteral( "\u4e2d" ) );
-    QCOMPARE( utf32le->decode( QByteArray::fromHex( "2d4e0000" ) ), QStringLiteral( "\u4e2d" ) );
-    QCOMPARE( utf32be->decode( QByteArray::fromHex( "00004e2d" ) ), QStringLiteral( "\u4e2d" ) );
-    QCOMPARE( utf16le->decode( QByteArray::fromHex( "fffe2d4e" ) ), QStringLiteral( "\u4e2d" ) );
-    QCOMPARE( utf16be->decode( QByteArray::fromHex( "feff4e2d" ) ), QStringLiteral( "\u4e2d" ) );
-    QCOMPARE( utf32le->decode( QByteArray::fromHex( "fffe00002d4e0000" ) ), QStringLiteral( "\u4e2d" ) );
-    QCOMPARE( utf32be->decode( QByteArray::fromHex( "0000feff00004e2d" ) ), QStringLiteral( "\u4e2d" ) );
-
-    const auto generic16 = Encoding::byName( QStringLiteral( "UTF-16" ) );
-    const auto generic32 = Encoding::byName( QStringLiteral( "UTF-32" ) );
-    QVERIFY( generic16 && generic32 );
-    QCOMPARE( generic16->decode( QByteArray::fromHex( "fffe2d4e" ) ), QStringLiteral( "\u4e2d" ) );
-    QCOMPARE( generic32->decode( QByteArray::fromHex( "0000feff00004e2d" ) ), QStringLiteral( "\u4e2d" ) );
-
-    const QByteArray withNul( "a\0b", 3 );
-    const QString embeddedNul = QStringLiteral( "a" ) + QChar( 0 ) + QStringLiteral( "b" );
-    QCOMPARE( utf8.decode( withNul ), embeddedNul );
-    QCOMPARE( utf8.encode( embeddedNul ), withNul );
-}
-
-void TstEncoding::statefulFlushAndOutputGrowth()
-{
-    const auto iso2022 = Encoding::byName( QStringLiteral( "ISO-2022-JP" ) );
-    QVERIFY( iso2022 );
-    const QString japanese = QStringLiteral( "\u65e5\u672c" );
-    const QByteArray expected = QByteArray::fromHex( "1b2442467c4b5c1b2842" );
-    QCOMPARE( iso2022->encode( japanese ), expected );
-    QCOMPARE( iso2022->decode( expected ), japanese );
-
-    QString large;
-    large.reserve( 120000 );
-    for ( int i = 0; i < 40000; ++i )
-        large.append( QStringLiteral( "abc" ) );
-    QCOMPARE( Encoding::utf8().decode( Encoding::utf8().encode( large ) ), large );
 }
 
 void TstEncoding::encoderRejectsUnrepresentableText()
@@ -301,12 +304,120 @@ void TstEncoding::htmlDetectionPrecedenceAndBounds()
     QCOMPARE( detected, Encoding::DetectedBy::Fallback );
 }
 
+void TstEncoding::htmlDetectionSameLevelSourceOrder_data()
+{
+    QTest::addColumn< QByteArray >( "body" );
+    QTest::addColumn< QByteArray >( "header" );
+    QTest::addColumn< QString >( "expectedName" );
+    QTest::addColumn< Encoding::DetectedBy >( "expectedSource" );
+
+    QTest::newRow( "header-first-recognised" )
+        << QByteArray()
+        << QByteArrayLiteral( "text/html; charset=Shift_JIS; CHARSET = 'GB2312'" )
+        << QStringLiteral( "SHIFT_JIS" ) << Encoding::DetectedBy::Header;
+    QTest::newRow( "header-unknown-then-known" )
+        << QByteArray()
+        << QByteArrayLiteral( "text/html; charset=unknown-codepage; charset=; charset=EUCJP; charset=UTF-8" )
+        << QStringLiteral( "EUC-JP" ) << Encoding::DetectedBy::Header;
+
+    QTest::newRow( "meta-first-recognised" )
+        << QByteArrayLiteral( "<meta charset=windows-1251><META charset = 'Shift_JIS'>" )
+        << QByteArray()
+        << QStringLiteral( "WINDOWS-1251" ) << Encoding::DetectedBy::Meta;
+    QTest::newRow( "meta-unknown-then-known" )
+        << QByteArrayLiteral( "<meta charset=unknown-codepage><meta charset=''>"
+                              "<meta charset=GB2312><meta charset=EUCJP>" )
+        << QByteArray()
+        << QStringLiteral( "GB2312" ) << Encoding::DetectedBy::Meta;
+
+    QTest::newRow( "http-equiv-first-recognised" )
+        << QByteArrayLiteral( "<meta http-equiv=Content-Type content='text/html; charset=EUCJP'>"
+                              "<META content='text/html; charset=windows-1251' http-equiv=Content-Type>" )
+        << QByteArray()
+        << QStringLiteral( "EUC-JP" ) << Encoding::DetectedBy::Meta;
+    QTest::newRow( "http-equiv-unknown-then-known" )
+        << QByteArrayLiteral( "<meta http-equiv=Content-Type content='text/html; charset=unknown-codepage'>"
+                              "<meta content='text/html; charset=' http-equiv=Content-Type>"
+                              "<meta content='text/html; charset=Shift_JIS' http-equiv=Content-Type>"
+                              "<meta http-equiv=Content-Type content='text/html; charset=UTF-8'>" )
+        << QByteArray()
+        << QStringLiteral( "SHIFT_JIS" ) << Encoding::DetectedBy::Meta;
+    QTest::newRow( "http-equiv-content-parameters-first-recognised" )
+        << QByteArrayLiteral( "<meta http-equiv=Content-Type content='text/html; charset=GB2312; charset=EUCJP'>" )
+        << QByteArray()
+        << QStringLiteral( "GB2312" ) << Encoding::DetectedBy::Meta;
+
+    QTest::newRow( "xml-first-recognised" )
+        << QByteArrayLiteral( "<?xml encoding='EUCJP'?><?xml encoding='Shift_JIS'?>" )
+        << QByteArray()
+        << QStringLiteral( "EUC-JP" ) << Encoding::DetectedBy::XmlDeclaration;
+    QTest::newRow( "xml-unknown-then-known" )
+        << QByteArrayLiteral( "<?xml encoding='unknown-codepage'?><?xml encoding=''?>"
+                              "<?xml encoding='GB2312'?><?xml encoding='UTF-8'?>" )
+        << QByteArray()
+        << QStringLiteral( "GB2312" ) << Encoding::DetectedBy::XmlDeclaration;
+}
+
+void TstEncoding::htmlDetectionSameLevelSourceOrder()
+{
+    QFETCH( QByteArray, body );
+    QFETCH( QByteArray, header );
+    QFETCH( QString, expectedName );
+    QFETCH( Encoding::DetectedBy, expectedSource );
+    Encoding::DetectedBy detected = Encoding::DetectedBy::Fallback;
+    const Encoding result = Encoding::forHtml( body, header, QStringLiteral( "ISO-8859-1" ), &detected );
+    QCOMPARE( result.name(), expectedName );
+    QCOMPARE( detected, expectedSource );
+}
+
 void TstEncoding::localeValueIsDecodeOnly()
 {
     const Encoding locale = Encoding::forLocale();
     QVERIFY( locale.isValid() );
     QCOMPARE( locale.decode( QByteArrayLiteral( "locale" ) ), QStringLiteral( "locale" ) );
-    QVERIFY_THROWS_EXCEPTION( Encoding::exUnrepresentable, locale.encode( QStringLiteral( "locale" ) ) );
+    for ( QString const & text : { QStringLiteral( "locale" ), QString() } )
+    {
+        try
+        {
+            locale.encode( text );
+            QFAIL( "encoding with a decode-only locale value must throw" );
+        }
+        catch ( Encoding::exUnrepresentable const & error )
+        {
+            const QString message = QString::fromUtf8( error.what() );
+            QVERIFY2( message.contains( QStringLiteral( "decode-only" ), Qt::CaseInsensitive ),
+                      qPrintable( message ) );
+            QVERIFY2( message.contains( locale.name() ), qPrintable( message ) );
+            QVERIFY2( message.contains( QStringLiteral( "scalar index 0" ) ), qPrintable( message ) );
+        }
+    }
+
+    const Encoding invalid;
+    try
+    {
+        invalid.encode( QStringLiteral( "locale" ) );
+        QFAIL( "encoding with an invalid value must throw" );
+    }
+    catch ( Encoding::exUnrepresentable const & error )
+    {
+        const QString message = QString::fromUtf8( error.what() );
+        QVERIFY2( message.contains( QStringLiteral( "<invalid>" ) ), qPrintable( message ) );
+        QVERIFY2( !message.contains( QStringLiteral( "decode-only" ), Qt::CaseInsensitive ),
+                  qPrintable( message ) );
+    }
+}
+
+void TstEncoding::localeTransitionShimDecodes()
+{
+    // Keep the exact pointer spelling and overloads used by indexedzip.cc and
+    // epwing_book.cc until their owning task migrates the callers.
+    QTextCodec * const codec = gdCodecForLocale();
+    QVERIFY( codec );
+    const Encoding locale = Encoding::forLocale();
+    const QByteArray input = QByteArray::fromHex( "4100ffff42" );
+    QCOMPARE( codec->toUnicode( input.constData(), input.size() ), locale.decode( input ) );
+    QCOMPARE( codec->toUnicode( input ), locale.decode( input ) );
+    QCOMPARE( codec->toUnicode( "locale" ), locale.decode( QByteArrayLiteral( "locale" ) ) );
 }
 
 void TstEncoding::immutableValueConvertsInParallel()

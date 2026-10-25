@@ -875,11 +875,12 @@ QString Encoding::decode( QByteArray const & data ) const noexcept
 
 QByteArray Encoding::encode( QString const & text ) const
 {
-    if ( !isValid() || decodeOnly_ )
-        throw exUnrepresentable( unrepresentableContext( canonicalName_.isEmpty()
-                                                              ? QStringLiteral( "<invalid>" )
-                                                              : canonicalName_,
-                                                          0 ) );
+    if ( !isValid() )
+        throw exUnrepresentable( unrepresentableContext( QStringLiteral( "<invalid>" ), 0 ) );
+
+    if ( decodeOnly_ )
+        throw exUnrepresentable( unrepresentableContext( canonicalName_, 0 )
+                                 + ": decode-only locale encoding cannot encode" );
 
     const QByteArray scalars = makeUtf32Le( text, canonicalName_ );
     if ( scalars.isEmpty() )
