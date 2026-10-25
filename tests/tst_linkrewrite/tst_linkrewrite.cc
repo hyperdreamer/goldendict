@@ -841,6 +841,48 @@ void TstLinkRewrite::websiteNonAsciiWhitespaceIsUrlData_data()
         << QStringLiteral( "<base href='://invalid'><img src='image.png'>" ) << QStringLiteral( "src" )
         << QStringLiteral( "<base href='://invalid'><img src='https://example.test/dir/image.png'>" )
         << QStringLiteral( "https://example.test/dir/image.png" );
+    // A scalar above U+FFFF spans two QChars. Encoding each code unit
+    // separately silently drops the character instead of preserving its UTF-8.
+    QTest::newRow( "supplementary-src-literal" )
+        << QStringLiteral( "<img src='im\U0001f600age.png'>" ) << QStringLiteral( "src" )
+        << QStringLiteral( "<img src='https://example.test/dir/im%F0%9F%98%80age.png'>" )
+        << QStringLiteral( "https://example.test/dir/im%F0%9F%98%80age.png" );
+    QTest::newRow( "supplementary-src-entity" )
+        << QStringLiteral( "<img src='im&#x1F600;age.png'>" ) << QStringLiteral( "src" )
+        << QStringLiteral( "<img src='https://example.test/dir/im%F0%9F%98%80age.png'>" )
+        << QStringLiteral( "https://example.test/dir/im%F0%9F%98%80age.png" );
+    QTest::newRow( "supplementary-srcset-literal" )
+        << QStringLiteral( "<img srcset='im\U0001f600age.png 1x'>" ) << QStringLiteral( "srcset" )
+        << QStringLiteral( "<img srcset='https://example.test/dir/im%F0%9F%98%80age.png 1x'>" )
+        << QStringLiteral( "https://example.test/dir/im%F0%9F%98%80age.png 1x" );
+    QTest::newRow( "supplementary-srcset-entity" )
+        << QStringLiteral( "<img srcset='im&#x1F600;age.png 1x'>" ) << QStringLiteral( "srcset" )
+        << QStringLiteral( "<img srcset='https://example.test/dir/im%F0%9F%98%80age.png 1x'>" )
+        << QStringLiteral( "https://example.test/dir/im%F0%9F%98%80age.png 1x" );
+    QTest::newRow( "supplementary-css-literal" )
+        << QStringLiteral( "<div style='background:url(im\U0001f600age.png)'></div>" ) << QStringLiteral( "style" )
+        << QStringLiteral( "<div style='background:url(https://example.test/dir/im%F0%9F%98%80age.png)'></div>" )
+        << QStringLiteral( "background:url(https://example.test/dir/im%F0%9F%98%80age.png)" );
+    QTest::newRow( "supplementary-css-entity" )
+        << QStringLiteral( "<div style='background:url(im&#x1F600;age.png)'></div>" ) << QStringLiteral( "style" )
+        << QStringLiteral( "<div style='background:url(https://example.test/dir/im%F0%9F%98%80age.png)'></div>" )
+        << QStringLiteral( "background:url(https://example.test/dir/im%F0%9F%98%80age.png)" );
+    QTest::newRow( "supplementary-base-literal" )
+        << QStringLiteral( "<base href='im\U0001f600age/'><img src='image.png'>" ) << QStringLiteral( "src" )
+        << QStringLiteral( "<base href='https://example.test/dir/im%F0%9F%98%80age/'><img src='https://example.test/dir/im%F0%9F%98%80age/image.png'>" )
+        << QStringLiteral( "https://example.test/dir/im%F0%9F%98%80age/image.png" );
+    QTest::newRow( "supplementary-base-entity" )
+        << QStringLiteral( "<base href='im&#x1F600;age/'><img src='image.png'>" ) << QStringLiteral( "src" )
+        << QStringLiteral( "<base href='https://example.test/dir/im%F0%9F%98%80age/'><img src='https://example.test/dir/im%F0%9F%98%80age/image.png'>" )
+        << QStringLiteral( "https://example.test/dir/im%F0%9F%98%80age/image.png" );
+    QTest::newRow( "supplementary-letter" )
+        << QStringLiteral( "<img src='im\U0001d504age.png'>" ) << QStringLiteral( "src" )
+        << QStringLiteral( "<img src='https://example.test/dir/im%F0%9D%94%84age.png'>" )
+        << QStringLiteral( "https://example.test/dir/im%F0%9D%94%84age.png" );
+    QTest::newRow( "maximum-unicode-scalar" )
+        << QStringLiteral( "<img src='im\U0010ffffage.png'>" ) << QStringLiteral( "src" )
+        << QStringLiteral( "<img src='https://example.test/dir/im%F4%8F%BF%BFage.png'>" )
+        << QStringLiteral( "https://example.test/dir/im%F4%8F%BF%BFage.png" );
 }
 
 

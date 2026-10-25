@@ -2533,13 +2533,13 @@ inline QString urlAsciiForm( QString const & text )
 {
   QString out;
   out.reserve( text.size() + 8 );
-  for ( QChar const c : text )
+  // Convert the complete string so UTF-16 surrogate pairs stay intact.
+  QByteArray const utf8 = text.toUtf8();
+  for ( unsigned char const c : utf8 )
   {
-    if ( c.unicode() < 0x80 ) { out.append( c ); continue; }
-    QByteArray const bytes = QString( c ).toUtf8();
-    for ( char b : bytes )
-      out.append( QLatin1Char( '%' ) )
-         .append( QString::number( static_cast< unsigned char >( b ), 16 ).toUpper().rightJustified( 2, QLatin1Char( '0' ) ) );
+    if ( c < 0x80 ) { out.append( QLatin1Char( c ) ); continue; }
+    out.append( QLatin1Char( '%' ) )
+       .append( QString::number( c, 16 ).toUpper().rightJustified( 2, QLatin1Char( '0' ) ) );
   }
   return out;
 }
