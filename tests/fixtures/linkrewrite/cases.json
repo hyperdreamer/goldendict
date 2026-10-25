@@ -3,7 +3,8 @@
     "Fixed expected values for the four LinkRewrite rules. Every row is an authored oracle: no expected value is produced by the implementation under test.",
     "Rows are grouped by production entry point. 'twice: true' means the row is also an idempotence pin: applying the same rule to its own output must reproduce that output byte for byte.",
     "The 'engineSeam' rows pin what the common pass must leave alone after a retained format-specific engine (StarDict, DICT, Zim) composes a lookup URL: the path headword is the only component LinkRewrite::applyGdLookup normalizes.",
-    "Whitespace inside an attribute value or a CSS url() is preserved by span-only edits; a target is trimmed only to classify it, never to re-indent the surrounding markup."
+    "Whitespace inside an attribute value or a CSS url() is preserved by span-only edits; a target is trimmed only to classify it, never to re-indent the surrounding markup.",
+    "Every rule tokenizes the original input once: tags are recognized by their complete name, attribute values are classified individually, and 'url(' is CSS only outside tags and inside style attribute values. The rows below pin that no rule edits text another rule emitted, and that no attribute value is rescanned as markup or CSS."
   ],
 
   "gdLookup": [
@@ -128,6 +129,12 @@
       "twice": true
     },
     {
+      "id": "custom-element-href-untouched",
+      "input": "<abbr-preview href=\"gdlookup://localhost/red fox\">x</abbr-preview>",
+      "expected": "<abbr-preview href=\"gdlookup://localhost/red fox\">x</abbr-preview>",
+      "twice": true
+    },
+    {
       "id": "two-links-one-string",
       "input": "<a href=\"gdlookup://localhost/red fox\">a</a> <a href=\"gdlookup://localhost/cat\">b</a>",
       "expected": "<a href=\"gdlookup://localhost/red%20fox\">a</a> <a href=\"gdlookup://localhost/cat\">b</a>",
@@ -190,6 +197,118 @@
       "dictId": "d",
       "input": "url(/a/b.png)",
       "expected": "url(bres://d/a/b.png)",
+      "twice": true
+    },
+    {
+      "id": "url-text-in-descriptive-attribute-untouched",
+      "dictId": "d",
+      "input": "<img alt=\"url(a.png)\" src=\"a.png\">",
+      "expected": "<img alt=\"url(a.png)\" src=\"bres://d/a.png\">",
+      "twice": true
+    },
+    {
+      "id": "url-text-in-descriptive-attribute-only",
+      "dictId": "d",
+      "input": "<img alt=\"url(a.png)\">",
+      "expected": "<img alt=\"url(a.png)\">",
+      "twice": true
+    },
+    {
+      "id": "absolute-resource-with-url-text-untouched",
+      "dictId": "d",
+      "input": "<img src=\"https://example.org/url(a.png)\">",
+      "expected": "<img src=\"https://example.org/url(a.png)\">",
+      "twice": true
+    },
+    {
+      "id": "url-text-inside-relative-src-is-one-target",
+      "dictId": "d",
+      "input": "<img src=\"url(a.png)\">",
+      "expected": "<img src=\"bres://d/url(a.png)\">",
+      "twice": true
+    },
+    {
+      "id": "url-text-inside-query-preserved",
+      "dictId": "d",
+      "input": "<img src=\"/a.png?caption=url(b.png)\">",
+      "expected": "<img src=\"bres://d/a.png?caption=url(b.png)\">",
+      "twice": true
+    },
+    {
+      "id": "css-url-only-inside-style-value",
+      "dictId": "d",
+      "input": "<div title=\"url(a.png)\" style=\"background:url(b.png)\"></div>",
+      "expected": "<div title=\"url(a.png)\" style=\"background:url(bres://d/b.png)\"></div>",
+      "twice": true
+    },
+    {
+      "id": "custom-element-is-not-a-resource-tag",
+      "dictId": "d",
+      "input": "<img-preview src=\"a.png\">",
+      "expected": "<img-preview src=\"a.png\">",
+      "twice": true
+    },
+    {
+      "id": "prefixed-element-is-not-a-resource-tag",
+      "dictId": "d",
+      "input": "<svg:image src=\"a.png\"></svg:image>",
+      "expected": "<svg:image src=\"a.png\"></svg:image>",
+      "twice": true
+    },
+    {
+      "id": "padded-relative-resource-keeps-padding",
+      "dictId": "d",
+      "input": "<img src=\" a.png \" >",
+      "expected": "<img src=\" bres://d/a.png \" >",
+      "twice": true
+    },
+    {
+      "id": "padded-root-relative-resource-keeps-padding",
+      "dictId": "d",
+      "input": "<img src=\" /a.png \" >",
+      "expected": "<img src=\" bres://d/a.png \" >",
+      "twice": true
+    },
+    {
+      "id": "css-quoted-parentheses",
+      "dictId": "d",
+      "input": "a{background:url(\"image(1).png\")}",
+      "expected": "a{background:url(\"bres://d/image(1).png\")}",
+      "twice": true
+    },
+    {
+      "id": "css-single-quoted-parentheses",
+      "dictId": "d",
+      "input": "a{background:url('image(1).png')}",
+      "expected": "a{background:url('bres://d/image(1).png')}",
+      "twice": true
+    },
+    {
+      "id": "css-quoted-escaped-delimiters",
+      "dictId": "d",
+      "input": "a{background:url(\"a\\\"b'.png\")}",
+      "expected": "a{background:url(\"bres://d/a\\\"b'.png\")}",
+      "twice": true
+    },
+    {
+      "id": "css-adjacent-urls-stay-separate",
+      "dictId": "d",
+      "input": "a{background:url(a.png)}b{background:url(b.png)}",
+      "expected": "a{background:url(bres://d/a.png)}b{background:url(bres://d/b.png)}",
+      "twice": true
+    },
+    {
+      "id": "broken-closing-tag-is-not-rescanned-as-markup",
+      "dictId": "d",
+      "input": "<a href=\"a.png\"></a href=\"b.png\"><img src=\"c.png\">",
+      "expected": "<a href=\"a.png\"></a href=\"b.png\"><img src=\"bres://d/c.png\">",
+      "twice": true
+    },
+    {
+      "id": "comment-content-is-not-markup",
+      "dictId": "d",
+      "input": "<!-- <img src=\"a.png\"> url(a.png) --><img src=\"b.png\">",
+      "expected": "<!-- <img src=\"a.png\"> url(a.png) --><img src=\"bres://d/b.png\">",
       "twice": true
     },
     {
@@ -355,6 +474,13 @@
       "input": "<img src=\"qrcx://localhost/icons/playsound.png\">",
       "expected": "<img src=\"qrcx://localhost/icons/playsound.png\">",
       "twice": true
+    },
+    {
+      "id": "padded-unqualified-icon-keeps-padding",
+      "dictId": "d",
+      "input": "<img src=\" gico:/dicticon.png \" >",
+      "expected": "<img src=\" gico://d/dicticon.png \" >",
+      "twice": true
     }
   ],
 
@@ -427,6 +553,69 @@
       "dictId": "d",
       "input": "<audio controls>x</audio>",
       "expected": "<audio controls>x</audio>",
+      "twice": true
+    },
+    {
+      "id": "audio-source-double-quote-in-single-quoted-attribute",
+      "dictId": "d",
+      "input": "<audio src='a\"b.wav'></audio>",
+      "expected": "<script type=\"text/javascript\">gdAudioLinks.first = gdAudioLinks.first || \"gdau://d/a\\\"b.wav\";gdAudioLinks['d'] = gdAudioLinks['d'] || \"gdau://d/a\\\"b.wav\";</script><span class=\"sdict_h_wav\"><a href=\"gdau://d/a&quot;b.wav\"> <img src=\"qrcx://localhost/icons/playsound.png\" border=\"0\" alt=\"Play\"></a></span>",
+      "twice": true
+    },
+    {
+      "id": "audio-source-text-cannot-execute-as-script",
+      "dictId": "d",
+      "input": "<audio src='a\";globalThis.injected=1;//'></audio>",
+      "expected": "<script type=\"text/javascript\">gdAudioLinks.first = gdAudioLinks.first || \"gdau://d/a\\\";globalThis.injected=1;//\";gdAudioLinks['d'] = gdAudioLinks['d'] || \"gdau://d/a\\\";globalThis.injected=1;//\";</script><span class=\"sdict_h_wav\"><a href=\"gdau://d/a&quot;;globalThis.injected=1;//\"> <img src=\"qrcx://localhost/icons/playsound.png\" border=\"0\" alt=\"Play\"></a></span>",
+      "twice": true
+    },
+    {
+      "id": "audio-source-backslash-is-escaped-for-script",
+      "dictId": "d",
+      "input": "<audio src=\"a\\b.wav\"></audio>",
+      "expected": "<script type=\"text/javascript\">gdAudioLinks.first = gdAudioLinks.first || \"gdau://d/a\\\\b.wav\";gdAudioLinks['d'] = gdAudioLinks['d'] || \"gdau://d/a\\\\b.wav\";</script><span class=\"sdict_h_wav\"><a href=\"gdau://d/a\\b.wav\"> <img src=\"qrcx://localhost/icons/playsound.png\" border=\"0\" alt=\"Play\"></a></span>",
+      "twice": true
+    },
+    {
+      "id": "audio-source-single-quote-keeps-writer-contract",
+      "dictId": "d",
+      "input": "<audio src=\"it's.wav\"></audio>",
+      "expected": "<script type=\"text/javascript\">gdAudioLinks.first = gdAudioLinks.first || \"gdau://d/it\\'s.wav\";gdAudioLinks['d'] = gdAudioLinks['d'] || \"gdau://d/it\\'s.wav\";</script><span class=\"sdict_h_wav\"><a href=\"gdau://d/it's.wav\"> <img src=\"qrcx://localhost/icons/playsound.png\" border=\"0\" alt=\"Play\"></a></span>",
+      "twice": true
+    },
+    {
+      "id": "audio-source-control-character-is-escaped",
+      "dictId": "d",
+      "input": "<audio src=\"a\u0001b.wav\"></audio>",
+      "expected": "<script type=\"text/javascript\">gdAudioLinks.first = gdAudioLinks.first || \"gdau://d/a\\u0001b.wav\";gdAudioLinks['d'] = gdAudioLinks['d'] || \"gdau://d/a\\u0001b.wav\";</script><span class=\"sdict_h_wav\"><a href=\"gdau://d/a&#1;b.wav\"> <img src=\"qrcx://localhost/icons/playsound.png\" border=\"0\" alt=\"Play\"></a></span>",
+      "twice": true
+    },
+    {
+      "id": "audio-closing-tag-inside-quoted-title",
+      "dictId": "d",
+      "input": "<audio src=\"a.wav\"><span title=\"</audio>\">Play</span></audio>",
+      "expected": "<script type=\"text/javascript\">gdAudioLinks.first = gdAudioLinks.first || \"gdau://d/a.wav\";gdAudioLinks['d'] = gdAudioLinks['d'] || \"gdau://d/a.wav\";</script><span class=\"sdict_h_wav\"><a href=\"gdau://d/a.wav\"><span title=\"</audio>\">Play</span> <img src=\"qrcx://localhost/icons/playsound.png\" border=\"0\" alt=\"Play\"></a></span>",
+      "twice": true
+    },
+    {
+      "id": "audio-body-uppercase-image-suppresses-icon",
+      "dictId": "d",
+      "input": "<audio src=\"a.wav\">Play <IMG SRC=\"x.png\"></audio>",
+      "expected": "<script type=\"text/javascript\">gdAudioLinks.first = gdAudioLinks.first || \"gdau://d/a.wav\";gdAudioLinks['d'] = gdAudioLinks['d'] || \"gdau://d/a.wav\";</script><span class=\"sdict_h_wav\"><a href=\"gdau://d/a.wav\">Play <IMG SRC=\"x.png\"></a></span>",
+      "twice": true
+    },
+    {
+      "id": "audio-body-multiline-image-suppresses-icon",
+      "dictId": "d",
+      "input": "<audio src=\"a.wav\">Play <img\nsrc=\"x.png\"></audio>",
+      "expected": "<script type=\"text/javascript\">gdAudioLinks.first = gdAudioLinks.first || \"gdau://d/a.wav\";gdAudioLinks['d'] = gdAudioLinks['d'] || \"gdau://d/a.wav\";</script><span class=\"sdict_h_wav\"><a href=\"gdau://d/a.wav\">Play <img\nsrc=\"x.png\"></a></span>",
+      "twice": true
+    },
+    {
+      "id": "audio-body-quoted-image-text-keeps-icon",
+      "dictId": "d",
+      "input": "<audio src=\"a.wav\"><span title=\"<img src=x>\">Play</span></audio>",
+      "expected": "<script type=\"text/javascript\">gdAudioLinks.first = gdAudioLinks.first || \"gdau://d/a.wav\";gdAudioLinks['d'] = gdAudioLinks['d'] || \"gdau://d/a.wav\";</script><span class=\"sdict_h_wav\"><a href=\"gdau://d/a.wav\"><span title=\"<img src=x>\">Play</span> <img src=\"qrcx://localhost/icons/playsound.png\" border=\"0\" alt=\"Play\"></a></span>",
       "twice": true
     }
   ],

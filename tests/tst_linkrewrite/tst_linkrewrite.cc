@@ -9,7 +9,10 @@
  * pins the common contract: exact output, preserved quotes/whitespace, the
  * absolute/protocol-relative/fragment/data exclusions, dictionary-root
  * resources, qualified icons, the production audio wrapper, and second-pass
- * idempotence for every rule.
+ * idempotence for every rule. The named tests also state the two structural
+ * invariants the ledger rests on: every span is classified in the original
+ * input (a rewritten value is never rescanned as markup or CSS), and the two
+ * serialization contexts of the audio wrapper are escaped separately.
  *
  * Fixed expected values live in fixtures/linkrewrite/cases.json so a caller
  * cannot "fix" a regression by editing the suite alone; the named tests below
@@ -86,7 +89,9 @@ QString applyProduction( QString const & function, QString const & input, QStrin
 }
 
 /// Renders a string so a control character or a trailing space is visible in a
-/// failure message instead of silently collapsing the difference.
+/// failure message instead of silently collapsing the difference. A very long
+/// value keeps its head and tail: an unbounded message can be truncated by the
+/// test runner in the middle, which would hide the whole comparison.
 QString display( QString const & text )
 {
     QString shown;
@@ -102,6 +107,12 @@ QString display( QString const & text )
         else
             shown += character;
     }
+
+    constexpr qsizetype Head = 220;
+    constexpr qsizetype Tail = 120;
+
+    if ( shown.size() > Head + Tail )
+        return shown.left( Head ) + QStringLiteral( "..." ) + shown.right( Tail );
 
     return shown;
 }
@@ -141,6 +152,14 @@ class TstLinkRewrite : public QObject
 
     void quotedAttributeContentIsNotScannedAsMarkup();
     void nonHtmlTextAndForeignMarkupAreUntouched();
+
+    void cssUrlTextIsOnlyRewrittenWhereCssLives();
+    void cssUrlValuesAreClassifiedOnceFromTheOriginalInput();
+    void completeTagNamesDecideResourceTags();
+    void attributePaddingIsPreservedAroundTheRewrittenTarget();
+    void quotedCssUrlsKeepParenthesesAndEscapes();
+    void audioTagBoundariesAreRealTags();
+    void audioSourceTextCannotBecomeScript();
 };
 
 void TstLinkRewrite::initTestCase()
@@ -272,11 +291,20 @@ void TstLinkRewrite::fixtureRowsMatchProduction()
     }
 
     QVERIFY2( rowCount > 0, "the fixture ledger has no rows" );
+
+    // The runner truncates a long failure message, so only the first few details
+    // are printed; the count in the header is the authoritative total.
+    constexpr int ReportedProblems = 8;
+    QString details = problems.mid( 0, ReportedProblems ).join( '\n' );
+
+    if ( problems.size() > ReportedProblems )
+        details += QStringLiteral( "\n... and %1 more failing row(s)" ).arg( problems.size() - ReportedProblems );
+
     QVERIFY2( problems.isEmpty(),
         qPrintable( QStringLiteral( "%1 of %2 ledger rows failed:\n%3" )
                 .arg( problems.size() )
                 .arg( rowCount )
-                .arg( problems.join( '\n' ) ) ) );
+                .arg( details ) ) );
 }
 
 void TstLinkRewrite::gdLookupPreservesStructureAndIsIdempotent()
@@ -543,6 +571,197 @@ void TstLinkRewrite::nonHtmlTextAndForeignMarkupAreUntouched()
 
     QString const link = QStringLiteral( "<link href=\"gdlookup://localhost/red fox\">" );
     QCOMPARE( LinkRewrite::applyGdLookup( link ), link );
+}
+
+void TstLinkRewrite::cssUrlTextIsOnlyRewrittenWhereCssLives()
+{
+    // The word `url(` inside a descriptive attribute, inside a resource path or
+    // inside a query string is text, not CSS: only the classified resource
+    // attribute is rewritten, and the surrounding bytes keep their spelling.
+    QCOMPARE( LinkRewrite::applyBres( QStringLiteral( "<img alt=\"url(a.png)\" src=\"a.png\">" ),
+                  QStringLiteral( "d" ) ),
+        QStringLiteral( "<img alt=\"url(a.png)\" src=\"bres://d/a.png\">" ) );
+
+    QString const absolute = QStringLiteral( "<img src=\"https://example.org/url(a.png)\">" );
+    QCOMPARE( LinkRewrite::applyBres( absolute, QStringLiteral( "d" ) ), absolute );
+
+    QCOMPARE( LinkRewrite::applyBres( QStringLiteral( "<img src=\"url(a.png)\">" ), QStringLiteral( "d" ) ),
+        QStringLiteral( "<img src=\"bres://d/url(a.png)\">" ) );
+
+    QCOMPARE( LinkRewrite::applyBres( QStringLiteral( "<img src=\"/a.png?caption=url(b.png)\">" ),
+                  QStringLiteral( "d" ) ),
+        QStringLiteral( "<img src=\"bres://d/a.png?caption=url(b.png)\">" ) );
+
+    // A `title` attribute is never a stylesheet, while the `style` attribute of
+    // the same tag is: both are classified independently in one pass.
+    QCOMPARE( LinkRewrite::applyBres(
+                  QStringLiteral( "<div title=\"url(a.png)\" style=\"background:url(b.png)\"></div>" ),
+                  QStringLiteral( "d" ) ),
+        QStringLiteral( "<div title=\"url(a.png)\" style=\"background:url(bres://d/b.png)\"></div>" ) );
+}
+
+void TstLinkRewrite::cssUrlValuesAreClassifiedOnceFromTheOriginalInput()
+{
+    // The whole point of the single edit set: a value the CSS rule produced is
+    // not offered to the attribute rule again, and vice versa. `url(a.png)` as a
+    // resource target therefore gains exactly one prefix, not two.
+    QString const source = QStringLiteral( "<img src=\"url(a.png)\"><div style=\"background:url(b.png)\"></div>" );
+    QString const expected =
+        QStringLiteral( "<img src=\"bres://d/url(a.png)\"><div style=\"background:url(bres://d/b.png)\"></div>" );
+
+    QCOMPARE( LinkRewrite::applyBres( source, QStringLiteral( "d" ) ), expected );
+    QCOMPARE( LinkRewrite::applyBres( expected, QStringLiteral( "d" ) ), expected );
+
+    // A second pass cannot grow a prefix either: the emitted `bres://` target is
+    // already classified as absolute.
+    QVERIFY( !LinkRewrite::applyBres( expected, QStringLiteral( "d" ) )
+                  .contains( QStringLiteral( "bres://d/bres://" ) ) );
+}
+
+void TstLinkRewrite::completeTagNamesDecideResourceTags()
+{
+    // Tag names are compared as complete, case-folded names. A custom element or
+    // a prefixed name that merely starts with a resource tag is its own element
+    // and keeps its attributes.
+    QStringList const untouched = {
+        QStringLiteral( "<img-preview src=\"a.png\">" ),
+        QStringLiteral( "<scriptlet src=\"a.js\"></scriptlet>" ),
+        QStringLiteral( "<link-preview href=\"style.css\">" ),
+        QStringLiteral( "<svg:image src=\"a.png\"></svg:image>" ),
+    };
+
+    for ( QString const & source : untouched )
+        QCOMPARE( LinkRewrite::applyBres( source, QStringLiteral( "d" ) ), source );
+
+    QString const customAnchor = QStringLiteral( "<abbr-preview href=\"gdlookup://localhost/red fox\">x</abbr-preview>" );
+    QCOMPARE( LinkRewrite::applyGdLookup( customAnchor ), customAnchor );
+
+    QString const customAudio = QStringLiteral( "<audio-preview src=\"a.wav\">x</audio-preview>" );
+    QCOMPARE( LinkRewrite::applyGdau( customAudio, QStringLiteral( "d" ) ), customAudio );
+
+    // The real elements still match, whatever their case.
+    QCOMPARE( LinkRewrite::applyBres( QStringLiteral( "<IMG SRC=\"a.png\">" ), QStringLiteral( "d" ) ),
+        QStringLiteral( "<IMG SRC=\"bres://d/a.png\">" ) );
+}
+
+void TstLinkRewrite::attributePaddingIsPreservedAroundTheRewrittenTarget()
+{
+    // Only the target span is edited; the padding stays outside it, so a padded
+    // relative name is not silently changed into a different resource path.
+    QCOMPARE( LinkRewrite::applyBres( QStringLiteral( "<img src=\" a.png \" >" ), QStringLiteral( "d" ) ),
+        QStringLiteral( "<img src=\" bres://d/a.png \" >" ) );
+
+    QCOMPARE( LinkRewrite::applyBres( QStringLiteral( "<img src=\" /a.png \" >" ), QStringLiteral( "d" ) ),
+        QStringLiteral( "<img src=\" bres://d/a.png \" >" ) );
+
+    QString const paddedIcon =
+        LinkRewrite::applyGico( QStringLiteral( "<img src=\" gico:/dicticon.png \" >" ), QStringLiteral( "d" ) );
+    QCOMPARE( paddedIcon, QStringLiteral( "<img src=\" gico://d/dicticon.png \" >" ) );
+
+    // Each of the padded forms is stable on the second pass.
+    QCOMPARE( LinkRewrite::applyBres( QStringLiteral( "<img src=\" bres://d/a.png \" >" ), QStringLiteral( "d" ) ),
+        QStringLiteral( "<img src=\" bres://d/a.png \" >" ) );
+    QCOMPARE( LinkRewrite::applyGico( paddedIcon, QStringLiteral( "d" ) ), paddedIcon );
+}
+
+void TstLinkRewrite::quotedCssUrlsKeepParenthesesAndEscapes()
+{
+    // Parentheses inside a quoted URL are part of the filename and do not
+    // terminate the value.
+    QCOMPARE( LinkRewrite::applyBres( QStringLiteral( "a{background:url(\"image(1).png\")}" ),
+                  QStringLiteral( "d" ) ),
+        QStringLiteral( "a{background:url(\"bres://d/image(1).png\")}" ) );
+
+    QCOMPARE( LinkRewrite::applyBres( QStringLiteral( "a{background:url('image(1).png')}" ),
+                  QStringLiteral( "d" ) ),
+        QStringLiteral( "a{background:url('bres://d/image(1).png')}" ) );
+
+    // An escaped delimiter inside the quotes does not end the value either.
+    QCOMPARE( LinkRewrite::applyBres( QStringLiteral( "a{background:url(\"a\\\"b'.png\")}" ),
+                  QStringLiteral( "d" ) ),
+        QStringLiteral( "a{background:url(\"bres://d/a\\\"b'.png\")}" ) );
+
+    // Two adjacent values stay two values: an unquoted one cannot absorb the
+    // parenthesis of its neighbour.
+    QCOMPARE( LinkRewrite::applyBres(
+                  QStringLiteral( "a{background:url(a.png)}b{background:url(b.png)}" ), QStringLiteral( "d" ) ),
+        QStringLiteral( "a{background:url(bres://d/a.png)}b{background:url(bres://d/b.png)}" ) );
+}
+
+void TstLinkRewrite::audioTagBoundariesAreRealTags()
+{
+    QString const closingInTitle =
+        QStringLiteral( "<audio src=\"a.wav\"><span title=\"</audio>\">Play</span></audio>" );
+    QString const rewritten = LinkRewrite::applyGdau( closingInTitle, QStringLiteral( "d" ) );
+
+    // The element ends at the real closing tag, so the whole body stays inside
+    // the wrapper and nothing is left dangling after it.
+    QVERIFY( rewritten.endsWith( QStringLiteral( "<span title=\"</audio>\">Play</span>"
+                                                 " <img src=\"qrcx://localhost/icons/playsound.png\""
+                                                 " border=\"0\" alt=\"Play\"></a></span>" ) ) );
+    QVERIFY( !rewritten.endsWith( QStringLiteral( "</audio>" ) ) );
+
+    // A real `img` start tag suppresses the icon in every spelling the tag
+    // scanner recognizes, including mixed case and a multiline tag.
+    QString const uppercaseImage =
+        QStringLiteral( "<audio src=\"a.wav\">Play <IMG SRC=\"x.png\"></audio>" );
+    QVERIFY( !LinkRewrite::applyGdau( uppercaseImage, QStringLiteral( "d" ) )
+                  .contains( QStringLiteral( "icons/playsound.png" ) ) );
+
+    QString const multilineImage =
+        QStringLiteral( "<audio src=\"a.wav\">Play <img\nsrc=\"x.png\"></audio>" );
+    QVERIFY( !LinkRewrite::applyGdau( multilineImage, QStringLiteral( "d" ) )
+                  .contains( QStringLiteral( "icons/playsound.png" ) ) );
+
+    // The letters of an image tag inside a quoted value are text, so the body
+    // genuinely has no image element and the icon is added.
+    QString const quotedImageText =
+        QStringLiteral( "<audio src=\"a.wav\"><span title=\"<img src=x>\">Play</span></audio>" );
+    QCOMPARE( LinkRewrite::applyGdau( quotedImageText, QStringLiteral( "d" ) )
+                  .count( QStringLiteral( "icons/playsound.png" ) ),
+        qsizetype( 1 ) );
+}
+
+void TstLinkRewrite::audioSourceTextCannotBecomeScript()
+{
+    // The source text is serialized separately for its two contexts: a
+    // JavaScript string literal in the script and an HTML attribute value in the
+    // generated anchor. Neither a delimiter nor a statement break can leave the
+    // context it was written into.
+    QString const injected = QStringLiteral( "<audio src='a\";globalThis.injected=1;//'></audio>" );
+    QString const rewritten = LinkRewrite::applyGdau( injected, QStringLiteral( "d" ) );
+
+    QVERIFY2( !rewritten.contains( QStringLiteral( "a\";globalThis" ) ),
+        "the source quote must not terminate the emitted JavaScript string" );
+    QVERIFY2( rewritten.contains( QStringLiteral( "a\\\";globalThis.injected=1;//" ) ),
+        "the escaped spelling must be the one that reaches the script" );
+    QVERIFY2( !rewritten.contains( QStringLiteral( "href=\"gdau://d/a\";" ) ),
+        "the HTML attribute must not be terminated by the source quote" );
+    QVERIFY2( rewritten.contains( QStringLiteral( "href=\"gdau://d/a&quot;;globalThis.injected=1;//\"" ) ),
+        "the attribute spelling must be HTML-escaped" );
+
+    // A plain double quote in a single-quoted source stays a filename character
+    // and breaks neither the script nor the anchor.
+    QString const quotedName = LinkRewrite::applyGdau(
+        QStringLiteral( "<audio src='a\"b.wav'></audio>" ), QStringLiteral( "d" ) );
+    QVERIFY( quotedName.contains( QStringLiteral( "\"gdau://d/a\\\"b.wav\";" ) ) );
+    QVERIFY( quotedName.contains( QStringLiteral( "href=\"gdau://d/a&quot;b.wav\"" ) ) );
+
+    // A backslash is escaped for the script and kept verbatim in the attribute.
+    QString const backslash = LinkRewrite::applyGdau(
+        QStringLiteral( "<audio src=\"a\\b.wav\"></audio>" ), QStringLiteral( "d" ) );
+    QVERIFY( backslash.contains( QStringLiteral( "\"gdau://d/a\\\\b.wav\";" ) ) );
+    QVERIFY( backslash.contains( QStringLiteral( "href=\"gdau://d/a\\b.wav\"" ) ) );
+
+    // A control character in the source is escaped in both contexts instead of
+    // reaching the script or the attribute as a raw byte.
+    QString const controlInput =
+        QStringLiteral( "<audio src=\"a" ) + QChar( 0x01 ) + QStringLiteral( "b.wav\"></audio>" );
+    QString const control = LinkRewrite::applyGdau( controlInput, QStringLiteral( "d" ) );
+
+    QVERIFY( !control.contains( QChar( 0x01 ) ) );
+    QVERIFY( control.contains( QStringLiteral( "\"gdau://d/a\\u0001b.wav\";" ) ) );
+    QVERIFY( control.contains( QStringLiteral( "href=\"gdau://d/a&#1;b.wav\"" ) ) );
 }
 
 QTEST_GUILESS_MAIN( TstLinkRewrite )

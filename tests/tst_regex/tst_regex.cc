@@ -6,14 +6,23 @@
  * `fixtures/regex/cases.json` is the machine-readable half of the migration
  * ledger: one row per pattern family with its source location, old engine and
  * options, the migrated pattern and options, and fixed expected
- * matches/captures/replacement. This suite compiles every row and checks the
- * pinned expectations, then states the traps the migration must not walk into
+ * matches/captures/replacement/parts. This suite compiles every row and checks
+ * the pinned expectations, then states the traps the migration must not walk into
  * with their own test names so a regression is not buried in a data loop.
  *
  * The engine helpers that own these patterns are converted by their owner tasks
- * (Task 9 for the wildcard and engine implementations); a row whose consumer has
- * not moved yet names its `productionOwner` and is a fixed expectation for that
- * task, not a test-only copy of its logic.
+ * (Task 9 for the dictionary parser families, Task 10 for the FTS normalizers); a
+ * row whose consumer has not moved yet names its `productionOwner` and is a fixed
+ * expectation for that task, not a test-only copy of its logic. A row already
+ * exercised by a production-linked suite names that `productionRoute` instead. A
+ * row with neither is an explicit generic demonstration anchored to a fixture pin.
+ *
+ * Wildcard rows are deliberately split: rows with `wildcard` drive
+ * QRegularExpression::wildcardToRegularExpression (the API the owner uses), rows
+ * with `expectedNormalizerPattern` pin the *preserved* headword grammar of
+ * wildcard.cc, and rows marked `converterDifference` record the places where the
+ * converter reads a spelling differently. A converter demonstration is never
+ * treated as the required production outcome.
  */
 
 #include <QtTest>
@@ -41,7 +50,7 @@ constexpr int MaxMatchesPerScan = 10000;
 
 /// Floor for the ledger size: it must keep covering every pinned family rather
 /// than silently shrinking to a handful of rows.
-constexpr int MinimumLedgerRows = 35;
+constexpr int MinimumLedgerRows = 55;
 
 QJsonArray loadRows()
 {
@@ -135,6 +144,20 @@ QRegularExpression::WildcardConversionOptions wildcardConversionFor( QString con
     return QRegularExpression::DefaultWildcardConversion;
 }
 
+/// Translates a reported reverse-search limit into an explicit subject-relative
+/// index. QRegExp's negative limit counts back from the end of the subject (-1 is
+/// the last character position, -2 the one before it), so it is translated here
+/// instead of being handed to a match offset that would mean something else.
+qsizetype subjectOffsetFor( int limit, QString const & subject )
+{
+    if ( limit >= 0 )
+        return limit;
+
+    qsizetype const translated = subject.size() + limit;
+
+    return translated < 0 ? 0 : translated;
+}
+
 /// One scan of `expression` over `subject`. `terminated` reports whether the
 /// scan reached the end of the subject inside MaxMatchesPerScan.
 void scan( QRegularExpression const & expression,
@@ -192,8 +215,34 @@ void checkRow( QJsonObject const & row, QStringList & problems )
 
     QString expressionText = pattern;
     QString const wildcardMode = row.value( QStringLiteral( "wildcard" ) ).toString();
+    QString const normalizerPattern = row.value( QStringLiteral( "expectedNormalizerPattern" ) ).toString();
 
-    if ( !wildcardMode.isEmpty() )
+    if ( !normalizerPattern.isEmpty() )
+    {
+        // The preserved headword grammar: the authored pattern is the literal the
+        // production normalizer must keep producing. It is never computed from a
+        // converter call, so a change in either grammar shows up here.
+        if ( !wildcardMode.isEmpty() )
+        {
+            problems << QStringLiteral( "%1: a preserved normalizer row cannot also drive the Qt converter" )
+                            .arg( id );
+            return;
+        }
+
+        if ( row.value( QStringLiteral( "converterDiffers" ) ).toBool( false ) )
+        {
+            QString const converted = QRegularExpression::wildcardToRegularExpression(
+                pattern, QRegularExpression::NonPathWildcardConversion );
+
+            if ( converted == normalizerPattern )
+                problems << QStringLiteral( "%1: the Qt converter no longer differs from the preserved "
+                                            "normalizer grammar; the recorded difference is stale" )
+                                .arg( id );
+        }
+
+        expressionText = normalizerPattern;
+    }
+    else if ( !wildcardMode.isEmpty() )
     {
         bool knownMode = false;
         QRegularExpression::WildcardConversionOptions const conversion =
@@ -330,9 +379,50 @@ void checkRow( QJsonObject const & row, QStringList & problems )
                             .arg( id, display( prepared ), display( expected ) );
     }
 
+    if ( row.contains( QStringLiteral( "splitMode" ) ) )
+    {
+        QString const mode = row.value( QStringLiteral( "splitMode" ) ).toString();
+        QStringList expected;
+
+        for ( QJsonValue const & value : row.value( QStringLiteral( "expectedParts" ) ).toArray() )
+            expected << value.toString();
+
+        if ( mode != QLatin1String( "keepEmpty" ) && mode != QLatin1String( "skipEmpty" ) )
+            problems << QStringLiteral( "%1: unknown split mode '%2'" ).arg( id, mode );
+        else
+        {
+            QStringList const parts = subject.split( expression,
+                mode == QLatin1String( "keepEmpty" ) ? Qt::KeepEmptyParts : Qt::SkipEmptyParts );
+
+            if ( parts != expected )
+                problems << QStringLiteral( "%1: split mismatch\n  actual  : %2\n  expected: %3" )
+                                .arg( id, renderList( parts ), renderList( expected ) );
+        }
+    }
+
+    if ( row.value( QStringLiteral( "filterList" ) ).toBool( false ) )
+    {
+        QStringList input;
+
+        for ( QJsonValue const & value : row.value( QStringLiteral( "list" ) ).toArray() )
+            input << value.toString();
+
+        QStringList expected;
+
+        for ( QJsonValue const & value : row.value( QStringLiteral( "expectedParts" ) ).toArray() )
+            expected << value.toString();
+
+        QStringList const filtered = input.filter( expression );
+
+        if ( filtered != expected )
+            problems << QStringLiteral( "%1: filter mismatch\n  actual  : %2\n  expected: %3" )
+                            .arg( id, renderList( filtered ), renderList( expected ) );
+    }
+
     if ( row.contains( QStringLiteral( "reverseSearchOffset" ) ) )
     {
-        int const offset = row.value( QStringLiteral( "reverseSearchOffset" ) ).toInt();
+        int const limit = row.value( QStringLiteral( "reverseSearchOffset" ) ).toInt();
+        qsizetype const offset = subjectOffsetFor( limit, subject );
         bool found = false;
         QString chosen;
 
@@ -350,8 +440,10 @@ void checkRow( QJsonObject const & row, QStringList & problems )
             QString const expected = row.value( QStringLiteral( "expectedReverseMatch" ) ).toString();
 
             if ( !found || chosen != expected )
-                problems << QStringLiteral( "%1: reverse search at %2 chose '%3' (found=%4), expected '%5'" )
+                problems << QStringLiteral( "%1: reverse search at limit %2 (subject offset %3) chose '%4' "
+                                            "(found=%5), expected '%6'" )
                                 .arg( id )
+                                .arg( limit )
                                 .arg( offset )
                                 .arg( display( chosen ) )
                                 .arg( found )
@@ -359,8 +451,10 @@ void checkRow( QJsonObject const & row, QStringList & problems )
         }
         else if ( row.value( QStringLiteral( "expectedReverseMatchCount" ) ).toInt() == 0 && found )
         {
-            problems << QStringLiteral( "%1: reverse search at %2 unexpectedly chose '%3'" )
+            problems << QStringLiteral( "%1: reverse search at limit %2 (subject offset %3) unexpectedly "
+                                        "chose '%4'" )
                             .arg( id )
+                            .arg( limit )
                             .arg( offset )
                             .arg( display( chosen ) );
         }
@@ -378,10 +472,15 @@ class TstRegex : public QObject
     void cleanupTestCase();
 
     void ledgerProvenanceIsComplete();
+    void sourceTagsCarryTheirOriginalPattern();
     void ledgerRowsMatchMigratedSemantics();
     void requiredPinnedRowsArePresent();
 
     void greedyAndMinimalCountsAreDistinguished();
+    void overlappingQStringCountIsDistinguished();
+    void splitAndFilterModesArePinned();
+    void negativeReverseLimitsAreTranslated();
+    void wildcardNormalizerGrammarIsPinned();
     void anchoredPatternRejectsTrailingNewline();
     void zeroWidthMatchingTerminates();
     void unicodeCapturesPreserveExactText();
@@ -476,6 +575,88 @@ void TstRegex::ledgerProvenanceIsComplete()
     QVERIFY2( problems.isEmpty(), qPrintable( problems.join( '\n' ) ) );
 }
 
+void TstRegex::sourceTagsCarryTheirOriginalPattern()
+{
+    // A production file:line tag must tell a later owner what to preserve: the
+    // exact original pattern text and either the task that owns the consumer or
+    // the production suite that already exercises the behaviour. A row without a
+    // live consumer is anchored to a fixture pin instead of being attached to an
+    // unrelated production pattern.
+    QJsonArray const rows = loadRows();
+    QVERIFY2( !rows.isEmpty(), "regex/cases.json carries no rows" );
+
+    QStringList problems;
+    int ownerRows = 0;
+    int routeRows = 0;
+    int pinRows = 0;
+    int productionRows = 0;
+
+    for ( QJsonValue const & value : rows )
+    {
+        QJsonObject const row = value.toObject();
+        QString const id = row.value( QStringLiteral( "id" ) ).toString();
+        QString const source = row.value( QStringLiteral( "source" ) ).toString();
+
+        if ( source.startsWith( QLatin1String( "tests/fixtures/regex/cases.json#" ) ) )
+        {
+            ++pinRows;
+            continue;
+        }
+
+        ++productionRows;
+
+        QString const oldPattern = row.value( QStringLiteral( "oldPattern" ) ).toString();
+
+        if ( oldPattern.isEmpty() )
+            problems << QStringLiteral( "%1: a production-tagged row must record the original pattern "
+                                        "at '%2'" )
+                            .arg( id, source );
+
+        QString const owner = row.value( QStringLiteral( "productionOwner" ) ).toString();
+        QString const route = row.value( QStringLiteral( "productionRoute" ) ).toString();
+
+        if ( owner.isEmpty() && route.isEmpty() )
+            problems << QStringLiteral( "%1: '%2' names neither the task that owns this consumer nor a "
+                                        "production-linked suite" )
+                            .arg( id, source );
+
+        if ( !owner.isEmpty() )
+            ++ownerRows;
+
+        if ( !route.isEmpty() )
+        {
+            ++routeRows;
+
+            if ( route != QLatin1String( "linkrewrite" ) )
+                problems << QStringLiteral( "%1: unknown production route '%2'" ).arg( id, route );
+        }
+
+        // A recorded converter difference must be marked, so it is never read as
+        // the required production outcome.
+        if ( row.value( QStringLiteral( "converterDifference" ) ).toBool( false ) &&
+             !row.contains( QStringLiteral( "wildcard" ) ) )
+            problems << QStringLiteral( "%1: a converter difference must drive the converter" ).arg( id );
+    }
+
+    // Every mapping kind must be exercised, so this check cannot pass by giving
+    // every row the same label.
+    if ( ownerRows < 5 )
+        problems << QStringLiteral( "only %1 rows name a deferred production owner" ).arg( ownerRows );
+
+    if ( routeRows < 4 )
+        problems << QStringLiteral( "only %1 rows name a production-linked route" ).arg( routeRows );
+
+    if ( pinRows < 6 )
+        problems << QStringLiteral( "only %1 rows are explicit fixture pins; generic demonstrations must be "
+                                    "anchored, not attached to unrelated production patterns" )
+                        .arg( pinRows );
+
+    if ( productionRows < 10 )
+        problems << QStringLiteral( "only %1 rows carry a production anchor" ).arg( productionRows );
+
+    QVERIFY2( problems.isEmpty(), qPrintable( problems.join( '\n' ) ) );
+}
+
 void TstRegex::ledgerRowsMatchMigratedSemantics()
 {
     QJsonArray const rows = loadRows();
@@ -513,8 +694,20 @@ void TstRegex::requiredPinnedRowsArePresent()
         QStringLiteral( "octal-legacy-three-digit-token-is-naive" ),
         QStringLiteral( "octal-migrated-o-brace" ),
         QStringLiteral( "reverse-search-last-match-before-limit" ),
+        QStringLiteral( "reverse-search-limit-on-match-start" ),
+        QStringLiteral( "reverse-search-negative-limit-counts-from-end" ),
+        QStringLiteral( "reverse-search-negative-limit-no-match" ),
+        QStringLiteral( "qstring-count-overlaps-are-not-matched-characters" ),
+        QStringLiteral( "split-keep-empty-parts" ),
+        QStringLiteral( "split-skip-empty-parts" ),
+        QStringLiteral( "filter-word-minimum-length-ucp" ),
+        QStringLiteral( "fts-escape-token-hex-capture" ),
+        QStringLiteral( "fts-escape-token-octal-capture" ),
         QStringLiteral( "wildcard-nonpath-star-crosses-slash" ),
-        QStringLiteral( "wildcard-unmatched-bracket-is-invalid" ),
+        QStringLiteral( "wildcard-normalizer-unmatched-bracket-is-literal" ),
+        QStringLiteral( "wildcard-normalizer-escaped-star-is-literal" ),
+        QStringLiteral( "qt-wildcard-converter-escaped-star-differs" ),
+        QStringLiteral( "qt-wildcard-converter-unmatched-bracket-is-invalid" ),
         QStringLiteral( "invalid-builtin-pattern-is-rejected" ),
     };
 
@@ -541,8 +734,10 @@ void TstRegex::greedyAndMinimalCountsAreDistinguished()
     // "a1b22" has two greedy runs ("1", "22") and three minimal runs
     // ("1", "2", "2"). The approved design's measured count of three belongs to
     // the minimal/inverted configuration and must never be asserted for the
-    // greedy pattern; QString::count counts matched characters (three) in both
-    // configurations, which is a third, different measure.
+    // greedy pattern. The raw QString::count overload reports three for *both*
+    // configurations here because it counts overlapping matches, which is a
+    // third, different measure and is pinned separately by
+    // overlappingQStringCountIsDistinguished().
     QString const subject = QStringLiteral( "a1b22" );
 
     QStringList greedy;
@@ -576,6 +771,179 @@ void TstRegex::greedyAndMinimalCountsAreDistinguished()
     QCOMPARE( lazy, inverted );
 
     QCOMPARE( subject.count( QRegularExpression( QStringLiteral( "\\d+" ) ) ), qsizetype( 3 ) );
+}
+
+void TstRegex::overlappingQStringCountIsDistinguished()
+{
+    // QString::count(QRegularExpression) counts *overlapping* matches; it is not
+    // a run count and not a character count. Enumerating matches with globalMatch
+    // is the only way to get the non-overlapping runs, so both measures are
+    // pinned here instead of describing one as the other (spec 4.3 states 2 for
+    // the greedy example below; Qt 6.12 returns 3).
+    QString const overlapping = QStringLiteral( "aaa" );
+
+    int runs = 0;
+    QRegularExpressionMatchIterator iterator =
+        QRegularExpression( QStringLiteral( "aa" ) ).globalMatch( overlapping );
+
+    while ( iterator.hasNext() )
+    {
+        ++runs;
+        iterator.next();
+    }
+
+    QCOMPARE( runs, 1 );
+    QCOMPARE( overlapping.count( QRegularExpression( QStringLiteral( "aa" ) ) ), qsizetype( 2 ) );
+
+    // Two runs, four matched characters: neither overload reports the character
+    // total.
+    QString const twoRuns = QStringLiteral( "abab" );
+    QCOMPARE( twoRuns.count( QRegularExpression( QStringLiteral( "ab" ) ) ), qsizetype( 2 ) );
+
+    QStringList matched;
+    QRegularExpressionMatchIterator pairIterator =
+        QRegularExpression( QStringLiteral( "ab" ) ).globalMatch( twoRuns );
+
+    while ( pairIterator.hasNext() )
+        matched << pairIterator.next().captured( 0 );
+
+    QCOMPARE( matched.size(), 2 );
+    QCOMPARE( matched.join( QString() ).size(), qsizetype( 4 ) );
+}
+
+void TstRegex::splitAndFilterModesArePinned()
+{
+    // Both split modes are named and fixed: a swap is a failure, not a style
+    // choice. KeepEmptyParts keeps the trailing empty run, SkipEmptyParts drops
+    // it.
+    QString const words = QStringLiteral( "a b  c " );
+    QRegularExpression const separators( QStringLiteral( "\\W+" ) );
+
+    QStringList const keep = words.split( separators, Qt::KeepEmptyParts );
+    QStringList const skip = words.split( separators, Qt::SkipEmptyParts );
+
+    QCOMPARE( keep, QStringList( { QStringLiteral( "a" ), QStringLiteral( "b" ), QStringLiteral( "c" ),
+        QString() } ) );
+    QCOMPARE( skip,
+        QStringList( { QStringLiteral( "a" ), QStringLiteral( "b" ), QStringLiteral( "c" ) } ) );
+
+    QStringList const lines =
+        QStringLiteral( "line1\n\nline2" ).split( QRegularExpression( QStringLiteral( "[\\r\\n]" ) ),
+            Qt::KeepEmptyParts );
+    QCOMPARE( lines, QStringList( { QStringLiteral( "line1" ), QString(), QStringLiteral( "line2" ) } ) );
+
+    // list.filter keeps the whole item a match occurs in, and both its case and
+    // Unicode options are observable.
+    QStringList const names{ QStringLiteral( "Alpha" ), QStringLiteral( "beta" ), QStringLiteral( "ALPHABET" ) };
+    QCOMPARE( names.filter( QRegularExpression( QStringLiteral( "^alpha" ),
+                             QRegularExpression::CaseInsensitiveOption ) ),
+        QStringList( { QStringLiteral( "Alpha" ), QStringLiteral( "ALPHABET" ) } ) );
+    QVERIFY( names.filter( QRegularExpression( QStringLiteral( "^alpha" ) ) ).isEmpty() );
+
+    QStringList const unicodeWords{
+        QString::fromUtf8( "Привет" ), QStringLiteral( "a" ), QString::fromUtf8( "日本語です" )
+    };
+    QCOMPARE( unicodeWords.filter( QRegularExpression( QStringLiteral( "\\w{4,}" ),
+                                 QRegularExpression::UseUnicodePropertiesOption ) ),
+        QStringList( { QString::fromUtf8( "Привет" ), QString::fromUtf8( "日本語です" ) } ) );
+    QVERIFY( unicodeWords.filter( QRegularExpression( QStringLiteral( "\\w{4,}" ) ) ).isEmpty() );
+}
+
+void TstRegex::negativeReverseLimitsAreTranslated()
+{
+    // A negative reverse limit counts back from the end of the subject (-1 is the
+    // last character position). It must be translated before it is compared with
+    // a match start; passing it through would silently select nothing.
+    QString const subject = QStringLiteral( "a1 b22 c333" );
+    QRegularExpression const digits( QStringLiteral( "\\d+" ) );
+
+    QStringList starts;
+    QRegularExpressionMatchIterator iterator = digits.globalMatch( subject );
+
+    while ( iterator.hasNext() )
+        starts << QString::number( iterator.next().capturedStart( 0 ) );
+
+    QCOMPARE( starts, QStringList( { QStringLiteral( "1" ), QStringLiteral( "4" ), QStringLiteral( "8" ) } ) );
+
+    struct Case
+    {
+        int limit;
+        qsizetype offset;
+        char const * expected;
+    };
+
+    Case const cases[] = {
+        { -1, subject.size() - 1, "333" },
+        { -4, subject.size() - 4, "22" },
+        { 4, 4, "22" },
+        { 3, 3, "1" },
+    };
+
+    for ( Case const & one : cases )
+    {
+        qsizetype const translated = subjectOffsetFor( one.limit, subject );
+        QCOMPARE( translated, one.offset );
+
+        QString chosen;
+        bool found = false;
+
+        QRegularExpressionMatchIterator scan = digits.globalMatch( subject );
+
+        while ( scan.hasNext() )
+        {
+            QRegularExpressionMatch const match = scan.next();
+
+            if ( match.capturedStart( 0 ) <= translated )
+            {
+                found = true;
+                chosen = match.captured( 0 );
+            }
+        }
+
+        QVERIFY2( found, one.expected );
+        QCOMPARE( chosen, QString::fromLatin1( one.expected ) );
+    }
+
+    // The driver's own translation is pinned directly: -1 is the last character
+    // position, and a limit before the subject start is clamped to 0 instead of
+    // becoming a wildly out-of-range offset.
+    QCOMPARE( subjectOffsetFor( -1, subject ), subject.size() - 1 );
+    QCOMPARE( subjectOffsetFor( -4, subject ), subject.size() - 4 );
+    QCOMPARE( subjectOffsetFor( 4, subject ), qsizetype( 4 ) );
+    QCOMPARE( subjectOffsetFor( -20, QStringLiteral( "abc 1" ) ), qsizetype( 0 ) );
+
+    // A subject without a match is an empty result rather than an error.
+    QRegularExpressionMatchIterator none = digits.globalMatch( QStringLiteral( "abc" ) );
+    QVERIFY( !none.hasNext() );
+}
+
+void TstRegex::wildcardNormalizerGrammarIsPinned()
+{
+    // wildcard.cc keeps its own escape grammar for headword patterns. Its outputs
+    // are authored here, not computed by the converter: an unmatched bracket is
+    // escaped and matches literally, and '\*' is a literal star.
+    QRegularExpression const literalBracket( QStringLiteral( "\\[" ) );
+    QVERIFY( literalBracket.isValid() );
+    QVERIFY( literalBracket.match( QStringLiteral( "[" ) ).hasMatch() );
+
+    QRegularExpression const literalStar( QStringLiteral( "a\\*b" ) );
+    QVERIFY( literalStar.isValid() );
+    QVERIFY( literalStar.match( QStringLiteral( "a*b" ) ).hasMatch() );
+    QVERIFY( !literalStar.match( QStringLiteral( "aXb" ) ).hasMatch() );
+
+    // Qt's converter reads both spellings differently, and that difference is
+    // recorded as a converter difference rather than as the required outcome.
+    QString const convertedBracket =
+        QRegularExpression::wildcardToRegularExpression( QStringLiteral( "[" ),
+            QRegularExpression::NonPathWildcardConversion );
+    QCOMPARE( convertedBracket, QStringLiteral( "\\A(?:(?s:[))\\z" ) );
+    QVERIFY( !QRegularExpression( convertedBracket ).isValid() );
+
+    QString const convertedStar =
+        QRegularExpression::wildcardToRegularExpression( QStringLiteral( "a\\*b" ),
+            QRegularExpression::NonPathWildcardConversion );
+    QCOMPARE( convertedStar, QStringLiteral( "\\A(?:(?s:a\\\\.*b))\\z" ) );
+    QVERIFY( convertedStar != QStringLiteral( "a\\*b" ) );
 }
 
 void TstRegex::anchoredPatternRejectsTrailingNewline()
@@ -718,8 +1086,11 @@ void TstRegex::invalidPatternIsRejectedWithDiagnostic()
     QCOMPARE( broken.pattern(), QStringLiteral( "([" ) );
     QVERIFY( !broken.match( QStringLiteral( "anything" ) ).hasMatch() );
 
-    // The same rule applies to a pattern produced by the wildcard conversion:
-    // an unmatched bracket yields an invalid expression the caller must reject.
+    // The same rule applies to a converter-produced pattern: an unmatched bracket
+    // makes wildcardToRegularExpression emit an unterminated class, which a caller
+    // of the converter must reject. This is a recorded converter difference - the
+    // preserved headword grammar escapes the bracket instead and stays valid (see
+    // wildcardNormalizerGrammarIsPinned).
     QString const converted = QRegularExpression::wildcardToRegularExpression(
         QStringLiteral( "[" ), QRegularExpression::NonPathWildcardConversion );
     QRegularExpression const fromWildcard( converted );
