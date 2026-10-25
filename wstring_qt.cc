@@ -9,8 +9,12 @@ namespace gd
   {
     // wstring is basic_string<unsigned int> here, so the full scalar sequence
     // has to be converted explicitly by length: the terminating NUL must not
-    // cut an embedded NUL or a supplementary-plane character short.
-    return QString::fromUcs4( in.data(), static_cast< qsizetype >( in.size() ) );
+    // cut an embedded NUL or a supplementary-plane character short. The storage
+    // is handed over as char32_t so the current explicit-length overload is
+    // selected: QString::fromUcs4( uint const *, qsizetype ) is deprecated since
+    // Qt 6.0 and a hard error when QT_DISABLE_DEPRECATED_UP_TO reaches 6.0.
+    return QString::fromUcs4( reinterpret_cast< char32_t const * >( in.data() ),
+                              static_cast< qsizetype >( in.size() ) );
   }
 
   #else
