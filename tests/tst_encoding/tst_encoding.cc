@@ -6,6 +6,8 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonValue>
+#include <QLoggingCategory>
+#include <QScopeGuard>
 #include <QTemporaryDir>
 
 #include <algorithm>
@@ -57,6 +59,7 @@ private slots:
     void htmlDetectionPrecedenceAndBounds();
     void htmlDetectionSameLevelSourceOrder_data();
     void htmlDetectionSameLevelSourceOrder();
+    void recoveryWarnsOncePerOperation();
     void localeValueIsDecodeOnly();
     void localeTransitionShimDecodes();
     void immutableValueConvertsInParallel();
@@ -120,6 +123,10 @@ void TstEncoding::edgeVectorInventory()
         QStringLiteral( "utf8-embedded-nul" ), QStringLiteral( "utf8-bad-bytes" ),
         QStringLiteral( "utf8-incomplete-tail" ), QStringLiteral( "utf8-bad-bytes-between-text" ),
         QStringLiteral( "invalid-value-utf8-fallback" ), QStringLiteral( "invalid-value-bad-bytes" ),
+        QStringLiteral( "invalid-value-bom" ), QStringLiteral( "invalid-value-consecutive-boms" ),
+        QStringLiteral( "invalid-value-interior-bom" ),
+        QStringLiteral( "invalid-value-incompatible-bom" ), QStringLiteral( "utf8-interior-bom" ),
+        QStringLiteral( "latin1-incompatible-bom" ),
         QStringLiteral( "utf16le-unpaired-high" ), QStringLiteral( "utf16le-unpaired-low" ),
         QStringLiteral( "utf16le-incomplete-unit" ),
         QStringLiteral( "utf16be-unpaired-high" ), QStringLiteral( "utf16be-unpaired-low" ),
@@ -320,6 +327,31 @@ void TstEncoding::htmlDetectionSameLevelSourceOrder_data()
         << QByteArrayLiteral( "text/html; charset=unknown-codepage; charset=; charset=EUCJP; charset=UTF-8" )
         << QStringLiteral( "EUC-JP" ) << Encoding::DetectedBy::Header;
 
+    QTest::newRow( "header-quoted-unrelated-parameter" )
+        << QByteArray()
+        << QByteArrayLiteral( "text/html; note=\"charset='BIG5'\"; charset=UTF-8" )
+        << QStringLiteral( "UTF-8" ) << Encoding::DetectedBy::Header;
+    QTest::newRow( "header-single-quoted-unrelated-parameter" )
+        << QByteArray()
+        << QByteArrayLiteral( "text/html; note='charset=\"BIG5\"'; charset=UTF-8" )
+        << QStringLiteral( "UTF-8" ) << Encoding::DetectedBy::Header;
+    QTest::newRow( "header-escaped-quote-and-separator" )
+        << QByteArray()
+        << QByteArrayLiteral( "text/html; note=\"a\\\"; charset='BIG5'\"; charset=UTF-8" )
+        << QStringLiteral( "UTF-8" ) << Encoding::DetectedBy::Header;
+    QTest::newRow( "header-escaped-charset-value" )
+        << QByteArray()
+        << QByteArrayLiteral( "text/html; charset=\"Shift\\_JIS\"" )
+        << QStringLiteral( "SHIFT_JIS" ) << Encoding::DetectedBy::Header;
+    QTest::newRow( "header-unquoted-apostrophe" )
+        << QByteArray()
+        << QByteArrayLiteral( "text/html; note=O'Reilly; charset=Shift_JIS" )
+        << QStringLiteral( "SHIFT_JIS" ) << Encoding::DetectedBy::Header;
+    QTest::newRow( "header-actual-parameter-name" )
+        << QByteArray()
+        << QByteArrayLiteral( "text/html; x-charset=BIG5; charset=UTF-8" )
+        << QStringLiteral( "UTF-8" ) << Encoding::DetectedBy::Header;
+
     QTest::newRow( "meta-first-recognised" )
         << QByteArrayLiteral( "<meta charset=windows-1251><META charset = 'Shift_JIS'>" )
         << QByteArray()
@@ -329,6 +361,55 @@ void TstEncoding::htmlDetectionSameLevelSourceOrder_data()
                               "<meta charset=GB2312><meta charset=EUCJP>" )
         << QByteArray()
         << QStringLiteral( "GB2312" ) << Encoding::DetectedBy::Meta;
+
+    QTest::newRow( "meta-single-quoted-greater-than" )
+        << QByteArrayLiteral( "<meta data-note='a>b' charset='Shift_JIS'>" )
+        << QByteArray()
+        << QStringLiteral( "SHIFT_JIS" ) << Encoding::DetectedBy::Meta;
+    QTest::newRow( "meta-double-quoted-greater-than" )
+        << QByteArrayLiteral( "<meta data-note=\"a>b\" charset=Shift_JIS>" )
+        << QByteArray()
+        << QStringLiteral( "SHIFT_JIS" ) << Encoding::DetectedBy::Meta;
+    QTest::newRow( "meta-inside-comment" )
+        << QByteArrayLiteral( "<!-- <meta charset=BIG5> --><meta charset=Shift_JIS>" )
+        << QByteArray()
+        << QStringLiteral( "SHIFT_JIS" ) << Encoding::DetectedBy::Meta;
+    QTest::newRow( "meta-inside-double-quoted-attribute" )
+        << QByteArrayLiteral( "<div data-note=\"<meta charset=BIG5>\"></div><meta charset=Shift_JIS>" )
+        << QByteArray()
+        << QStringLiteral( "SHIFT_JIS" ) << Encoding::DetectedBy::Meta;
+    QTest::newRow( "meta-inside-single-quoted-attribute" )
+        << QByteArrayLiteral( "<div data-note='<meta charset=\"BIG5\">'></div><meta charset=Shift_JIS>" )
+        << QByteArray()
+        << QStringLiteral( "SHIFT_JIS" ) << Encoding::DetectedBy::Meta;
+    QTest::newRow( "meta-unquoted-attribute-separators" )
+        << QByteArrayLiteral( "<meta data-note=x;,/charset=BIG5 charset=UTF-8>" )
+        << QByteArray()
+        << QStringLiteral( "UTF-8" ) << Encoding::DetectedBy::Meta;
+    QTest::newRow( "meta-attribute-name-boundary" )
+        << QByteArrayLiteral( "<meta data@charset=BIG5 charset=UTF-8>" )
+        << QByteArray()
+        << QStringLiteral( "UTF-8" ) << Encoding::DetectedBy::Meta;
+    QTest::newRow( "meta-unquoted-attribute-apostrophe" )
+        << QByteArrayLiteral( "<div data-note=O'Reilly></div><meta charset=Shift_JIS>" )
+        << QByteArray()
+        << QStringLiteral( "SHIFT_JIS" ) << Encoding::DetectedBy::Meta;
+    QTest::newRow( "meta-unterminated-comment" )
+        << QByteArrayLiteral( "<!-- > <meta charset=BIG5>" )
+        << QByteArray()
+        << QStringLiteral( "ISO-8859-1" ) << Encoding::DetectedBy::Fallback;
+    QTest::newRow( "meta-unterminated-quoted-tag" )
+        << QByteArrayLiteral( "<meta charset=BIG5 data-note='a>b" )
+        << QByteArray()
+        << QStringLiteral( "ISO-8859-1" ) << Encoding::DetectedBy::Fallback;
+    QTest::newRow( "meta-quoted-tag-at-scan-bound" )
+        << QByteArrayLiteral( "<meta data-note='a>b' charset=Shift_JIS>" ).rightJustified( 1024, ' ' )
+        << QByteArray()
+        << QStringLiteral( "SHIFT_JIS" ) << Encoding::DetectedBy::Meta;
+    QTest::newRow( "meta-quoted-tag-crosses-scan-bound" )
+        << QByteArrayLiteral( "<meta data-note='a>b' charset=Shift_JIS>" ).rightJustified( 1025, ' ' )
+        << QByteArray()
+        << QStringLiteral( "ISO-8859-1" ) << Encoding::DetectedBy::Fallback;
 
     QTest::newRow( "http-equiv-first-recognised" )
         << QByteArrayLiteral( "<meta http-equiv=Content-Type content='text/html; charset=EUCJP'>"
@@ -368,6 +449,29 @@ void TstEncoding::htmlDetectionSameLevelSourceOrder()
     const Encoding result = Encoding::forHtml( body, header, QStringLiteral( "ISO-8859-1" ), &detected );
     QCOMPARE( result.name(), expectedName );
     QCOMPARE( detected, expectedSource );
+}
+
+void TstEncoding::recoveryWarnsOncePerOperation()
+{
+    QLoggingCategory * const category = QLoggingCategory::defaultCategory();
+    const bool wasEnabled = category->isWarningEnabled();
+    category->setEnabled( QtWarningMsg, true );
+    const auto restoreWarnings = qScopeGuard( [=]() { category->setEnabled( QtWarningMsg, wasEnabled ); } );
+    QTest::failOnWarning();
+
+    QTest::ignoreMessage( QtWarningMsg, "Invalid Encoding value; decoding through UTF-8" );
+    QCOMPARE( Encoding().decode( QByteArray::fromHex( "efbbbf41ffff42" ) ),
+              QStringLiteral( "A\ufffd\ufffdB" ) );
+
+    QTest::ignoreMessage( QtWarningMsg, "Encoding decode recovered invalid input in UTF-8" );
+    QCOMPARE( Encoding::utf8().decode( QByteArray::fromHex( "ffff" ) ),
+              QStringLiteral( "\ufffd\ufffd" ) );
+
+    QTest::ignoreMessage( QtWarningMsg, "Ignoring unknown HTML charset candidate: unknown-header" );
+    QCOMPARE( Encoding::forHtml( QByteArrayLiteral( "<meta charset=unknown-meta>" ),
+                                QByteArrayLiteral( "text/html; charset=unknown-header; charset=" ),
+                                QStringLiteral( "unknown-fallback" ) ).name(),
+              QStringLiteral( "UTF-8" ) );
 }
 
 void TstEncoding::localeValueIsDecodeOnly()

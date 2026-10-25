@@ -469,8 +469,7 @@ QByteArray readHtmlValue( QByteArray const & input, int & position, int end )
 
     const int start = position;
     while ( position < end && !isHtmlSpace( input.at( position ) )
-            && input.at( position ) != ';' && input.at( position ) != ','
-            && input.at( position ) != '>' && input.at( position ) != '/' )
+            && input.at( position ) != '>' )
         ++position;
     return input.mid( start, position - start );
 }
@@ -494,7 +493,9 @@ std::vector< HtmlAttribute > parseHtmlAttributes( QByteArray const & input, int 
             break;
 
         const int nameStart = position;
-        while ( position < end && isNameByte( input.at( position ) ) )
+        while ( position < end && !isHtmlSpace( input.at( position ) )
+                && input.at( position ) != '=' && input.at( position ) != '/'
+                && input.at( position ) != '>' )
             ++position;
         if ( nameStart == position )
         {
@@ -521,28 +522,89 @@ std::vector< HtmlAttribute > parseHtmlAttributes( QByteArray const & input, int 
 std::vector< QByteArray > charsetParameters( QByteArray const & input )
 {
     std::vector< QByteArray > candidates;
-    const QByteArray lower = asciiLowerBytes( input );
+    int position = 0;
+    const int end = input.size();
 
-    for ( int position = 0; position + 7 <= lower.size(); ++position )
+    while ( position < end )
     {
-        if ( lower.mid( position, 7 ) != QByteArrayLiteral( "charset" ) )
-            continue;
-        if ( position > 0 && isNameByte( lower.at( position - 1 ) ) )
-            continue;
-        if ( position + 7 < lower.size() && isNameByte( lower.at( position + 7 ) ) )
-            continue;
+        while ( position < end && ( isHtmlSpace( input.at( position ) ) || input.at( position ) == ';' ) )
+            ++position;
 
-        int valuePosition = position + 7;
-        while ( valuePosition < lower.size() && isHtmlSpace( lower.at( valuePosition ) ) )
-            ++valuePosition;
-        if ( valuePosition >= lower.size() || lower.at( valuePosition ) != '=' )
+        const int nameStart = position;
+        while ( position < end && input.at( position ) != '=' && input.at( position ) != ';' )
+            ++position;
+        const QByteArray name = asciiLowerBytes( trimAsciiBytes( input.mid( nameStart, position - nameStart ) ) );
+        if ( position >= end )
+            break;
+        if ( input.at( position ) == ';' )
+        {
+            ++position;
             continue;
-        ++valuePosition;
-        candidates.push_back( trimAsciiBytes( readHtmlValue( input, valuePosition, input.size() ) ) );
-        position = valuePosition;
+        }
+
+        ++position; // '='
+        while ( position < end && isHtmlSpace( input.at( position ) ) )
+            ++position;
+
+        QByteArray value;
+        if ( position < end && ( input.at( position ) == '\'' || input.at( position ) == '"' ) )
+        {
+            const char quote = input.at( position++ );
+            while ( position < end && input.at( position ) != quote )
+            {
+                // HTTP quoted-pairs protect both a quote and a separator in
+                // an unrelated parameter's value. Single quotes are accepted
+                // as well for the legacy Content-Type spellings we support.
+                if ( input.at( position ) == '\\' && position + 1 < end )
+                    ++position;
+                value.append( input.at( position++ ) );
+            }
+            if ( position >= end )
+                break;
+            ++position;
+            while ( position < end && isHtmlSpace( input.at( position ) ) )
+                ++position;
+        }
+        else
+        {
+            const int valueStart = position;
+            while ( position < end && input.at( position ) != ';' )
+                ++position;
+            value = input.mid( valueStart, position - valueStart );
+        }
+
+        if ( name == QByteArrayLiteral( "charset" )
+             && ( position == end || input.at( position ) == ';' ) )
+            candidates.push_back( trimAsciiBytes( value ) );
+
+        // Discard any malformed suffix without treating its text as another
+        // parameter. Only a top-level semicolon starts the next parameter.
+        while ( position < end && input.at( position ) != ';' )
+            ++position;
     }
 
     return candidates;
+}
+
+int htmlTagEnd( QByteArray const & source, int position )
+{
+    const int end = source.size();
+    while ( position < end )
+    {
+        const char byte = source.at( position );
+        if ( byte == '>' )
+            return position;
+        if ( byte == '=' )
+        {
+            ++position;
+            readHtmlValue( source, position, end );
+        }
+        else if ( byte == '\'' || byte == '"' )
+            readHtmlValue( source, position, end );
+        else
+            ++position;
+    }
+    return -1;
 }
 
 struct MetaCharsetCandidates
@@ -559,20 +621,42 @@ MetaCharsetCandidates metaCharsetCandidates( QByteArray const & source )
 
     while ( position < lower.size() )
     {
-        const int start = lower.indexOf( QByteArrayLiteral( "<meta" ), position );
-        if ( start < 0 )
+        const int start = lower.indexOf( '<', position );
+        if ( start < 0 || start + 1 >= lower.size() )
             break;
 
-        const int afterName = start + 5;
-        if ( afterName < lower.size() && isNameByte( lower.at( afterName ) ) )
+        if ( lower.mid( start, 4 ) == QByteArrayLiteral( "<!--" ) )
         {
-            position = afterName;
+            const int commentEnd = lower.indexOf( QByteArrayLiteral( "-->" ), start + 4 );
+            if ( commentEnd < 0 )
+                break;
+            position = commentEnd + 3;
             continue;
         }
 
-        const int end = lower.indexOf( '>', afterName );
+        const int nameStart = start + 1;
+        const char first = lower.at( nameStart );
+        if ( !( first >= 'a' && first <= 'z' ) && first != '/' && first != '!' && first != '?' )
+        {
+            position = nameStart;
+            continue;
+        }
+
+        int afterName = nameStart;
+        while ( afterName < lower.size() && isNameByte( lower.at( afterName ) ) )
+            ++afterName;
+        const bool isMeta = lower.mid( nameStart, afterName - nameStart ) == QByteArrayLiteral( "meta" )
+            && ( afterName == lower.size() || isHtmlSpace( lower.at( afterName ) )
+                 || lower.at( afterName ) == '/' || lower.at( afterName ) == '>' );
+
+        // Consume every whole tag, including unrelated tags, so a '<meta'
+        // inside an attribute can never start a declaration of its own.
+        const int end = htmlTagEnd( source, afterName );
         if ( end < 0 )
             break;
+        position = end + 1;
+        if ( !isMeta )
+            continue;
 
         const std::vector< HtmlAttribute > attributes = parseHtmlAttributes( source, afterName, end );
         bool httpContentType = false;
@@ -597,7 +681,6 @@ MetaCharsetCandidates metaCharsetCandidates( QByteArray const & source )
                                                    parsed.begin(), parsed.end() );
             }
         }
-        position = end + 1;
     }
 
     return candidates;
@@ -826,50 +909,48 @@ QString Encoding::decode( QByteArray const & data ) const noexcept
         return QString();
 
     bool warningEmitted = false;
-    QByteArray input = data;
-    QString sourceName = canonicalName_;
-
-    if ( sourceName.isEmpty() )
+    if ( canonicalName_.isEmpty() )
     {
-        sourceName = QStringLiteral( "UTF-8" );
         gdWarning( "Invalid Encoding value; decoding through UTF-8" );
         warningEmitted = true;
     }
     else
     {
-        input = stripMatchingBom( sourceName, input );
-    }
-
-    try
-    {
-        return decodeWithIconv( sourceName, input, warningEmitted );
-    }
-    catch ( ... )
-    {
-        if ( !warningEmitted )
-        {
-            gdWarning( "Encoding descriptor unavailable for %s; decoding through UTF-8",
-                       sourceName.toLatin1().constData() );
-            warningEmitted = true;
-        }
-
         try
         {
-            return decodeWithIconv( QStringLiteral( "UTF-8" ),
-                                    stripMatchingBom( QStringLiteral( "UTF-8" ), data ),
+            return decodeWithIconv( canonicalName_, stripMatchingBom( canonicalName_, data ),
                                     warningEmitted );
         }
         catch ( ... )
         {
-            try
+            if ( !warningEmitted )
             {
-                return QString::fromUtf8( data );
-            }
-            catch ( ... )
-            {
-                return QString();
+                gdWarning( "Encoding descriptor unavailable for %s; decoding through UTF-8",
+                           canonicalName_.toLatin1().constData() );
+                warningEmitted = true;
             }
         }
+    }
+
+    // Invalid values and descriptor failures share normalization and recovery.
+    try
+    {
+        const QString sourceName = QStringLiteral( "UTF-8" );
+        const QByteArray input = stripMatchingBom( sourceName, data );
+        try
+        {
+            return decodeWithIconv( sourceName, input, warningEmitted );
+        }
+        catch ( ... )
+        {
+            // Qt consumes one initial UTF-8 BOM itself; use the original
+            // bytes so a second consecutive U+FEFF remains ordinary data.
+            return QString::fromUtf8( data );
+        }
+    }
+    catch ( ... )
+    {
+        return QString();
     }
 }
 
