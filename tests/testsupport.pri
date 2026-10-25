@@ -28,6 +28,11 @@ TEMPLATE = app
 CONFIG += c++17 exceptions rtti stl console testcase
 QT += testlib
 
+# The display-prerequisite checks open a bounded connection to the selected
+# endpoint (X11 unix socket/TCP port or the Wayland compositor socket), so the
+# shared support needs QtNetwork in every target.
+QT += network
+
 INCLUDEPATH += $$GD_REPO_ROOT $$GD_TESTS_ROOT $$GD_TESTS_ROOT/support
 
 # Shared test support (fixtures, environment gate, watchdog). A glob so a new
@@ -35,14 +40,64 @@ INCLUDEPATH += $$GD_REPO_ROOT $$GD_TESTS_ROOT $$GD_TESTS_ROOT/support
 GD_TEST_SUPPORT_SOURCES = $$files($$GD_TESTS_ROOT/support/*.cc)
 SOURCES += $$GD_TEST_SUPPORT_SOURCES
 
-# Feature definitions mirroring goldendict.pro on unix. HAVE_X11 is a build
-# capability only: whether the running suite actually uses X11 is decided by the
-# chosen QPA platform, never by this define.
+# Feature definitions mirroring goldendict.pro. Each entry copies the *CONFIG
+# condition* of the application project, not just the define, so a test build can
+# be configured exactly like the application it verifies and a guarded production
+# implementation is never compiled out silently.
+#
+# HAVE_X11 is a build capability only: whether the running suite actually uses X11
+# is decided by the chosen QPA platform, never by this define.
+
+# goldendict.pro enables ZIM and Chinese conversion by default on win32 only; on
+# every other platform the switch has to be asked for explicitly. This has to run
+# before the configuration record below so the record sees the final CONFIG.
+win32 {
+    CONFIG += zim_support
+
+    !CONFIG( no_chinese_conversion_support ): CONFIG += chinese_conversion_support
+}
+
+# The configuration record: which feature switches this build selected. It is
+# deliberately separate from the define block below so the configuration probe
+# can prove that a selected switch actually produced its feature macro -- a
+# missing MAKE_EXTRA_TIFF_HANDLER must be an error, not "a disabled feature".
+unix:!mac: DEFINES += GD_TEST_CONFIG_HAVE_X11
+!CONFIG( no_ffmpeg_player ): DEFINES += GD_TEST_CONFIG_FFMPEG_PLAYER
+!CONFIG( no_extra_tiff_handler ): DEFINES += GD_TEST_CONFIG_EXTRA_TIFF_HANDLER
+CONFIG( zim_support ): DEFINES += GD_TEST_CONFIG_ZIM_SUPPORT
+CONFIG( no_epwing_support ): DEFINES += GD_TEST_CONFIG_NO_EPWING_SUPPORT
+CONFIG( chinese_conversion_support ): DEFINES += GD_TEST_CONFIG_CHINESE_CONVERSION_SUPPORT
+CONFIG( old_hunspell ): DEFINES += GD_TEST_CONFIG_OLD_HUNSPELL
+
 unix:!mac {
     DEFINES += HAVE_X11
 }
+
 !CONFIG( no_ffmpeg_player ) {
     DEFINES += MAKE_FFMPEG_PLAYER
+}
+
+CONFIG( zim_support ) {
+    DEFINES += MAKE_ZIM_SUPPORT
+}
+
+# The extra TIFF handler is a default feature: tiff.cc/hh wrap their whole
+# implementation in #ifdef MAKE_EXTRA_TIFF_HANDLER, so a build that forgets the
+# define still succeeds while compiling an empty translation unit.
+!CONFIG( no_extra_tiff_handler ) {
+    DEFINES += MAKE_EXTRA_TIFF_HANDLER
+}
+
+CONFIG( no_epwing_support ) {
+    DEFINES += NO_EPWING_SUPPORT
+}
+
+CONFIG( chinese_conversion_support ) {
+    DEFINES += MAKE_CHINESE_CONVERSION_SUPPORT
+}
+
+CONFIG( old_hunspell ) {
+    DEFINES += OLD_HUNSPELL_INTERFACE
 }
 
 GD_PROGRAM_VERSION = 1.5.1+git

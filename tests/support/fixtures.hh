@@ -48,20 +48,44 @@ constexpr int BrowserWatchdogSeconds = 120;
 /// Wall-clock budget of the aggregate gate command.
 constexpr int AggregateWatchdogSeconds = 900;
 
+/// Exit code a watchdog expiry reports; the convention GNU timeout uses, so a
+/// harness can tell a wedged binary from an ordinary assertion failure.
+constexpr int WatchdogExitCode = 124;
+
+/// Wall-clock budget the watchdog expiry probe process arms. The parent-side
+/// verification requires the probe to die after (about) this long.
+constexpr int WatchdogProbeSeconds = 1;
+
 /// Returns false and appends one human-readable reason per unmet requirement.
 /// `reasons` may be null when only the verdict is needed. The result is derived
 /// from the environment on every call, so a suite can falsify its own gate.
 bool requiredEnvironment( QStringList * reasons );
 
 /// Arms a wall watchdog with the given budget. A helper thread terminates the
-/// process with exit code 124 when the budget expires, so a binary whose event
-/// loop is wedged still dies. Arming twice replaces the previous watchdog; a
-/// budget of zero or less only disarms.
+/// process with WatchdogExitCode when the budget expires, so a binary whose
+/// event loop is wedged still dies. Arming twice replaces the previous
+/// watchdog; a budget of zero or less only disarms.
 void installWatchdog( int seconds );
 
 /// Disarms a previously armed watchdog. Idempotent and safe to call from
 /// cleanupTestCase() even when installWatchdog() was never called.
 void clearWatchdog();
+
+/// True when this process was started as the subprocess side of the watchdog
+/// expiry test. Call it from main() before constructing the QCoreApplication.
+bool isWatchdogProbeProcess();
+
+/// Subprocess side of the watchdog expiry test: makes stderr hostile the way a
+/// wedged suite does (a held stdio lock or a full, unread pipe), arms
+/// WatchdogProbeSeconds and then stalls forever. Never returns: the watchdog is
+/// expected to terminate the process.
+[[noreturn]] void runWatchdogProbe();
+
+/// Parent side of the watchdog expiry test: runs `binaryPath` in every probe
+/// mode and verifies that it is terminated with WatchdogExitCode, after at
+/// least WatchdogProbeSeconds and before the deadline. Appends one reason per
+/// broken mode; `reasons` may be null.
+bool verifyWatchdogExpiry( QString const & binaryPath, QStringList * reasons );
 
 /// Repository root: GD_TEST_REPO_ROOT when set, otherwise the nearest ancestor
 /// of the binary or the working directory that contains goldendict.pro, and
@@ -78,14 +102,31 @@ QString fixturePath( QString const & relativePath );
 /// True when `relativePath` resolves to a readable regular file.
 bool fixtureExists( QString const & relativePath );
 
+/// Feature defines the shared project mirrored from goldendict.pro that this
+/// binary was actually compiled with, one token per entry. A suite can therefore
+/// assert that a guarded production implementation was configured in instead of
+/// guessing from the source tree.
+QStringList compiledFeatureDefines();
+
 /// Evaluates one suite-selected prerequisite token:
-///   "display"    a display server (X11 or Wayland) is reachable
-///   "x11"        an X11 DISPLAY is reachable and the QPA is not forced elsewhere
-///   "wayland"    a Wayland compositor is reachable
+///   "display"    a display server (X11 or Wayland) is actually connectable
+///   "x11"        an X11 DISPLAY is connectable and the QPA is not forced elsewhere
+///   "wayland"    a Wayland compositor socket is connectable
 ///   "webengine"  the QtWebEngineProcess helper of this Qt installation exists
 /// Unknown tokens are reported as unavailable: a typo must not pass a required
 /// suite. `reason` may be null.
 bool prerequisiteAvailable( QString const & token, QString * reason );
+
+/// Bounded reachability probe of one X11 DISPLAY value
+/// ("[protocol/][host]:display[.screen]"). A local display is probed through the
+/// X11 unix socket, a remote one through TCP port 6000+display. The connect is
+/// time-bounded, so an unreachable or half-open endpoint can never wedge the
+/// environment gate. `reason` may be null.
+bool x11DisplayReachable( QString const & display, QString * reason );
+
+/// Bounded reachability probe of one WAYLAND_DISPLAY value, resolved against
+/// XDG_RUNTIME_DIR unless it is already a path. `reason` may be null.
+bool waylandDisplayReachable( QString const & waylandDisplay, QString * reason );
 
 } // namespace TestSupport
 
