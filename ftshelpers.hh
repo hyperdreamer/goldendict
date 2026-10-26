@@ -47,6 +47,26 @@ __attribute__((packed))
 bool ftsIndexIsOldOrBad( std::string const & indexFile,
                          BtreeIndexing::BtreeDictionary * dict );
 
+/// Compiles a search/highlight source pattern the way the article URL contract
+/// does (articleurls.cc): a wildcard source is first converted with
+/// UnanchoredWildcardConversion | NonPathWildcardConversion, so the result can
+/// match inside an article and can cross a '/' in a dictionary headword. The
+/// expression then keeps DotMatchesEverythingOption (QRegExp's '.' matched
+/// '\n'), UseUnicodePropertiesOption (QRegExp's own word/digit tables),
+/// MultilineOption and InvertedGreedinessOption (QRegExp's setMinimal(true));
+/// `matchCase` is folded into the pattern options, never into the source text.
+QRegularExpression compileHighlight( QString const & sourcePattern, bool wildcards,
+                                     bool matchCase );
+
+/// Normalizes the search line into index words and a highlight specification.
+///
+/// The specification carries the original source text, the wildcard flag and the
+/// case folding separately from the compiled expression, because a
+/// QRegularExpression cannot remember wildcard syntax. `hasCJK` reports CJK
+/// text, which whole-word/plain-text modes refuse; `false` is returned when no
+/// usable search can start (no index word, CJK in a word mode, or an invalid
+/// user pattern in RegExp/Wildcards mode). On failure the specification is left
+/// empty or holds the invalid expression, so a caller can display its error.
 bool parseSearchString( QString const & str, QStringList & IndexWords,
                         QStringList & searchWords,
                         FtsHighlightSpec & searchRegExp, int searchMode,
@@ -116,15 +136,15 @@ class FTSResultsRequest : public Dictionary::DataRequest
                             sptr< ChunkedStorage::Reader > chunks,
                             QStringList & indexWords,
                             QStringList & searchWords,
-                            QRegularExpression & regexp );
+                            QRegularExpression const & regexp );
 
   void fullIndexSearch( BtreeIndexing::BtreeIndex & ftsIndex,
                         sptr< ChunkedStorage::Reader > chunks,
                         QStringList & indexWords,
                         QStringList & searchWords,
-                        QRegularExpression & regexp );
+                        QRegularExpression const & regexp );
 
-  void fullSearch( QStringList & searchWords, QRegularExpression & regexp );
+  void fullSearch( QStringList & searchWords, QRegularExpression const & regexp );
 
 public:
 
