@@ -70,6 +70,12 @@ public:
   /// Retires the current registration (portal session or recorder handles).
   virtual void unbind() = 0;
 
+  /// Portal-only configuration action; non-portal backends may ignore it.
+  virtual void configure( QString const & activationToken )
+  {
+    Q_UNUSED( activationToken )
+  }
+
   virtual State state() const noexcept = 0;
 
 signals:

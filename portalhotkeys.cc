@@ -7,14 +7,38 @@
 #include <QDBusObjectPath>
 #include <QDBusPendingCallWatcher>
 #include <QDBusServiceWatcher>
+#include <QDBusVariant>
 #include <QElapsedTimer>
+#include <QHash>
+#include <QMetaType>
 #include <QSet>
 #include <QTimer>
 #include <QUuid>
 #include <QVector>
 
+namespace PortalWire {
+QDBusArgument &operator<<( QDBusArgument & out, Shortcut const & value )
+{
+    out.beginStructure();
+    out << value.id << value.properties;
+    out.endStructure();
+    return out;
+}
+
+QDBusArgument const &operator>>( QDBusArgument const & in, Shortcut & value )
+{
+    in.beginStructure();
+    in >> value.id >> value.properties;
+    in.endStructure();
+    return in;
+}
+} // namespace PortalWire
+
 namespace {
 const QString Service = QStringLiteral( "org.freedesktop.portal.Desktop" );
+const QString PortalPath = QStringLiteral( "/org/freedesktop/portal/desktop" );
+const QString GlobalShortcutsInterface = QStringLiteral( "org.freedesktop.portal.GlobalShortcuts" );
+const QString PropertiesInterface = QStringLiteral( "org.freedesktop.DBus.Properties" );
 const QString RequestInterface = QStringLiteral( "org.freedesktop.portal.Request" );
 const QString SessionInterface = QStringLiteral( "org.freedesktop.portal.Session" );
 const QString RequestRoot = QStringLiteral( "/org/freedesktop/portal/desktop/request/" );
@@ -54,6 +78,93 @@ QString uniqueToken()
 {
     return QStringLiteral( "gd_" ) + QUuid::createUuid().toString( QUuid::Id128 );
 }
+
+bool knownBindingId( QString const & id )
+{
+    return id == QLatin1String( "main-window" ) || id == QLatin1String( "clipboard-lookup" );
+}
+
+bool validStringProperty( QVariantMap const & properties, QString const & name )
+{
+    return !properties.contains( name )
+        || properties.value( name ).metaType() == QMetaType::fromType< QString >();
+}
+
+bool parseShortcuts( QVariant const & value, PortalWire::Shortcuts * result, QString * error )
+{
+    if ( value.metaType() != QMetaType::fromType< QDBusArgument >() )
+    {
+        if ( error )
+            *error = QStringLiteral( "shortcuts is not a(sa{sv})" );
+        return false;
+    }
+
+    const QDBusArgument argument = value.value< QDBusArgument >();
+    if ( argument.currentSignature() != QLatin1String( "a(sa{sv})" ) )
+    {
+        if ( error )
+            *error = QStringLiteral( "shortcuts has an invalid wire signature" );
+        return false;
+    }
+
+    const PortalWire::Shortcuts parsed = qdbus_cast< PortalWire::Shortcuts >( value );
+    QSet< QString > ids;
+    for ( PortalWire::Shortcut const & entry : parsed )
+    {
+        if ( entry.id.isEmpty() || ids.contains( entry.id )
+             || !validStringProperty( entry.properties, QStringLiteral( "description" ) )
+             || !validStringProperty( entry.properties, QStringLiteral( "trigger_description" ) )
+             || !validStringProperty( entry.properties, QStringLiteral( "preferred_trigger" ) ) )
+        {
+            if ( error )
+                *error = QStringLiteral( "shortcuts contain an invalid or duplicate entry" );
+            return false;
+        }
+        ids.insert( entry.id );
+    }
+
+    if ( result )
+        *result = parsed;
+    return true;
+}
+
+QVector< PortalBindingDisplay > displayEntries( PortalWire::Shortcuts const & entries,
+                                                QSet< QString > const & policy )
+{
+    QVector< PortalBindingDisplay > displayed;
+    for ( PortalWire::Shortcut const & entry : entries )
+    {
+        if ( !policy.contains( entry.id ) )
+            continue;
+
+        QString trigger;
+        const QVariant value = entry.properties.value( QStringLiteral( "trigger_description" ) );
+        if ( value.metaType() == QMetaType::fromType< QString >() )
+            trigger = value.toString();
+        if ( trigger.isEmpty() )
+            trigger = QStringLiteral( "Assigned by portal" );
+
+        displayed.append( PortalBindingDisplay{ entry.id, trigger } );
+    }
+    return displayed;
+}
+
+bool extractOptions( QVariant const & value, QVariantMap * result )
+{
+    if ( value.metaType() == QMetaType::fromType< QVariantMap >() )
+    {
+        if ( result )
+            *result = value.toMap();
+        return true;
+    }
+    if ( value.metaType() != QMetaType::fromType< QDBusArgument >()
+         || value.value< QDBusArgument >().currentSignature() != QLatin1String( "a{sv}" ) )
+        return false;
+    if ( result )
+        *result = qdbus_cast< QVariantMap >( value );
+    return true;
+}
+
 }
 
 /// The small, bounded cleanup observer can outlive the public request. In
@@ -407,4 +518,735 @@ void PortalRequest::cancel() noexcept
         d->cancel();
 }
 
+
+struct PortalBackend::Private
+{
+    explicit Private( QDBusConnection const & connection ):
+        bus( connection )
+    {
+    }
+
+    QDBusConnection bus;
+    HotkeyBackend::State state = HotkeyBackend::State::Unsupported;
+    QString explanation;
+    QString owner;
+    QString sessionPath;
+    QVector< HotkeyBinding > desired;
+    /// What may be displayed: decided by the config/UI layer, independent of
+    /// which IDs the current bind attempt carries. Defaults to the IDs of the
+    /// first request when the caller never supplies a policy.
+    QSet< QString > displayPolicy;
+    bool displayPolicyExplicit = false;
+    /// The IDs this attempt actually asked the portal to bind.
+    QSet< QString > requestedIds;
+    /// The most recent records the portal reported, kept so a display-policy change
+    /// can refresh what is shown without touching the session.
+    QVector< PortalWire::Shortcut > records;
+    QSet< QString > activeIds;
+    QVector< QPointer< PortalRequest > > requests;
+    QPointer< PortalRequest > createRequest;
+    QPointer< PortalRequest > listRequest;
+    QPointer< PortalRequest > bindRequest;
+    quint64 generation = 0;
+    quint64 displayRevision = 0;
+    uint version = 0;
+    bool versionKnown = false;
+    bool supported = false;
+    bool bindAttempted = false;
+    bool destroying = false;
+};
+
+PortalBackend::PortalBackend( QDBusConnection const & bus, QObject * parent ):
+    HotkeyBackend( parent ), d( std::make_unique< Private >( bus ) )
+{
+    qDBusRegisterMetaType< PortalWire::Shortcut >();
+    qDBusRegisterMetaType< PortalWire::Shortcuts >();
+
+    serviceWatcher = new QDBusServiceWatcher( Service, d->bus,
+                                               QDBusServiceWatcher::WatchForOwnerChange, this );
+    connect( serviceWatcher, &QDBusServiceWatcher::serviceOwnerChanged, this,
+             [ this ]( QString const &, QString const & oldOwner, QString const & newOwner ) {
+                 ownerChanged( oldOwner, newOwner );
+             } );
+
+    d->bus.connect( Service, PortalPath, GlobalShortcutsInterface, QStringLiteral( "Activated" ),
+                    this, SLOT( receivePortalSignal( QDBusMessage ) ) );
+    d->bus.connect( Service, PortalPath, GlobalShortcutsInterface,
+                    QStringLiteral( "Deactivated" ), this,
+                    SLOT( receivePortalSignal( QDBusMessage ) ) );
+    d->bus.connect( Service, QString(), GlobalShortcutsInterface,
+                    QStringLiteral( "ShortcutsChanged" ), this,
+                    SLOT( receivePortalSignal( QDBusMessage ) ) );
+    d->bus.connect( Service, QString(), SessionInterface, QStringLiteral( "Closed" ), this,
+                    SLOT( receivePortalSignal( QDBusMessage ) ) );
+}
+
+PortalBackend::~PortalBackend()
+{
+    if ( !d )
+        return;
+
+    d->destroying = true;
+    ++d->generation;
+    cancelRequests();
+    closeSession();
+
+    d->bus.disconnect( Service, PortalPath, GlobalShortcutsInterface,
+                       QStringLiteral( "Activated" ), this,
+                       SLOT( receivePortalSignal( QDBusMessage ) ) );
+    d->bus.disconnect( Service, PortalPath, GlobalShortcutsInterface,
+                       QStringLiteral( "Deactivated" ), this,
+                       SLOT( receivePortalSignal( QDBusMessage ) ) );
+    d->bus.disconnect( Service, QString(), GlobalShortcutsInterface,
+                       QStringLiteral( "ShortcutsChanged" ), this,
+                       SLOT( receivePortalSignal( QDBusMessage ) ) );
+    d->bus.disconnect( Service, QString(), SessionInterface, QStringLiteral( "Closed" ), this,
+                       SLOT( receivePortalSignal( QDBusMessage ) ) );
+
+    delete serviceWatcher;
+    serviceWatcher = nullptr;
+    d.reset();
+}
+
+bool PortalBackend::isSupported() const noexcept
+{
+    return d && d->supported && d->bus.isConnected();
+}
+
+HotkeyBackend::State PortalBackend::state() const noexcept
+{
+    return d ? d->state : HotkeyBackend::State::Closed;
+}
+
+void PortalBackend::bind( QVector< HotkeyBinding > const & bindings )
+{
+    beginGeneration( bindings );
+}
+
+void PortalBackend::unbind()
+{
+    if ( !d )
+        return;
+
+    ++d->generation;
+    cancelRequests();
+    closeSession();
+    d->desired.clear();
+    d->requestedIds.clear();
+    d->activeIds.clear();
+    d->bindAttempted = false;
+    ++d->displayRevision;
+    setState( HotkeyBackend::State::Closed, QStringLiteral( "Portal session closed" ) );
+    emit bindingsChanged( {} );
+}
+
+void PortalBackend::configure( QString const & activationToken )
+{
+    if ( !d || d->destroying )
+        return;
+
+    if ( d->version < 2 )
+    {
+        setState( d->state, QStringLiteral( "ConfigureShortcuts requires portal version 2" ) );
+        return;
+    }
+    if ( d->sessionPath.isEmpty()
+         || ( d->state != HotkeyBackend::State::Bound
+              && d->state != HotkeyBackend::State::Partial ) )
+    {
+        setState( d->state, QStringLiteral( "ConfigureShortcuts requires a bound session" ) );
+        return;
+    }
+
+    QDBusMessage message = QDBusMessage::createMethodCall(
+        Service, PortalPath, GlobalShortcutsInterface, QStringLiteral( "ConfigureShortcuts" ) );
+    QVariantMap options;
+    if ( !activationToken.isEmpty() )
+        options.insert( QStringLiteral( "activation_token" ), activationToken );
+    message << QVariant::fromValue( QDBusObjectPath( d->sessionPath ) ) << QString() << options;
+
+    const quint64 generation = d->generation;
+    const QString session = d->sessionPath;
+    auto watcher = new QDBusPendingCallWatcher( d->bus.asyncCall( message, DeadlineMs ), this );
+    connect( watcher, &QDBusPendingCallWatcher::finished, this,
+             [ this, generation, session ]( QDBusPendingCallWatcher * finished ) {
+                 const QDBusMessage reply = finished->reply();
+                 finished->deleteLater();
+                 if ( !d || d->destroying || generation != d->generation || session != d->sessionPath )
+                     return;
+                 if ( reply.type() == QDBusMessage::ErrorMessage )
+                     setState( d->state, QStringLiteral( "ConfigureShortcuts failed: " )
+                                         + reply.errorMessage() );
+                 else if ( reply.type() != QDBusMessage::ReplyMessage )
+                     setState( d->state, QStringLiteral( "ConfigureShortcuts returned no reply" ) );
+             } );
+}
+
+void PortalBackend::setState( HotkeyBackend::State state, QString const & explanation )
+{
+    if ( !d || ( d->state == state && d->explanation == explanation ) )
+        return;
+    d->state = state;
+    d->explanation = explanation;
+    emit stateChanged( state, explanation );
+}
+
+void PortalBackend::setDisplayPolicy( QSet< QString > const & ids )
+{
+    if( !d || d->destroying )
+        return;
+    d->displayPolicy = ids;
+    d->displayPolicyExplicit = true;
+
+    // The policy changes what is shown, not what is bound: refresh the display
+    // from the records the portal already reported, without touching the session.
+    ++d->displayRevision;
+    emit bindingsChanged( displayEntries( d->records, d->displayPolicy ) );
+}
+
+void PortalBackend::beginGeneration( QVector< HotkeyBinding > const & bindings )
+{
+    if ( !d || d->destroying )
+        return;
+
+    ++d->generation;
+    cancelRequests();
+    closeSession();
+    d->desired = bindings;
+    // The display policy belongs to the config/UI layer and survives a bind edit;
+    // only the requested set is rebuilt below.
+    d->activeIds.clear();
+    d->bindAttempted = false;
+    ++d->displayRevision;
+
+    QSet< QString > ids;
+    bool valid = !bindings.isEmpty();
+    for ( HotkeyBinding const & binding : bindings )
+    {
+        if ( binding.id.isEmpty() || !knownBindingId( binding.id ) || binding.sequence.isEmpty()
+             || ids.contains( binding.id ) )
+        {
+            valid = false;
+            break;
+        }
+        ids.insert( binding.id );
+    }
+    d->requestedIds = ids;
+    if( !d->displayPolicyExplicit )
+        d->displayPolicy = ids;
+
+    if ( !valid )
+    {
+        setState( HotkeyBackend::State::Unavailable,
+                  QStringLiteral( "No valid portal bindings were requested" ) );
+        return;
+    }
+    if ( !d->bus.isConnected() )
+    {
+        d->supported = false;
+        setState( HotkeyBackend::State::Unavailable, QStringLiteral( "Portal bus is unavailable" ) );
+        return;
+    }
+
+    d->versionKnown = false;
+    d->version = 0;
+
+    // A stateChanged handler may start the next binding edit synchronously, which
+    // bumps d->generation before this invocation resumes. The generation of *this*
+    // attempt is therefore captured before the notification is emitted; the
+    // resumed work then fails the guard instead of issuing a second lookup tagged
+    // with the newer generation.
+    quint64 const generation = d->generation;
+    setState( HotkeyBackend::State::Creating, QStringLiteral( "Creating portal session" ) );
+    if ( !d || d->destroying || generation != d->generation )
+        return;
+    readVersion( generation );
+}
+
+void PortalBackend::readVersion( quint64 generation )
+{
+    if ( !d || generation != d->generation || d->destroying )
+        return;
+
+    QDBusMessage message = QDBusMessage::createMethodCall(
+        Service, PortalPath, PropertiesInterface, QStringLiteral( "Get" ) );
+    message << GlobalShortcutsInterface << QStringLiteral( "version" );
+    auto watcher = new QDBusPendingCallWatcher( d->bus.asyncCall( message, DeadlineMs ), this );
+    connect( watcher, &QDBusPendingCallWatcher::finished, this,
+             [ this, generation ]( QDBusPendingCallWatcher * finished ) {
+                 const QDBusMessage reply = finished->reply();
+                 finished->deleteLater();
+                 if ( !d || d->destroying || generation != d->generation )
+                     return;
+                 if ( reply.type() == QDBusMessage::ErrorMessage )
+                 {
+                     failGeneration( QStringLiteral( "Portal version is unavailable: " )
+                                         + reply.errorMessage(), false );
+                     return;
+                 }
+                 if ( reply.type() != QDBusMessage::ReplyMessage || reply.signature() != QLatin1String( "v" )
+                      || reply.arguments().size() != 1
+                      || reply.arguments().first().metaType() != QMetaType::fromType< QDBusVariant >() )
+                 {
+                     failGeneration( QStringLiteral( "Portal version has an invalid wire type" ), false );
+                     return;
+                 }
+
+                 const QVariant version = reply.arguments().first().value< QDBusVariant >().variant();
+                 if ( version.metaType() != QMetaType::fromType< uint >() )
+                 {
+                     failGeneration( QStringLiteral( "Portal version has an invalid value type" ), false );
+                     return;
+                 }
+
+                 d->version = version.toUInt();
+                 d->versionKnown = true;
+                 if ( !reply.service().isEmpty() && reply.service().startsWith( QLatin1Char( ':' ) ) )
+                     d->owner = reply.service();
+                 if ( d->version < 1 )
+                 {
+                     failGeneration( QStringLiteral( "Portal GlobalShortcuts version is too old" ), false );
+                     return;
+                 }
+                 d->supported = true;
+                 createSession( generation );
+             } );
+}
+
+void PortalBackend::createSession( quint64 generation )
+{
+    if ( !d || generation != d->generation || d->destroying )
+        return;
+
+    const QString token = uniqueToken();
+    QDBusMessage message = QDBusMessage::createMethodCall(
+        Service, PortalPath, GlobalShortcutsInterface, QStringLiteral( "CreateSession" ) );
+    message << QVariantMap{ { QStringLiteral( "handle_token" ), token },
+                             { QStringLiteral( "session_handle_token" ), uniqueToken() } };
+
+    auto request = new PortalRequest( d->bus, generation, this );
+    d->requests.append( request );
+    d->createRequest = request;
+    connect( request, &PortalRequest::response, this,
+             [ this, request ]( quint64 requestGeneration, QString const &, uint code,
+                                QVariantMap const & results ) {
+                 forgetRequest( request );
+                 if ( d && d->createRequest == request )
+                     d->createRequest = nullptr;
+                 if ( d && !d->destroying && requestGeneration == d->generation )
+                     handleCreateResponse( requestGeneration, code, results );
+                 request->deleteLater();
+             } );
+    connect( request, &PortalRequest::failed, this,
+             [ this, request ]( quint64 requestGeneration, QString const & explanation ) {
+                 forgetRequest( request );
+                 if ( d && d->createRequest == request )
+                     d->createRequest = nullptr;
+                 if ( d && !d->destroying && requestGeneration == d->generation )
+                     failGeneration( explanation );
+                 request->deleteLater();
+             } );
+    request->start( message, token );
+}
+
+void PortalBackend::startList( quint64 generation )
+{
+    if ( !d || generation != d->generation || d->destroying || d->sessionPath.isEmpty() )
+        return;
+
+    const quint64 revision = d->displayRevision;
+    const QString token = uniqueToken();
+    QDBusMessage message = QDBusMessage::createMethodCall(
+        Service, PortalPath, GlobalShortcutsInterface, QStringLiteral( "ListShortcuts" ) );
+    message << QVariant::fromValue( QDBusObjectPath( d->sessionPath ) )
+            << QVariantMap{ { QStringLiteral( "handle_token" ), token } };
+
+    auto request = new PortalRequest( d->bus, generation, this );
+    d->requests.append( request );
+    d->listRequest = request;
+    connect( request, &PortalRequest::response, this,
+             [ this, request, revision ]( quint64 requestGeneration, QString const &, uint code,
+                                          QVariantMap const & results ) {
+                 forgetRequest( request );
+                 if ( d && d->listRequest == request )
+                     d->listRequest = nullptr;
+                 if ( d && !d->destroying && requestGeneration == d->generation )
+                     handleListResponse( requestGeneration, revision, code, results );
+                 request->deleteLater();
+             } );
+    connect( request, &PortalRequest::failed, this,
+             [ this, request ]( quint64 requestGeneration, QString const & explanation ) {
+                 forgetRequest( request );
+                 if ( d && d->listRequest == request )
+                     d->listRequest = nullptr;
+                 if ( d && !d->destroying && requestGeneration == d->generation )
+                     failGeneration( QStringLiteral( "ListShortcuts failed: " ) + explanation );
+                 request->deleteLater();
+             } );
+    request->start( message, token );
+}
+
+void PortalBackend::startBind( quint64 generation )
+{
+    if ( !d || generation != d->generation || d->destroying || d->sessionPath.isEmpty()
+         || d->bindAttempted )
+        return;
+
+    d->bindAttempted = true;
+    setState( HotkeyBackend::State::Binding, QStringLiteral( "Binding portal shortcuts" ) );
+
+    PortalWire::Shortcuts shortcuts;
+    for ( HotkeyBinding const & binding : d->desired )
+    {
+        PortalWire::Shortcut shortcut;
+        shortcut.id = binding.id;
+        shortcut.properties.insert( QStringLiteral( "description" ), binding.description );
+        shortcut.properties.insert( QStringLiteral( "preferred_trigger" ), binding.sequence );
+        shortcuts.append( shortcut );
+    }
+
+    const QString token = uniqueToken();
+    QDBusMessage message = QDBusMessage::createMethodCall(
+        Service, PortalPath, GlobalShortcutsInterface, QStringLiteral( "BindShortcuts" ) );
+    message << QVariant::fromValue( QDBusObjectPath( d->sessionPath ) )
+            << QVariant::fromValue( shortcuts ) << QString()
+            << QVariantMap{ { QStringLiteral( "handle_token" ), token } };
+
+    auto request = new PortalRequest( d->bus, generation, this );
+    d->requests.append( request );
+    d->bindRequest = request;
+    connect( request, &PortalRequest::response, this,
+             [ this, request ]( quint64 requestGeneration, QString const &, uint code,
+                                QVariantMap const & results ) {
+                 forgetRequest( request );
+                 if ( d && d->bindRequest == request )
+                     d->bindRequest = nullptr;
+                 if ( d && !d->destroying && requestGeneration == d->generation )
+                     handleBindResponse( requestGeneration, code, results );
+                 request->deleteLater();
+             } );
+    connect( request, &PortalRequest::failed, this,
+             [ this, request ]( quint64 requestGeneration, QString const & explanation ) {
+                 forgetRequest( request );
+                 if ( d && d->bindRequest == request )
+                     d->bindRequest = nullptr;
+                 if ( d && !d->destroying && requestGeneration == d->generation )
+                     failGeneration( explanation );
+                 request->deleteLater();
+             } );
+    request->start( message, token );
+}
+
+void PortalBackend::handleCreateResponse( quint64 generation, uint code,
+                                          QVariantMap const & results )
+{
+    if ( !d || generation != d->generation || d->destroying )
+        return;
+    if ( code == 1 )
+    {
+        setState( HotkeyBackend::State::Denied, QStringLiteral( "Portal session creation was denied" ) );
+        return;
+    }
+    if ( code != 0 )
+    {
+        failGeneration( QStringLiteral( "Portal session creation failed" ) );
+        return;
+    }
+
+    const QVariant value = results.value( QStringLiteral( "session_handle" ) );
+    if ( value.metaType() != QMetaType::fromType< QString >() || !validPath( value.toString() ) )
+    {
+        failGeneration( QStringLiteral( "Portal response has an invalid session_handle" ) );
+        return;
+    }
+
+    d->sessionPath = value.toString();
+    d->activeIds.clear();
+    setState( HotkeyBackend::State::Ready, QStringLiteral( "Portal session is ready" ) );
+    startList( generation );
+    startBind( generation );
+}
+
+void PortalBackend::handleListResponse( quint64 generation, quint64 revision, uint code,
+                                        QVariantMap const & results )
+{
+    if ( !d || d->destroying || generation != d->generation || d->sessionPath.isEmpty() )
+        return;
+    if ( code != 0 )
+    {
+        failGeneration( code == 1 ? QStringLiteral( "Portal shortcut listing was denied" )
+                                   : QStringLiteral( "Portal shortcut listing failed" ) );
+        return;
+    }
+
+    PortalWire::Shortcuts entries;
+    QString error;
+    if ( !parseShortcuts( results.value( QStringLiteral( "shortcuts" ) ), &entries, &error ) )
+    {
+        failGeneration( QStringLiteral( "ListShortcuts returned invalid data: " ) + error );
+        return;
+    }
+    if ( revision != d->displayRevision )
+        return;
+
+    // The listing is the authoritative history: keep it so a later display-policy
+    // change (or a bind reply that reports only the bound subset) can still show
+    // entries the current session does not bind.
+    d->records = entries;
+
+    emit bindingsChanged( displayEntries( entries, d->displayPolicy ) );
+}
+
+void PortalBackend::handleBindResponse( quint64 generation, uint code, QVariantMap const & results )
+{
+    if ( !d || d->destroying || generation != d->generation || d->sessionPath.isEmpty() )
+        return;
+
+    ++d->displayRevision;
+    if ( code == 1 )
+    {
+        d->activeIds.clear();
+        setState( HotkeyBackend::State::Denied, QStringLiteral( "Portal shortcut binding was denied" ) );
+        emit bindingsChanged( {} );
+        return;
+    }
+    if ( code != 0 )
+    {
+        failGeneration( QStringLiteral( "Portal shortcut binding failed" ) );
+        return;
+    }
+
+    PortalWire::Shortcuts entries;
+    QString error;
+    if ( !parseShortcuts( results.value( QStringLiteral( "shortcuts" ) ), &entries, &error ) )
+    {
+        failGeneration( QStringLiteral( "BindShortcuts returned invalid data: " ) + error );
+        return;
+    }
+
+    QSet< QString > returned;
+    {
+        // Replace the records for the IDs this reply carries and keep the rest of
+        // the history: a bind attempt reports only what it bound.
+        QHash< QString, PortalWire::Shortcut > merged;
+        for( PortalWire::Shortcut const & entry : d->records )
+            merged.insert( entry.id, entry );
+        for( PortalWire::Shortcut const & entry : entries )
+            merged.insert( entry.id, entry );
+        d->records.clear();
+        for( auto const & entry : merged )
+            d->records.append( entry );
+    }
+    for ( PortalWire::Shortcut const & entry : entries )
+    {
+        if ( !d->requestedIds.contains( entry.id ) )
+        {
+            failGeneration( QStringLiteral( "BindShortcuts returned an unknown shortcut id" ) );
+            return;
+        }
+        returned.insert( entry.id );
+    }
+
+    d->activeIds = returned;
+    if ( returned.isEmpty() )
+        setState( HotkeyBackend::State::Denied, QStringLiteral( "Portal bound no shortcuts" ) );
+    else if ( returned.size() == d->requestedIds.size() )
+        setState( HotkeyBackend::State::Bound, QStringLiteral( "Portal shortcuts are bound" ) );
+    else
+        setState( HotkeyBackend::State::Partial, QStringLiteral( "Portal bound only some shortcuts" ) );
+    emit bindingsChanged( displayEntries( entries, d->displayPolicy ) );
+}
+
+void PortalBackend::receivePortalSignal( QDBusMessage const & message )
+{
+    if ( !d || d->destroying || message.service().isEmpty() )
+        return;
+    if ( !d->owner.isEmpty() && message.service().startsWith( QLatin1Char( ':' ) )
+         && message.service() != d->owner )
+        return;
+    if ( d->owner.isEmpty() && message.service().startsWith( QLatin1Char( ':' ) ) )
+        d->owner = message.service();
+
+    if ( message.interface() == GlobalShortcutsInterface
+         && message.member() == QLatin1String( "Activated" ) )
+    {
+        if ( message.path() != PortalPath || message.signature() != QLatin1String( "osta{sv}" )
+             || message.arguments().size() != 4 || d->sessionPath.isEmpty() )
+            return;
+        const QList< QVariant > arguments = message.arguments();
+        if ( arguments.at( 0 ).metaType() != QMetaType::fromType< QDBusObjectPath >()
+             || arguments.at( 1 ).metaType() != QMetaType::fromType< QString >()
+             || arguments.at( 2 ).metaType() != QMetaType::fromType< qulonglong >() )
+            return;
+        if ( arguments.at( 0 ).value< QDBusObjectPath >().path() != d->sessionPath )
+            return;
+        const QString id = arguments.at( 1 ).toString();
+        if ( !d->activeIds.contains( id ) )
+            return;
+        QVariantMap options;
+        if ( !extractOptions( arguments.at( 3 ), &options ) )
+            return;
+        QString token;
+        const QVariant tokenValue = options.value( QStringLiteral( "activation_token" ) );
+        if ( tokenValue.metaType() == QMetaType::fromType< QString >() )
+            token = tokenValue.toString();
+        emit activated( id, token );
+        return;
+    }
+
+    if ( message.interface() == GlobalShortcutsInterface
+         && message.member() == QLatin1String( "ShortcutsChanged" ) )
+    {
+        if ( ( message.path() != PortalPath && message.path() != d->sessionPath )
+             || message.signature() != QLatin1String( "oa(sa{sv})" )
+             || message.arguments().size() != 2 || d->sessionPath.isEmpty()
+             || message.arguments().at( 0 ).metaType() != QMetaType::fromType< QDBusObjectPath >()
+             || message.arguments().at( 0 ).value< QDBusObjectPath >().path() != d->sessionPath )
+            return;
+
+        PortalWire::Shortcuts entries;
+        QString error;
+        if ( !parseShortcuts( message.arguments().at( 1 ), &entries, &error ) )
+        {
+            failGeneration( QStringLiteral( "ShortcutsChanged returned invalid data: " ) + error );
+            return;
+        }
+        for ( PortalWire::Shortcut const & entry : entries )
+        {
+            if ( !d->requestedIds.contains( entry.id ) )
+            {
+                failGeneration( QStringLiteral( "ShortcutsChanged returned an unknown shortcut id" ) );
+                return;
+            }
+        }
+
+        {
+            QHash< QString, PortalWire::Shortcut > merged;
+            for( PortalWire::Shortcut const & entry : d->records )
+                merged.insert( entry.id, entry );
+            for( PortalWire::Shortcut const & entry : entries )
+                merged.insert( entry.id, entry );
+            d->records.clear();
+            for( auto const & entry : merged )
+                d->records.append( entry );
+        }
+        ++d->displayRevision;
+        d->activeIds.clear();
+        for ( PortalWire::Shortcut const & entry : entries )
+            d->activeIds.insert( entry.id );
+        if ( d->activeIds.isEmpty() )
+            setState( HotkeyBackend::State::Denied, QStringLiteral( "Portal bound no shortcuts" ) );
+        else if ( d->activeIds.size() == d->requestedIds.size() )
+            setState( HotkeyBackend::State::Bound, QStringLiteral( "Portal shortcuts are bound" ) );
+        else
+            setState( HotkeyBackend::State::Partial, QStringLiteral( "Portal bound only some shortcuts" ) );
+        emit bindingsChanged( displayEntries( entries, d->displayPolicy ) );
+        return;
+    }
+
+    if ( message.interface() == SessionInterface && message.member() == QLatin1String( "Closed" ) )
+    {
+        if ( message.path() != d->sessionPath || message.signature() != QLatin1String( "a{sv}" )
+             || message.arguments().size() != 1 )
+            return;
+        QVariantMap details;
+        if ( !extractOptions( message.arguments().first(), &details ) )
+            return;
+        Q_UNUSED( details )
+        d->sessionPath.clear();
+        d->activeIds.clear();
+        ++d->displayRevision;
+        cancelRequests();
+        setState( HotkeyBackend::State::Unavailable, QStringLiteral( "Portal session was closed" ) );
+        emit bindingsChanged( {} );
+    }
+}
+
+void PortalBackend::failGeneration( QString const & explanation, bool supported )
+{
+    if ( !d || d->destroying )
+        return;
+
+    ++d->generation;
+    d->supported = supported;
+    d->activeIds.clear();
+    ++d->displayRevision;
+    cancelRequests();
+    closeSession();
+    setState( HotkeyBackend::State::Unavailable, explanation );
+    emit bindingsChanged( {} );
+}
+
+void PortalBackend::cancelRequests() noexcept
+{
+    if ( !d )
+        return;
+
+    const auto pending = d->requests;
+    d->requests.clear();
+    d->createRequest = nullptr;
+    d->listRequest = nullptr;
+    d->bindRequest = nullptr;
+    for ( QPointer< PortalRequest > request : pending )
+    {
+        if ( request )
+        {
+            request->cancel();
+            request->deleteLater();
+        }
+    }
+}
+
+void PortalBackend::forgetRequest( PortalRequest * request ) noexcept
+{
+    if ( !d )
+        return;
+    for ( auto it = d->requests.begin(); it != d->requests.end(); )
+    {
+        if ( *it == request )
+            it = d->requests.erase( it );
+        else
+            ++it;
+    }
+}
+
+void PortalBackend::closeSession() noexcept
+{
+    if ( !d || d->sessionPath.isEmpty() )
+        return;
+
+    const QString path = d->sessionPath;
+    const QString service = d->owner.isEmpty() ? Service : d->owner;
+    d->sessionPath.clear();
+    if ( d->bus.isConnected() )
+    {
+        QDBusMessage message = QDBusMessage::createMethodCall(
+            service, path, SessionInterface, QStringLiteral( "Close" ) );
+        d->bus.send( message );
+    }
+}
+
+void PortalBackend::ownerChanged( QString const &, QString const & newOwner )
+{
+    if ( !d || d->destroying )
+        return;
+
+    const QString previousOwner = d->owner;
+    if ( newOwner.isEmpty() )
+    {
+        if ( d->state != HotkeyBackend::State::Unsupported
+             && d->state != HotkeyBackend::State::Closed )
+            failGeneration( QStringLiteral( "Portal service owner changed" ), false );
+        d->owner.clear();
+        return;
+    }
+
+    if ( !previousOwner.isEmpty() && previousOwner != newOwner
+         && ( d->state != HotkeyBackend::State::Unsupported
+              && d->state != HotkeyBackend::State::Closed ) )
+        failGeneration( QStringLiteral( "Portal service owner changed" ), false );
+    d->owner = newOwner;
+}
+
 #include "portalhotkeys.moc"
+
