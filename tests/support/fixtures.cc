@@ -7,6 +7,7 @@
 #include "fixtures.hh"
 
 #include <QCoreApplication>
+#include <QDBusConnection>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFileInfo>
@@ -14,6 +15,7 @@
 #include <QLocalSocket>
 #include <QProcess>
 #include <QProcessEnvironment>
+#include <QStandardPaths>
 #include <QTcpSocket>
 
 #include <chrono>
@@ -750,6 +752,36 @@ bool prerequisiteAvailable( QString const & token, QString * reason )
         return waylandDisplayReachableImpl( waylandDisplay, reason );
     }
 
+    if ( normalized == QLatin1String( "dbus" ) )
+    {
+        const QString configured = qEnvironmentVariable( "GD_TEST_DBUS_DAEMON" ).trimmed();
+        const QString program =
+            configured.isEmpty() ? PrivateSessionBus::defaultDaemonProgram() : configured;
+
+        if ( QStandardPaths::findExecutable( program ).isEmpty() )
+        {
+            if ( reason )
+                *reason = QStringLiteral( "the D-Bus daemon executable \"%1\" is not available: "
+                                          "portal tests need a private bus" )
+                              .arg( program );
+            return false;
+        }
+
+        // Prove a private bus can really be started and connected to, not just
+        // that a binary exists.
+        PrivateSessionBus bus;
+        QString failure;
+
+        if ( !bus.start( program, &failure ) )
+        {
+            if ( reason )
+                *reason = failure;
+            return false;
+        }
+
+        return true;
+    }
+
     if ( normalized == QLatin1String( "webengine" ) )
     {
         const QString helper =
@@ -766,8 +798,242 @@ bool prerequisiteAvailable( QString const & token, QString * reason )
 
     if ( reason )
         *reason = QStringLiteral( "unknown prerequisite token (known tokens: display, x11, "
-                                  "wayland, webengine)" );
+                                  "wayland, webengine, dbus)" );
     return false;
+}
+
+
+////////// PrivateSessionBus
+
+namespace {
+
+/// Upper bound on the daemon startup/output handshake. A dbus-daemon that does
+/// not print an address within it is a required failure, never a skip.
+constexpr int PrivateBusStartTimeoutMs = 5000;
+
+/// Upper bound on the daemon's teardown after terminate().
+constexpr int PrivateBusStopTimeoutMs = 5000;
+
+} // namespace
+
+struct PrivateSessionBusPrivate
+{
+    QProcess daemon;
+    QDBusConnection connection{ QString() };
+    QDBusConnection fixture{ QString() };
+    QString address;
+    QString error;
+    bool started = false;
+
+    bool launch( QString const & program, QString * reason );
+    void shutdown();
+};
+
+bool PrivateSessionBusPrivate::launch( QString const & program, QString * reason )
+{
+    const QString executable = QStandardPaths::findExecutable( program );
+
+    if ( executable.isEmpty() )
+    {
+        error = QStringLiteral( "the D-Bus daemon executable \"%1\" was not found in PATH" )
+                    .arg( program );
+
+        if ( reason )
+            *reason = error;
+        return false;
+    }
+
+    daemon.setProcessChannelMode( QProcess::SeparateChannels );
+    daemon.start( executable, { QStringLiteral( "--session" ), QStringLiteral( "--nofork" ),
+                                QStringLiteral( "--print-address=1" ) } );
+
+    if ( !daemon.waitForStarted( PrivateBusStartTimeoutMs ) )
+    {
+        error = QStringLiteral( "cannot start the private D-Bus daemon %1: %2" )
+                    .arg( executable, daemon.errorString() );
+
+        if ( reason )
+            *reason = error;
+        return false;
+    }
+
+    QElapsedTimer elapsed;
+    elapsed.start();
+
+    QByteArray output;
+
+    while ( !output.contains( '\n' ) )
+    {
+        const qint64 remaining = PrivateBusStartTimeoutMs - elapsed.elapsed();
+
+        if ( remaining <= 0 )
+            break;
+
+        if ( !daemon.waitForReadyRead( static_cast< int >( remaining ) ) )
+            break;
+
+        output += daemon.readAllStandardOutput();
+    }
+
+    const int newline = output.indexOf( '\n' );
+    const QByteArray printedAddress = ( newline >= 0 ? output.left( newline ) : output ).trimmed();
+
+    if ( printedAddress.isEmpty() )
+    {
+        error = QStringLiteral( "the private D-Bus daemon %1 printed no address within %2 ms" )
+                    .arg( executable )
+                    .arg( PrivateBusStartTimeoutMs );
+
+        if ( reason )
+            *reason = error;
+
+        shutdown();
+        return false;
+    }
+
+    address = QString::fromUtf8( printedAddress );
+
+    connection = QDBusConnection::connectToBus( address, PrivateSessionBus::connectionName() );
+
+    if ( !connection.isConnected() )
+    {
+        error = QStringLiteral( "the private D-Bus daemon printed %1 but the connection failed" )
+                    .arg( address );
+
+        if ( reason )
+            *reason = error;
+
+        shutdown();
+        return false;
+    }
+
+    started = true;
+    error.clear();
+
+    return true;
+}
+
+void PrivateSessionBusPrivate::shutdown()
+{
+    if ( fixture.isConnected() )
+    {
+        QDBusConnection::disconnectFromBus( PrivateSessionBus::fixtureConnectionName() );
+        fixture = QDBusConnection( QString() );
+    }
+
+    if ( connection.isConnected() )
+    {
+        QDBusConnection::disconnectFromBus( PrivateSessionBus::connectionName() );
+        connection = QDBusConnection( QString() );
+    }
+
+    if ( daemon.state() != QProcess::NotRunning )
+    {
+        daemon.terminate();
+
+        if ( !daemon.waitForFinished( PrivateBusStopTimeoutMs ) )
+        {
+            daemon.kill();
+            daemon.waitForFinished( PrivateBusStopTimeoutMs );
+        }
+    }
+
+    started = false;
+}
+
+PrivateSessionBus::PrivateSessionBus(): d( std::make_unique< PrivateSessionBusPrivate >() )
+{
+}
+
+PrivateSessionBus::~PrivateSessionBus()
+{
+    stop();
+
+    d.reset();
+}
+
+bool PrivateSessionBus::start( QString * reason )
+{
+    const QString overrideProgram = qEnvironmentVariable( "GD_TEST_DBUS_DAEMON" ).trimmed();
+
+    return start( overrideProgram.isEmpty() ? defaultDaemonProgram() : overrideProgram, reason );
+}
+
+bool PrivateSessionBus::start( QString const & daemonProgram, QString * reason )
+{
+    if ( !d )
+    {
+        if ( reason )
+            *reason = QStringLiteral( "no private bus implementation" );
+        return false;
+    }
+
+    if ( d->started )
+    {
+        if ( reason )
+            *reason = QStringLiteral( "the private bus is already running at %1" ).arg( d->address );
+        return false;
+    }
+
+    return d->launch( daemonProgram, reason );
+}
+
+void PrivateSessionBus::stop()
+{
+    if ( d )
+        d->shutdown();
+}
+
+QString PrivateSessionBus::address() const
+{
+    return d ? d->address : QString();
+}
+
+QDBusConnection PrivateSessionBus::connection() const
+{
+    return d ? d->connection : QDBusConnection( QString() );
+}
+
+QDBusConnection PrivateSessionBus::fixtureConnection() const
+{
+    if ( !d || !d->connection.isConnected() )
+        return QDBusConnection( QString() );
+
+    if ( !d->fixture.isConnected() )
+    {
+        d->fixture = QDBusConnection::connectToBus( d->address,
+                                                   PrivateSessionBus::fixtureConnectionName() );
+
+        if ( !d->fixture.isConnected() )
+            d->fixture = QDBusConnection( QString() );
+    }
+
+    return d->fixture;
+}
+
+bool PrivateSessionBus::isRunning() const
+{
+    return d && d->started && d->daemon.state() != QProcess::NotRunning;
+}
+
+qint64 PrivateSessionBus::daemonProcessId() const
+{
+    return d ? d->daemon.processId() : 0;
+}
+
+QString PrivateSessionBus::connectionName()
+{
+    return QStringLiteral( "goldendict-test-private-bus" );
+}
+
+QString PrivateSessionBus::fixtureConnectionName()
+{
+    return QStringLiteral( "goldendict-test-private-bus-fixture" );
+}
+
+QString PrivateSessionBus::defaultDaemonProgram()
+{
+    return QStringLiteral( "dbus-daemon" );
 }
 
 } // namespace TestSupport

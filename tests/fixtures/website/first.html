@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<!--
+  GoldenDict remote-website fixture, first page.
+
+  Fixed oracles a suite may rely on:
+    * page marker                 `#first-marker` (text `first page`)
+    * click target                `#click-target` (a plain link to second.html)
+    * context target              `#context-target` (text `contextword`)
+    * word target                 `#word-target` (text `wordword`)
+    * measured height             `#height-target` is 120 CSS pixels tall
+    * relative image              `#relative-image` -> ./pixel.png
+    * relative stylesheet         ./style.css (`.website-marker`)
+    * GET form                    `#get-form` submits `q` to second.html
+    * script-relative fetch       `relative.js` fetches ./data.json and writes
+                                  `real-origin-fetch` into `#fetch-marker`
+
+  The form action and the fetch URL are relative to this document's own real
+  origin (scheme, host and non-default port), never to gdlookup, which is what
+  the frame tests assert.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>first page</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="website-marker">
+<h1 id="first-marker">first page</h1>
+<div id="height-target" style="height:120px; background:rgb(10,20,30);"></div>
+<p><a id="click-target" href="second.html">go to the second page</a></p>
+<p id="context-target">contextword</p>
+<p id="word-target">wordword</p>
+<p><img id="relative-image" src="pixel.png" alt="relative fixture image"></p>
+<form id="get-form" method="get" action="second.html">
+  <input id="get-input" type="text" name="q" value="form-query">
+  <button id="get-submit" type="submit">search</button>
+</form>
+<p id="fetch-marker"></p>
+<script src="relative.js"></script>
+</body>
+</html>

@@ -30,14 +30,24 @@ QT += testlib
 
 # The display-prerequisite checks open a bounded connection to the selected
 # endpoint (X11 unix socket/TCP port or the Wayland compositor socket), so the
-# shared support needs QtNetwork in every target.
-QT += network
+# shared support needs QtNetwork in every target. QtDBus is needed by the private
+# portal-bus fixture; linking it does not connect to any bus by itself.
+QT += network dbus
 
 INCLUDEPATH += $$GD_REPO_ROOT $$GD_TESTS_ROOT $$GD_TESTS_ROOT/support
 
-# Shared test support (fixtures, environment gate, watchdog). A glob so a new
-# support translation unit joins every suite without editing the suite file.
+# Shared test support (fixtures, environment gate, watchdog, HTTP origins, the
+# private portal bus). A glob so a new support translation unit joins every suite
+# without editing the suite file.
+#
+# One support file is deliberately excluded: support/dictionary_stub.cc reaches
+# the *production* DataRequestReader in articleschemes.cc, so a suite that links
+# it also has to link that closure (and QtWebEngine). Keeping it out of the glob
+# is what lets a pure suite stay free of Chromium. Suites that need it link it
+# explicitly -- tests/article-test.pri does so for the Browser/Article targets,
+# tst_utf8_wstring does it for the fixture self-tests.
 GD_TEST_SUPPORT_SOURCES = $$files($$GD_TESTS_ROOT/support/*.cc)
+GD_TEST_SUPPORT_SOURCES -= $$GD_TESTS_ROOT/support/dictionary_stub.cc
 SOURCES += $$GD_TEST_SUPPORT_SOURCES
 
 # Feature definitions mirroring goldendict.pro. Each entry copies the *CONFIG

@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<!--
+  GoldenDict print fixture: exactly two pages.
+
+  Fixed oracles:
+    * first page text   `snapshot-page-one`   (inside `#snapshot-page-one`)
+    * second page text  `snapshot-page-two`   (inside `#snapshot-page-two`)
+
+  Each section is 200 mm tall and the first one carries an explicit page break,
+  so an A4 page box with 12 mm margins (273 mm of printable height) holds one
+  section per page and never spills a third one. The last section has no break
+  after it: a trailing break is what produces the classic empty third page.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>print fixture</title>
+<style>
+  @page { size: A4; margin: 12mm; }
+  html, body { margin: 0; padding: 0; background: #fff; color: #000; }
+  section.page { box-sizing: border-box; height: 200mm; page-break-after: always; break-after: page; }
+  section.page:last-of-type { page-break-after: auto; break-after: auto; }
+  .page-marker { font: 700 28px/1.2 sans-serif; margin: 0 0 8mm 0; }
+  .page-body { font: 16px/1.5 serif; }
+</style>
+</head>
+<body>
+<section class="page" id="snapshot-page-one">
+  <h1 class="page-marker" id="page-one-marker">snapshot-page-one</h1>
+  <p class="page-body" id="page-one-body">First fixed page of the GoldenDict print fixture.</p>
+</section>
+<section class="page" id="snapshot-page-two">
+  <h1 class="page-marker" id="page-two-marker">snapshot-page-two</h1>
+  <p class="page-body" id="page-two-body">Second fixed page of the GoldenDict print fixture.</p>
+</section>
+</body>
+</html>
