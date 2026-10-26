@@ -168,6 +168,20 @@ inline QString websiteIframeMarkup( QString const & dictId, QString const & url 
                          "</iframe>" );
 }
 
+
+/// Decode and rewrite one fetched website response. Kept as one seam so the
+/// response path itself is testable: the previous attempt regressed by leaving
+/// the decoded body unassigned, which a rewriting-only test cannot catch.
+inline QString decodeAndRewriteWebsiteResponse( QByteArray const & body,
+                                                QByteArray const & contentType,
+                                                QUrl const & pageUrl,
+                                                QString const & dictId )
+{
+  Encoding const codec = Encoding::forHtml( body, contentType );
+  QString const decoded = codec.isValid() ? codec.decode( body ) : QString::fromUtf8( body );
+  return rewriteWebsiteLinks( decoded, pageUrl, dictId );
+}
+
 } // namespace detail
 
 

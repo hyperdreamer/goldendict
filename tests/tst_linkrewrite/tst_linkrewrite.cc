@@ -512,6 +512,18 @@ void TstLinkRewrite::websiteRewritesRetainedBaselineBehaviour()
                                                     QStringLiteral( "dict" ) ),
               QStringLiteral( "<span><div>t</span></div>" ) );
 
+    // The response seam decodes the body before rewriting: a body declared as
+    // Windows-1251 and one declared by header must both survive, which is what
+    // the previous attempt broke by leaving the decoded string empty.
+    QCOMPARE( WebSite::detail::decodeAndRewriteWebsiteResponse(
+                  QByteArray( "<p>\xcf\xf0\xe8\xe2\xe5\xf2</p><img src='/a.png'>" ),
+                  QByteArray( "text/html; charset=windows-1251" ), page, QStringLiteral( "dict" ) ),
+              QStringLiteral( "<p>Привет</p><img src='http://127.0.0.1/a.png'>" ) );
+    QCOMPARE( WebSite::detail::decodeAndRewriteWebsiteResponse(
+                  QByteArray( "<p>body</p><a href='x.html'>x</a>" ), QByteArray(), page,
+                  QStringLiteral( "dict" ) ),
+              QStringLiteral( "<p>body</p><a href='http://127.0.0.1/dir/x.html'>x</a>" ) );
+
     // The inline frame carries the identity in both id and name.
     const QString frame = WebSite::detail::websiteIframeMarkup(
         QStringLiteral( "dict-id" ), QStringLiteral( "https://example.test/page" ) );

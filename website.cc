@@ -176,13 +176,9 @@ void WebSiteArticleRequest::requestFinished( QNetworkReply * r )
     // Handle reply data
 
     QByteArray replyData = netReply->readAll();
-    Encoding const codec = WebSiteArticleRequest::codecForHtml(
-        replyData, netReply->rawHeader( "Content-Type" ) );
-    QString articleString = codec.isValid() ? codec.decode( replyData )
-                                            : QString::fromUtf8( replyData );
-
-
-    articleString = detail::rewriteWebsiteLinks( articleString, netReply->url(), dictPtr->getId().c_str() );
+    QString articleString = detail::decodeAndRewriteWebsiteResponse(
+        replyData, netReply->rawHeader( "Content-Type" ), netReply->url(),
+        QString::fromStdString( dictPtr->getId() ) );
 
     // See Issue #271: A mechanism to clean-up invalid HTML cards.
     articleString += "</font>""</font>""</font>""</font>""</font>""</font>"
