@@ -2,7 +2,8 @@
 #define __FTSHELPERS_HH_INCLUDED__
 
 #include <QString>
-#include <QRegExp>
+#include <QRegularExpression>
+#include "articleurls.hh"
 #include <QRunnable>
 #include <QSemaphore>
 #include <QList>
@@ -48,7 +49,7 @@ bool ftsIndexIsOldOrBad( std::string const & indexFile,
 
 bool parseSearchString( QString const & str, QStringList & IndexWords,
                         QStringList & searchWords,
-                        QRegExp & searchRegExp, int searchMode,
+                        FtsHighlightSpec & searchRegExp, int searchMode,
                         bool matchCase,
                         int distanceBetweenWords,
                         bool & hasCJK );
@@ -104,7 +105,7 @@ class FTSResultsRequest : public Dictionary::DataRequest
 
   void checkArticles( QVector< uint32_t > const & offsets,
                       QStringList const & words,
-                      QRegExp const & searchRegexp = QRegExp() );
+                      QRegularExpression const & searchRegexp = QRegularExpression() );
 
   void indexSearch( BtreeIndexing::BtreeIndex & ftsIndex,
                     sptr< ChunkedStorage::Reader > chunks,
@@ -115,15 +116,15 @@ class FTSResultsRequest : public Dictionary::DataRequest
                             sptr< ChunkedStorage::Reader > chunks,
                             QStringList & indexWords,
                             QStringList & searchWords,
-                            QRegExp & regexp );
+                            QRegularExpression & regexp );
 
   void fullIndexSearch( BtreeIndexing::BtreeIndex & ftsIndex,
                         sptr< ChunkedStorage::Reader > chunks,
                         QStringList & indexWords,
                         QStringList & searchWords,
-                        QRegExp & regexp );
+                        QRegularExpression & regexp );
 
-  void fullSearch( QStringList & searchWords, QRegExp & regexp );
+  void fullSearch( QStringList & searchWords, QRegularExpression & regexp );
 
 public:
 

@@ -12,7 +12,10 @@
 #include "mutex.hh"
 
 #include <QString>
-#include <QTextCodec>
+#include "encoding.hh"
+#include <QRegularExpression>
+#include "gddebug.hh"
+#include <QStack>
 #include <QMap>
 #include <QVector>
 #include <vector>
@@ -33,6 +36,45 @@ void initialize();
 void finalize();
 
 namespace Book {
+
+namespace detail {
+inline QRegularExpression parserPattern( QString const & source,
+    QRegularExpression::PatternOptions options = QRegularExpression::NoPatternOption )
+{
+  QRegularExpression pattern( source, options );
+  if( !pattern.isValid() )
+  {
+    const QString error = QStringLiteral( "invalid pattern '%1': %2" ).arg( source, pattern.errorString() );
+    gdWarning( "Epwing: %s", qPrintable( error ) );
+    throw exEpwing( error.toUtf8().toStdString() );
+  }
+  return pattern;
+}
+
+inline QRegularExpression const & badLinksPattern()
+{
+  static const auto pattern = parserPattern( QStringLiteral( "#(v|n)\\d" ) );
+  return pattern;
+}
+
+inline QRegularExpression const & pronunciationPattern()
+{
+  static const auto pattern = parserPattern( QStringLiteral( "/[^/]+/" ) );
+  return pattern;
+}
+
+inline QRegularExpression const & referenceOpenPattern()
+{
+  static const auto pattern = parserPattern( QStringLiteral( "<R[^<]*>" ) );
+  return pattern;
+}
+
+inline QRegularExpression const & referenceClosePattern()
+{
+  static const auto pattern = parserPattern( QStringLiteral( "</R[^<]*>" ) );
+  return pattern;
+}
+}
 
 using std::vector;
 using std::string;
@@ -68,7 +110,7 @@ class EpwingBook
   QString mainCacheDir, rootDir;
   QString cacheImagesDir, cacheSoundsDir, cacheMoviesDir, cacheFontsDir;
   QString dictID;
-  QTextCodec * codec_ISO, * codec_GB, * codec_Euc;
+  Encoding codec_ISO, codec_GB, codec_Euc;
   QStack< unsigned int > decorationStack;
   int monoWidth, monoHeight;
   QStringList imageCacheList, soundsCacheList, moviesCacheList, fontsCacheList;
@@ -120,13 +162,13 @@ public:
   QString const &errorString() const
   { return error_string; }
 
-  QTextCodec * codecISO()
+  Encoding const & codecISO() const
   { return codec_ISO; }
 
-  QTextCodec * codecGB()
+  Encoding const & codecGB() const
   { return codec_GB; }
 
-  QTextCodec *codecEuc()
+  Encoding const & codecEuc() const
   { return codec_Euc; }
 
   int getSubBookCount()

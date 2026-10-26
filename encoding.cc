@@ -1045,3 +1045,33 @@ QByteArray Encoding::encode( QString const & text ) const
     }
 
 }
+
+QByteArray EncodingCallers::epwingSearchBytes( Encoding const & codec, QString const & word )
+{
+    if ( !codec.isValid() )
+    {
+        qWarning( "Encoding: EPWING search skipped charset=%s", qPrintable( codec.name() ) );
+        return {};
+    }
+    try
+    {
+        return codec.encode( word );
+    }
+    catch ( Encoding::exUnrepresentable const & )
+    {
+        // A failed search encoding is no candidate. In mixed books the caller
+        // still tries GB2312 after EUC-JP; UTF-8 is never a search fallback.
+        qWarning( "Encoding: EPWING search skipped charset=%s", qPrintable( codec.name() ) );
+        return {};
+    }
+}
+
+QByteArray EncodingCallers::slobTextToUtf8( Encoding const & codec, QByteArray const & bytes )
+{
+    return codec.decode( bytes ).toUtf8();
+}
+
+QString EncodingCallers::zipFilenameForDisplay( Encoding const & locale, QByteArray const & bytes )
+{
+    return locale.decode( bytes );
+}

@@ -14,6 +14,8 @@ include(../testsupport.pri)
 QT += core
 
 SOURCES += $$GD_REPO_ROOT/linkrewrite.cc \
+           $$GD_REPO_ROOT/encoding.cc \
+           $$GD_REPO_ROOT/gddebug.cc \
            $$GD_REPO_ROOT/audiolink.cc \
            tst_linkrewrite.cc
 

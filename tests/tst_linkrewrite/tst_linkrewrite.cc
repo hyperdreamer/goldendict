@@ -39,6 +39,7 @@
 
 #include "audiolink.hh"
 #include "linkrewrite.hh"
+#include "website.hh"
 #include "support/fixtures.hh"
 
 namespace
@@ -268,6 +269,7 @@ std::optional<QString> decodeHtmlAttributeValue( QString const & value )
     return decoded;
 }
 
+
 } // namespace
 
 class TstLinkRewrite : public QObject
@@ -275,6 +277,7 @@ class TstLinkRewrite : public QObject
     Q_OBJECT
 
   private slots:
+    void websiteRewritesRetainedBaselineBehaviour();
     void initTestCase();
     void cleanupTestCase();
 
@@ -451,6 +454,120 @@ void TstLinkRewrite::fixtureRowsMatchProduction()
                 .arg( problems.size() )
                 .arg( rowCount )
                 .arg( details ) ) );
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+void TstLinkRewrite::websiteRewritesRetainedBaselineBehaviour()
+{
+    const QUrl page( QStringLiteral( "http://127.0.0.1:43127/dir/page?q=1" ) );
+
+    // Relative, root-relative and protocol-relative targets become absolute by
+    // string concatenation, which is the retained baseline behaviour: the port is
+    // not carried and ".." is not resolved. The body text itself is preserved.
+    QCOMPARE( WebSite::detail::rewriteWebsiteLinks(
+                  QStringLiteral( "<p>body text</p><a href='../x.html'>x</a>"
+                                  "<img src='/img/a.png'><script src='//cdn.example.test/s.js'>" ),
+                  page, QStringLiteral( "dict" ) ),
+              QStringLiteral( "<p>body text</p><a href='http://127.0.0.1/dir/../x.html'>x</a>"
+                              "<img src='http://127.0.0.1/img/a.png'>"
+                              "<script src='http://cdn.example.test/s.js'>" ) );
+
+    // Absolute, data:, mailto:, javascript: and fragment targets are left alone.
+    QCOMPARE( WebSite::detail::rewriteWebsiteLinks(
+                  QStringLiteral( "<a href='https://other.test/z'>z</a><img src='data:image/png;base64,AA'>"
+                                  "<a href='mailto:a@b.c'>m</a><a href='javascript:void(0)'>j</a>"
+                                  "<a href='#frag'>f</a>" ),
+                  page, QStringLiteral( "dict" ) ),
+              QStringLiteral( "<a href='https://other.test/z'>z</a><img src='data:image/png;base64,AA'>"
+                              "<a href='mailto:a@b.c'>m</a><a href='javascript:void(0)'>j</a>"
+                              "<a href='#frag'>f</a>" ) );
+
+    // Absolute stylesheet links are remapped to the dictionary resource scheme.
+    // The retained pattern needs an attribute after the closing quote, and it
+    // rewrites scheme and host into one path segment: both quirks are shipped
+    // behaviour, so the fixture pins them rather than correcting them.
+    QCOMPARE( WebSite::detail::rewriteWebsiteLinks(
+                  QStringLiteral( "<link rel='stylesheet' href='https://cdn.test/site.css' type='text/css'>" ),
+                  page, QStringLiteral( "dict" ) ),
+              QStringLiteral( "<link rel='stylesheet' href='bres://dict/https/cdn.test/site.css' type='text/css'>" ) );
+
+    // Unicode classification matches the QRegExp baseline: a non-ASCII character
+    // after the tag name is not a word boundary, and a non-ASCII space does not
+    // close a closing tag.
+    QCOMPARE( WebSite::detail::rewriteWebsiteLinks( QStringLiteral( "<span\u00e9>plain" ), page,
+                                                    QStringLiteral( "dict" ) ),
+              QStringLiteral( "<span\u00e9>plain" ) );
+    QCOMPARE( WebSite::detail::rewriteWebsiteLinks( QStringLiteral( "<div\u00e9>plain" ), page,
+                                                    QStringLiteral( "dict" ) ),
+              QStringLiteral( "<div\u00e9>plain" ) );
+    QCOMPARE( WebSite::detail::rewriteWebsiteLinks( QStringLiteral( "<span>text</span\u00a0>" ), page,
+                                                    QStringLiteral( "dict" ) ),
+              QStringLiteral( "<span>text</span\u00a0>" ) );
+
+    // Unicode whitespace inside the retained \s* positions counts like the
+    // QRegExp baseline (QChar::isSpace): an em-space closer balances a span.
+    QCOMPARE( WebSite::detail::rewriteWebsiteLinks( QStringLiteral( "<span>t</span\u2003>" ), page,
+                                                    QStringLiteral( "dict" ) ),
+              QStringLiteral( "<span>t</span\u2003>" ) );
+    // A combining mark is a QRegExp word character, so there is no boundary after
+    // the tag name and the tag does not count as open -- the baseline output here
+    // is the input unchanged.
+    QCOMPARE( WebSite::detail::rewriteWebsiteLinks( QStringLiteral( "<span\u0301>t" ), page,
+                                                    QStringLiteral( "dict" ) ),
+              QStringLiteral( "<span\u0301>t" ) );
+    // A hyphen is not a word character, so it is a boundary and counts.
+    QCOMPARE( WebSite::detail::rewriteWebsiteLinks( QStringLiteral( "<span->t" ), page,
+                                                    QStringLiteral( "dict" ) ),
+              QStringLiteral( "<span->t</span>" ) );
+    // Whitespace between '/' and the name is not part of the baseline pattern, so
+    // "</ span>" does not close anything.
+    QCOMPARE( WebSite::detail::rewriteWebsiteLinks( QStringLiteral( "<span>t</ span>" ), page,
+                                                    QStringLiteral( "dict" ) ),
+              QStringLiteral( "<span>t</ span></span>" ) );
+    // Underscore is a word character, so no boundary and no appended closer.
+    QCOMPARE( WebSite::detail::rewriteWebsiteLinks( QStringLiteral( "<span_>t" ), page,
+                                                    QStringLiteral( "dict" ) ),
+              QStringLiteral( "<span_>t" ) );
+
+    // Unclosed span/div wrappers are still closed.
+    QCOMPARE( WebSite::detail::rewriteWebsiteLinks( QStringLiteral( "<span><div>t" ), page,
+                                                    QStringLiteral( "dict" ) ),
+              QStringLiteral( "<span><div>t</span></div>" ) );
+
+    // The response seam decodes the body before rewriting: a body declared as
+    // Windows-1251 and one declared by header must both survive, which is what
+    // the previous attempt broke by leaving the decoded string empty.
+    QCOMPARE( WebSite::detail::decodeAndRewriteWebsiteResponse(
+                  QByteArray( "<p>\xcf\xf0\xe8\xe2\xe5\xf2</p><img src='/a.png'>" ),
+                  QByteArray( "text/html; charset=windows-1251" ), page, QStringLiteral( "dict" ) ),
+              QStringLiteral( "<p>Привет</p><img src='http://127.0.0.1/a.png'>" ) );
+    QCOMPARE( WebSite::detail::decodeAndRewriteWebsiteResponse(
+                  QByteArray( "<p>body</p><a href='x.html'>x</a>" ), QByteArray(), page,
+                  QStringLiteral( "dict" ) ),
+              QStringLiteral( "<p>body</p><a href='http://127.0.0.1/dir/x.html'>x</a>" ) );
+
+    // The inline frame carries the identity in both id and name.
+    const QString frame = WebSite::detail::websiteIframeMarkup(
+        QStringLiteral( "dict-id" ), QStringLiteral( "https://example.test/page" ) );
+    QVERIFY( frame.contains( QStringLiteral( "id=\"gdexpandframe-dict-id\"" ) ) );
+    QVERIFY( frame.contains( QStringLiteral( "name=\"gdexpandframe-dict-id\"" ) ) );
+    QVERIFY( frame.contains( QStringLiteral( "src=\"https://example.test/page\"" ) ) );
 }
 
 void TstLinkRewrite::gdLookupPreservesStructureAndIsIdempotent()
