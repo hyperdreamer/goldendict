@@ -4,7 +4,6 @@
 #include "fulltextsearch.hh"
 #include "ftshelpers.hh"
 #include "gddebug.hh"
-#include "mainwindow.hh"
 #include "qt4x5.hh"
 
 #include <QThreadPool>
@@ -192,11 +191,28 @@ void addSortedHeadwords( QList< FtsHeadword > & base_list, QList< FtsHeadword > 
   base_list.swap( list );
 }
 
+FtsHighlightSpec makeResultHighlight( QStringList const & foundHiliteRegExps, bool matchCase,
+                                      FtsHighlightSpec const & searchHighlight )
+{
+  if( foundHiliteRegExps.isEmpty() )
+    return searchHighlight;
+
+  FtsHighlightSpec highlight;
+  // A words-mode result carries the exact sequences that matched as regular
+  // expressions, not a wildcard source.
+  highlight.sourcePattern = foundHiliteRegExps.join( "|" );
+  highlight.wildcards = false;
+  highlight.matchCase = matchCase;
+  highlight.expression = FtsHelpers::compileHighlight( highlight.sourcePattern, false, matchCase );
+  return highlight;
+}
+
 FullTextSearchDialog::FullTextSearchDialog( QWidget * parent,
                                             Config::Class & cfg_,
                                             std::vector< sptr< Dictionary::Class > > const & dictionaries_,
                                             std::vector< Instances::Group > const & groups_,
-                                            FtsIndexing & ftsidx ) :
+                                            FtsIndexing & ftsidx,
+                                            QString const & initialTranslateText ) :
   QDialog( parent ),
   cfg( cfg_ ),
   dictionaries( dictionaries_ ),
@@ -298,13 +314,13 @@ FullTextSearchDialog::FullTextSearchDialog( QWidget * parent,
   connect( ui.cancelButton, SIGNAL( clicked() ), this, SLOT( reject() ) );
 
   connect( ui.helpButton, SIGNAL( clicked() ),
-           this, SLOT( helpRequested() ) );
+           this, SLOT( emitHelpRequested() ) );
 
   helpAction.setShortcut( QKeySequence( "F1" ) );
   helpAction.setShortcutContext( Qt::WidgetWithChildrenShortcut );
 
   connect( &helpAction, SIGNAL( triggered() ),
-           this, SLOT( helpRequested() ) );
+           this, SLOT( emitHelpRequested() ) );
 
   addAction( &helpAction );
 
@@ -336,7 +352,7 @@ FullTextSearchDialog::FullTextSearchDialog( QWidget * parent,
 
 #endif
 
-  ui.searchLine->setText( static_cast< MainWindow * >( parent )->getTranslateLineText() );
+  ui.searchLine->setText( initialTranslateText );
   ui.searchLine->selectAll();
 }
 
@@ -455,7 +471,20 @@ void FullTextSearchDialog::accept()
                                       distanceBetweenWords,
                                       hasCJK ) )
   {
-    if( hasCJK && ( mode == WholeWords || mode == PlainText ) )
+    if( ( mode == Wildcards || mode == RegExp ) && !searchRegExp.expression.isValid() )
+    {
+      // §4.3: an invalid user pattern is a displayed validation error and no
+      // search starts. It must never become an empty pattern that matches
+      // every article.
+      QMessageBox message( QMessageBox::Warning,
+                           "GoldenDict",
+                           tr( "The search pattern is not a valid regular expression: " )
+                           + searchRegExp.expression.errorString(),
+                           QMessageBox::Ok,
+                           this );
+      message.exec();
+    }
+    else if( hasCJK && ( mode == WholeWords || mode == PlainText ) )
     {
       QMessageBox message( QMessageBox::Warning,
                            "GoldenDict",
@@ -596,17 +625,11 @@ void FullTextSearchDialog::itemClicked( const QModelIndex & idx )
   if( idx.isValid() && idx.row() < results.size() )
   {
     QString headword = results[ idx.row() ].headword;
-    QRegExp reg;
-    if( !results[ idx.row() ].foundHiliteRegExps.isEmpty() )
-    {
-      reg = QRegExp( results[ idx.row() ].foundHiliteRegExps.join( "|"),
-                     results[ idx.row() ].matchCase ? Qt::CaseSensitive : Qt::CaseInsensitive,
-                     QRegExp::RegExp2 );
-      reg.setMinimal( true );
-    }
-    else
-      reg = searchRegExp;
-    emit showTranslationFor( headword, results[ idx.row() ].dictIDs, reg, ignoreDiacritics );
+
+    FtsHighlightSpec const highlight = makeResultHighlight(
+      results[ idx.row() ].foundHiliteRegExps, results[ idx.row() ].matchCase, searchRegExp );
+
+    emit showTranslationFor( headword, results[ idx.row() ].dictIDs, highlight, ignoreDiacritics );
   }
 }
 
@@ -673,11 +696,9 @@ bool FullTextSearchDialog::eventFilter( QObject * obj, QEvent * ev )
   return QDialog::eventFilter( obj, ev );
 }
 
-void FullTextSearchDialog::helpRequested()
+void FullTextSearchDialog::emitHelpRequested()
 {
-  MainWindow * mainWindow = qobject_cast< MainWindow * >( parentWidget() );
-  if( mainWindow )
-    mainWindow->showGDHelpForID( "Full-text search" );
+  emit helpRequested( QStringLiteral( "Full-text search" ) );
 }
 
 /// HeadwordsListModel

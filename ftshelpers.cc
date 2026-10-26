@@ -14,10 +14,7 @@
 
 #include <QVector>
 
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-#include <QRegularExpression>
 #include "wildcard.hh"
-#endif
 
 using std::vector;
 using std::string;
@@ -39,44 +36,172 @@ bool ftsIndexIsOldOrBad( string const & indexFile,
          header.formatVersion != CurrentFtsFormatVersion + dict->getFtsIndexVersion();
 }
 
-static QString makeHiliteRegExpString( QStringList const & words,
-                                       int searchMode,
-                                       int distanceBetweenWords )
+namespace
 {
-  QString searchString( "(" );
 
-  QString stripWords( "(?:\\W+\\w+){0," );
+/// QRegExp classified text with Qt's own Unicode tables: a word character is a
+/// letter, a number, any mark or the underscore — and nothing else.
+///
+/// PCRE's `\w` under UseUnicodePropertiesOption is not that table in two ways:
+/// it omits the Mc/Me mark categories, and it includes every connector
+/// punctuation character (U+203F, U+2040, U+2054, U+FE33, U+FE34, U+FE4D,
+/// U+FE4E, U+FE4F, U+FF3F) rather than only the underscore. The class is
+/// therefore spelled out for every path that replaced a QRegExp.
+QString const wordCharacterClass = QStringLiteral( "[\\p{L}\\p{N}\\p{M}_]" );
+QString const notWordCharacterClass = QStringLiteral( "[^\\p{L}\\p{N}\\p{M}_]" );
+
+/// The article/index tokenizer is a different, older contract: it already used
+/// QRegularExpression in the Qt5 build, where `[\w\p{M}]` matched both engines
+/// identically. It keeps that spelling so this conversion does not silently
+/// change an existing behaviour that no index-format bump would announce.
+QString const articleWordCharacterClass = QStringLiteral( "[\\w\\p{M}]" );
+
+/// Compiles one of the built-in classifiers. An invalid built-in is reported by
+/// Regex::validated() and can never match, instead of silently becoming an
+/// empty expression.
+QRegularExpression builtIn( QString const & pattern,
+                           QRegularExpression::PatternOptions options = QRegularExpression::NoPatternOption )
+{
+  return Regex::validated( pattern, options | QRegularExpression::UseUnicodePropertiesOption );
+}
+
+/// A run of non-word text, the separator QRegExp's "\\W+" used.
+QRegularExpression const & nonWordRunRegExp()
+{
+  static QRegularExpression const expression =
+    builtIn( notWordCharacterClass + QStringLiteral( "+" ) );
+  return expression;
+}
+
+/// The index-word filter: FTS::MinimumWordSize characters or more of a word,
+/// still measured in UTF-16 code units as before.
+QRegularExpression const & indexWordRegExp()
+{
+  static QRegularExpression const expression =
+    builtIn( wordCharacterClass + QStringLiteral( "{" )
+             + QString::number( FTS::MinimumWordSize ) + QStringLiteral( ",}" ) );
+  return expression;
+}
+
+/// Removes a user's symbol set such as [abc] from the text searched in the index.
+QRegularExpression const & symbolSetRegExp()
+{
+  static QRegularExpression const expression =
+    builtIn( QStringLiteral( "\\[[^\\]]+\\]" ), QRegularExpression::CaseInsensitiveOption );
+  return expression;
+}
+
+/// Recognizes the RegExp-mode escape tokens the index build strips out. Exactly
+/// four hex digits and exactly three octal digits are required, so a shorter
+/// spelling stays part of the searched text (pinned by tst_regex).
+QRegularExpression const & escapeTokenRegExp()
+{
+  static QRegularExpression const expression =
+    builtIn( QStringLiteral( "\\\\[afnrtvdDwWsSbB]|\\\\x([0-9A-Fa-f]{4})|\\\\0([0-7]{3})" ) );
+  return expression;
+}
+
+/// Word splits of an article. These are the older article/index separators: the
+/// Qt5 build already split articles with `[^\\w\\p{M}]+` under Unicode
+/// properties, so they keep that spelling — including PCRE's connector
+/// punctuation — because switching them to the explicit query class would
+/// re-index existing articles without a CurrentFtsFormatVersion change.
+QRegularExpression const & splitWithoutBracketsRegExp()
+{
+  static QRegularExpression const expression =
+    builtIn( QStringLiteral( "[^\\w\\p{M}]+" ) );
+  return expression;
+}
+
+QRegularExpression const & splitWithBracketsRegExp()
+{
+  static QRegularExpression const expression =
+    builtIn( QStringLiteral( "[^\\w\\(\\)\\p{M}]+" ) );
+  return expression;
+}
+
+/// The DSL round-bracket grammar; callers pad the capture list to six entries,
+/// the arity QRegExp reported.
+QRegularExpression const & bracketRegExp()
+{
+  static QRegularExpression const expression = builtIn(
+    QStringLiteral( "(\\(" ) + articleWordCharacterClass + QStringLiteral( "+\\)){0,1}(" )
+      + articleWordCharacterClass + QStringLiteral( "+)(\\(" ) + articleWordCharacterClass
+      + QStringLiteral( "+\\)){0,1}(" ) + articleWordCharacterClass + QStringLiteral( "+){0,1}(\\(" )
+      + articleWordCharacterClass + QStringLiteral( "+\\)){0,1}" ) );
+  return expression;
+}
+
+/// The highlight pattern for a word list. QRegExp's "\\b" was a boundary in
+/// Qt's word table, which counts every mark as a word character; PCRE's "\\b"
+/// follows `\w` and would accept a boundary before an Mc/Me mark, so the
+/// boundaries are spelled with the same explicit class as the rest of the file.
+/// The gap between words keeps the whole pattern minimal through
+/// InvertedGreedinessOption (QRegExp's setMinimal(true)).
+QString makeHiliteRegExpString( QStringList const & words, int searchMode, int distanceBetweenWords )
+{
+  QString const openWord = QStringLiteral( "(?:" ) + wordCharacterClass + QStringLiteral( "*)" );
+  QString const leftBound = searchMode == FTS::WholeWords
+                              ? QStringLiteral( "(?<!" ) + wordCharacterClass + QStringLiteral( ")" )
+                              : openWord;
+  QString const rightBound = searchMode == FTS::WholeWords
+                               ? QStringLiteral( "(?!" ) + wordCharacterClass + QStringLiteral( ")" )
+                               : openWord;
+
+  QString stripWords( QStringLiteral( "(?:" ) + notWordCharacterClass + QStringLiteral( "+" )
+                      + wordCharacterClass + QStringLiteral( "+){0," ) );
   if( distanceBetweenWords >= 0 )
     stripWords += QString::number( distanceBetweenWords );
-  stripWords += "}\\W+";
+  stripWords += QStringLiteral( "}" ) + notWordCharacterClass + QStringLiteral( "+" );
 
-  QString boundWord( searchMode == FTS::WholeWords ? "\\b" : "(?:\\w*)");
+  QString searchString( "(" );
 
   for( int x = 0; x < words.size(); x++ )
   {
     if( x )
       searchString += stripWords;
 
-    searchString += boundWord + words[ x ] + boundWord;
+    searchString += leftBound + words[ x ] + rightBound;
   }
 
   searchString += ")";
   return searchString;
 }
 
+} // namespace
+
+QRegularExpression compileHighlight( QString const & sourcePattern, bool wildcards,
+                                     bool matchCase )
+{
+  QString const pattern = wildcards
+    ? QRegularExpression::wildcardToRegularExpression(
+        sourcePattern,
+        QRegularExpression::UnanchoredWildcardConversion | QRegularExpression::NonPathWildcardConversion )
+    : sourcePattern;
+
+  QRegularExpression::PatternOptions options = QRegularExpression::DotMatchesEverythingOption
+                                              | QRegularExpression::UseUnicodePropertiesOption
+                                              | QRegularExpression::MultilineOption
+                                              | QRegularExpression::InvertedGreedinessOption;
+
+  if( !matchCase )
+    options |= QRegularExpression::CaseInsensitiveOption;
+
+  return QRegularExpression( pattern, options );
+}
+
 bool parseSearchString( QString const & str, QStringList & indexWords,
                         QStringList & searchWords,
-                        QRegExp & searchRegExp, int searchMode,
+                        FtsHighlightSpec & searchRegExp, int searchMode,
                         bool matchCase,
                         int distanceBetweenWords,
                         bool & hasCJK )
 {
   searchWords.clear();
   indexWords.clear();
-  QRegExp spacesRegExp( "\\W+" );
-  QRegExp wordRegExp( QString( "\\w{" ) + QString::number( FTS::MinimumWordSize ) + ",}" );
-  QRegExp setsRegExp( "\\[[^\\]]+\\]", Qt::CaseInsensitive, QRegExp::RegExp2 );
-  QRegExp regexRegExp( "\\\\[afnrtvdDwWsSbB]|\\\\x([0-9A-Fa-f]{4})|\\\\0([0-7]{3})", Qt::CaseSensitive, QRegExp::RegExp2 );
+
+  // A failed parse must never leave a previous search's pattern behind.
+  searchRegExp = FtsHighlightSpec();
 
   hasCJK = false;
   for( int x = 0; x < str.size(); x++ )
@@ -93,22 +218,23 @@ bool parseSearchString( QString const & str, QStringList & indexWords,
 
     // Make words list for search in article text
     searchWords = str.normalized( QString::NormalizationForm_C )
-                     .split( spacesRegExp, Qt4x5::skipEmptyParts() );
+                     .split( nonWordRunRegExp(), Qt::SkipEmptyParts );
 
     // Make words list for index search
     QStringList list = str.normalized( QString::NormalizationForm_C )
-                          .toLower().split( spacesRegExp, Qt4x5::skipEmptyParts() );
-    indexWords = list.filter( wordRegExp );
+                          .toLower().split( nonWordRunRegExp(), Qt::SkipEmptyParts );
+    indexWords = list.filter( indexWordRegExp() );
     indexWords.removeDuplicates();
 
     // Make regexp for results hilite
 
-    QStringList allWords = str.split( spacesRegExp, Qt4x5::skipEmptyParts() );
+    QStringList allWords = str.split( nonWordRunRegExp(), Qt::SkipEmptyParts );
     QString searchString = makeHiliteRegExpString( allWords, searchMode, distanceBetweenWords );
 
-    searchRegExp = QRegExp( searchString, matchCase ? Qt::CaseSensitive : Qt::CaseInsensitive,
-                            QRegExp::RegExp2 );
-    searchRegExp.setMinimal( true );
+    searchRegExp.sourcePattern = searchString;
+    searchRegExp.wildcards = false;
+    searchRegExp.matchCase = matchCase;
+    searchRegExp.expression = compileHighlight( searchString, false, matchCase );
 
     return !indexWords.isEmpty();
   }
@@ -120,13 +246,13 @@ bool parseSearchString( QString const & str, QStringList & indexWords,
 
     // Remove RegExp commands
     if( searchMode == FTS::RegExp )
-      tmp.replace( regexRegExp, " " );
+      tmp.replace( escapeTokenRegExp(), " " );
 
     // Remove all symbol sets
-    tmp.replace( setsRegExp, " " );
+    tmp.replace( symbolSetRegExp(), " " );
 
     QStringList list = tmp.normalized( QString::NormalizationForm_C )
-                          .toLower().split( spacesRegExp, Qt4x5::skipEmptyParts() );
+                          .toLower().split( nonWordRunRegExp(), Qt::SkipEmptyParts );
 
     if( hasCJK )
     {
@@ -157,7 +283,7 @@ bool parseSearchString( QString const & str, QStringList & indexWords,
           wordList.append( word );
       }
 
-      indexWords = wordList.filter( wordRegExp );
+      indexWords = wordList.filter( indexWordRegExp() );
       indexWords.removeDuplicates();
 
       hieroglyphList.removeDuplicates();
@@ -165,16 +291,21 @@ bool parseSearchString( QString const & str, QStringList & indexWords,
     }
     else
     {
-      indexWords = list.filter( wordRegExp );
+      indexWords = list.filter( indexWordRegExp() );
       indexWords.removeDuplicates();
     }
 
-    searchRegExp = QRegExp( str, matchCase ? Qt::CaseSensitive : Qt::CaseInsensitive,
-                            searchMode == FTS::Wildcards ? QRegExp::WildcardUnix : QRegExp::RegExp2 );
-    searchRegExp.setMinimal( true );
-  }
+    // The source text is carried verbatim; the wildcard flag selects the
+    // conversion when the expression is compiled.
+    searchRegExp.sourcePattern = str;
+    searchRegExp.wildcards = ( searchMode == FTS::Wildcards );
+    searchRegExp.matchCase = matchCase;
+    searchRegExp.expression = compileHighlight( str, searchRegExp.wildcards, matchCase );
 
-  return true;
+    // An invalid user pattern is a validation error, never a silent empty
+    // pattern that would match every article.
+    return searchRegExp.expression.isValid();
+  }
 }
 
 void parseArticleForFts( uint32_t articleAddress, QString & articleText,
@@ -184,22 +315,11 @@ void parseArticleForFts( uint32_t articleAddress, QString & articleText,
   if( articleText.isEmpty() )
     return;
 
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-  QRegularExpression regBrackets( "(\\([\\w\\p{M}]+\\)){0,1}([\\w\\p{M}]+)(\\([\\w\\p{M}]+\\)){0,1}([\\w\\p{M}]+){0,1}(\\([\\w\\p{M}]+\\)){0,1}",
-                                  QRegularExpression::UseUnicodePropertiesOption);
-  QRegularExpression regSplit( "[^\\w\\p{M}]+", QRegularExpression::UseUnicodePropertiesOption );
+  QRegularExpression const & regBrackets = bracketRegExp();
 
   QStringList articleWords = articleText.normalized( QString::NormalizationForm_C )
-                                        .split( QRegularExpression( handleRoundBrackets ? "[^\\w\\(\\)\\p{M}]+" : "[^\\w\\p{M}]+",
-                                                                    QRegularExpression::UseUnicodePropertiesOption ),
-                                                Qt4x5::skipEmptyParts() );
-#else
-  QRegExp regBrackets = QRegExp( "(\\(\\w+\\)){0,1}(\\w+)(\\(\\w+\\)){0,1}(\\w+){0,1}(\\(\\w+\\)){0,1}" );
-  QRegExp regSplit = QRegExp( "\\W+" );
-
-  QStringList articleWords = articleText.normalized( QString::NormalizationForm_C )
-                                        .split( QRegExp( handleRoundBrackets ? "[^\\w\\(\\)]+" : "\\W+" ), Qt4x5::skipEmptyParts() );
-#endif
+                                        .split( handleRoundBrackets ? splitWithBracketsRegExp() : splitWithoutBracketsRegExp(),
+                                                Qt::SkipEmptyParts );
 
   QSet< QString > setOfWords;
   setOfWords.reserve( articleWords.size() );
@@ -242,25 +362,18 @@ void parseArticleForFts( uint32_t articleAddress, QString & articleText,
         // Special handle for words with round brackets - DSL feature
         QStringList list;
 
-        QStringList oldVariant = word.split( regSplit, Qt4x5::skipEmptyParts() );
+        QStringList oldVariant = word.split( splitWithoutBracketsRegExp(), Qt::SkipEmptyParts );
         for( QStringList::iterator it = oldVariant.begin(); it != oldVariant.end(); ++it )
           if( it->size() >= FTS::MinimumWordSize && !list.contains( *it ) )
             list.append( *it );
 
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
         QRegularExpressionMatch match = regBrackets.match( word );
         if( match.hasMatch() )
         {
           QStringList parts = match.capturedTexts();
-          // Add empty strings for compatibility with QRegExp behaviour
+          // Add empty strings for the arity QRegExp reported
           for( int i = match.lastCapturedIndex() + 1; i < 6; i++ )
             parts.append( QString() );
-#else
-        int pos = regBrackets.indexIn( word );
-        if( pos >= 0 )
-        {
-          QStringList parts = regBrackets.capturedTexts();
-#endif
           QString parsedWord = parts[ 2 ] + parts[ 4 ]; // Brackets removed
 
           if( parsedWord.size() >= FTS::MinimumWordSize && !list.contains( parsedWord ) )
@@ -454,7 +567,7 @@ void FTSResultsRequestRunnable::run()
 
 void FTSResultsRequest::checkArticles( QVector< uint32_t > const & offsets,
                                        QStringList const & words,
-                                       QRegExp const & searchRegexp )
+                                       QRegularExpression const & searchRegexp )
 {
   int results = 0;
   QString headword, articleText;
@@ -468,35 +581,16 @@ void FTSResultsRequest::checkArticles( QVector< uint32_t > const & offsets,
     needHandleBrackets = name.endsWith( ".dsl" ) || name.endsWith( ".dsl.dz" );
   }
 
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-  QRegularExpression regBrackets( "(\\([\\w\\p{M}]+\\)){0,1}([\\w\\p{M}]+)(\\([\\w\\p{M}]+\\)){0,1}([\\w\\p{M}]+){0,1}(\\([\\w\\p{M}]+\\)){0,1}",
-                                  QRegularExpression::UseUnicodePropertiesOption);
-  QRegularExpression regSplit( "[^\\w\\p{M}]+", QRegularExpression::UseUnicodePropertiesOption );
-#else
-  QRegExp regBrackets = QRegExp( "(\\(\\w+\\)){0,1}(\\w+)(\\(\\w+\\)){0,1}(\\w+){0,1}(\\(\\w+\\)){0,1}" );
-  QRegExp regSplit = QRegExp( "\\W+" );
-#endif
+  QRegularExpression const & regBrackets = bracketRegExp();
 
   if( searchMode == FTS::Wildcards || searchMode == FTS::RegExp )
   {
     // RegExp mode
 
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-    QRegularExpression searchRegularExpression;
-    if( searchMode == FTS::Wildcards )
-      searchRegularExpression.setPattern( wildcardsToRegexp( searchRegexp.pattern() ) );
-    else
-      searchRegularExpression.setPattern( searchRegexp.pattern() );
-    QRegularExpression::PatternOptions patternOptions = QRegularExpression::DotMatchesEverythingOption
-                                                        | QRegularExpression::UseUnicodePropertiesOption
-                                                        | QRegularExpression::MultilineOption
-                                                        | QRegularExpression::InvertedGreedinessOption;
-    if( searchRegexp.caseSensitivity() == Qt::CaseInsensitive )
-      patternOptions |= QRegularExpression::CaseInsensitiveOption;
-    searchRegularExpression.setPatternOptions( patternOptions );
-    if( !searchRegularExpression.isValid() )
-      searchRegularExpression.setPattern( "" );
-#endif
+    // The expression already carries the source syntax, the wildcard
+    // conversion, the case flag and every grading option; it is never
+    // re-derived here, and parseSearchString() has already refused an invalid
+    // user pattern, so this is the only expression the search can run with.
     for( int i = 0; i < offsets.size(); i++ )
     {
       if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
@@ -508,11 +602,7 @@ void FTSResultsRequest::checkArticles( QVector< uint32_t > const & offsets,
       if( ignoreDiacritics )
         articleText = gd::toQString( Folding::applyDiacriticsOnly( gd::toWString( articleText ) ) );
 
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-      if( articleText.contains( searchRegularExpression ) )
-#else
       if( articleText.contains( searchRegexp ) )
-#endif
       {
         if( headword.isEmpty() )
           offsetsForHeadwords.append( offsets.at( i ) );
@@ -529,13 +619,8 @@ void FTSResultsRequest::checkArticles( QVector< uint32_t > const & offsets,
   {
     // Words mode
 
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-    QRegularExpression splitWithBrackets( "[^\\w\\(\\)\\p{M}]+", QRegularExpression::UseUnicodePropertiesOption );
-    QRegularExpression splitWithoutBrackets( "[^\\w\\p{M}]+", QRegularExpression::UseUnicodePropertiesOption );
-#else
-    QRegExp splitWithBrackets( "[^\\w\\(\\)]+" );
-    QRegExp splitWithoutBrackets( "\\W+" );
-#endif
+    QRegularExpression const & splitWithBrackets = splitWithBracketsRegExp();
+    QRegularExpression const & splitWithoutBrackets = splitWithoutBracketsRegExp();
 
     Qt::CaseSensitivity cs = matchCase ? Qt::CaseSensitive : Qt::CaseInsensitive;
     QVector< QPair< QString, bool > > wordsList;
@@ -572,7 +657,7 @@ void FTSResultsRequest::checkArticles( QVector< uint32_t > const & offsets,
         articleText = gd::toQString( Folding::applyDiacriticsOnly( gd::toWString( articleText ) ) );
 
       QStringList articleWords = articleText.split( needHandleBrackets ? splitWithBrackets : splitWithoutBrackets,
-                                                    Qt4x5::skipEmptyParts() );
+                                                    Qt::SkipEmptyParts );
 
       int wordsNum = articleWords.length();
       while ( pos < wordsNum )
@@ -584,20 +669,13 @@ void FTSResultsRequest::checkArticles( QVector< uint32_t > const & offsets,
           if( needHandleBrackets && ( s.indexOf( '(' ) >= 0 || s.indexOf( ')' ) >= 0 ) )
           {
             // Handle brackets
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
             QRegularExpressionMatch match_brackets = regBrackets.match( s );
             if( match_brackets.hasMatch() )
             {
               QStringList parts = match_brackets.capturedTexts();
-              // Add empty strings for compatibility with QRegExp behaviour
+              // Add empty strings for the arity QRegExp reported
               for( int i = match_brackets.lastCapturedIndex() + 1; i < 6; i++ )
                 parts.append( QString() );
-#else
-            int pos = regBrackets.indexIn( s );
-            if( pos >= 0 )
-            {
-              QStringList parts = regBrackets.capturedTexts();
-#endif
               QString word = parts[ 2 ] + parts[ 4 ]; // Brackets removed
               parsedWords.append( word );
 
@@ -609,7 +687,7 @@ void FTSResultsRequest::checkArticles( QVector< uint32_t > const & offsets,
               parsedWords.append( word );
             }
             else
-              parsedWords = s.split( regSplit, Qt4x5::skipEmptyParts() );
+              parsedWords = s.split( splitWithoutBrackets, Qt::SkipEmptyParts );
           }
           else
             parsedWords.append( s );
@@ -900,7 +978,7 @@ void FTSResultsRequest::combinedIndexSearch( BtreeIndexing::BtreeIndex & ftsInde
                                              sptr< ChunkedStorage::Reader > chunks,
                                              QStringList & indexWords,
                                              QStringList & searchWords,
-                                             QRegExp & regexp )
+                                             QRegularExpression const & regexp )
 {
   // Special case - combination of index search for hieroglyphs
   // and full index search for other words
@@ -1056,7 +1134,7 @@ void FTSResultsRequest::fullIndexSearch( BtreeIndexing::BtreeIndex & ftsIndex,
                                          sptr< ChunkedStorage::Reader > chunks,
                                          QStringList & indexWords,
                                          QStringList & searchWords,
-                                         QRegExp & regexp )
+                                         QRegularExpression const & regexp )
 {
   QSet< uint32_t > setOfOffsets;
   uint32_t size;
@@ -1141,7 +1219,7 @@ void FTSResultsRequest::fullIndexSearch( BtreeIndexing::BtreeIndex & ftsIndex,
   checkArticles( offsets, searchWords, regexp );
 }
 
-void FTSResultsRequest::fullSearch( QStringList & searchWords, QRegExp & regexp )
+void FTSResultsRequest::fullSearch( QStringList & searchWords, QRegularExpression const & regexp )
 {
   // Whole file survey
 
@@ -1197,7 +1275,7 @@ void FTSResultsRequest::run()
   try
   {
     QStringList indexWords, searchWords;
-    QRegExp searchRegExp;
+    FtsHighlightSpec searchRegExp;
 
     if( !FtsHelpers::parseSearchString( searchString, indexWords, searchWords, searchRegExp,
                                         searchMode, matchCase, distanceBetweenWords, hasCJK ) )
@@ -1229,18 +1307,18 @@ void FTSResultsRequest::run()
       }
 
       if( hasCJK )
-        combinedIndexSearch( ftsIndex, chunks, indexWords, searchWords, searchRegExp );
+        combinedIndexSearch( ftsIndex, chunks, indexWords, searchWords, searchRegExp.expression );
       else
       {
         if( searchMode == FTS::WholeWords )
           indexSearch( ftsIndex, chunks, indexWords, searchWords );
         else
-          fullIndexSearch( ftsIndex, chunks, indexWords, searchWords, searchRegExp );
+          fullIndexSearch( ftsIndex, chunks, indexWords, searchWords, searchRegExp.expression );
       }
     }
     else
     {
-      fullSearch( searchWords, searchRegExp );
+      fullSearch( searchWords, searchRegExp.expression );
     }
 
     if( foundHeadwords && foundHeadwords->size() > 0 )

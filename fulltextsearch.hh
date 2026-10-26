@@ -167,6 +167,17 @@ signals:
   void contentChanged();
 };
 
+/// Builds the highlight specification for one clicked result.
+///
+/// A result found in words mode carries the exact word sequences that matched as
+/// regular expressions, so the specification is rebuilt from them with wildcards
+/// disabled; every other result keeps the search's own specification (original
+/// source, wildcard flag, case flag and compiled expression). The recompile goes
+/// through the same compileHighlight() the search used, so a highlight can never
+/// be built from a QRegularExpression's pattern without its grading options.
+FtsHighlightSpec makeResultHighlight( QStringList const & foundHiliteRegExps, bool matchCase,
+                                      FtsHighlightSpec const & searchHighlight );
+
 class FullTextSearchDialog : public QDialog
 {
   Q_OBJECT
@@ -192,11 +203,16 @@ class FullTextSearchDialog : public QDialog
 #endif
 
 public:
+  /// `initialTranslateText` is the text the dialog starts with. It is supplied by
+  /// the owner instead of read from the parent widget, so the dialog works with
+  /// any QWidget parent (a plain QWidget is legitimate) and has no dependency on
+  /// the main window.
   FullTextSearchDialog( QWidget * parent,
                         Config::Class & cfg_,
                         std::vector< sptr< Dictionary::Class > > const & dictionaries_,
                         std::vector< Instances::Group > const & groups_,
-                        FtsIndexing & ftsidx );
+                        FtsIndexing & ftsidx,
+                        QString const & initialTranslateText = QString() );
   virtual ~FullTextSearchDialog();
 
   void setCurrentGroup( unsigned group_ )
@@ -227,11 +243,14 @@ private slots:
   void reject();
   void itemClicked( QModelIndex const & idx );
   void updateDictionaries();
-  void helpRequested();
+  void emitHelpRequested();
 
 signals:
   void showTranslationFor( QString const &, QStringList const & dictIDs,
                            FtsHighlightSpec const & searchRegExp, bool ignoreDiacritics );
+  /// Asks the owner to show the application help page `helpId`. The dialog
+  /// never reaches into its parent to do that itself.
+  void helpRequested( QString const & helpId );
   void closeDialog();
 };
 

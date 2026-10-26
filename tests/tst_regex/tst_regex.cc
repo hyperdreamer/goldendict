@@ -17,6 +17,13 @@
  * exercised by a production-linked suite names that `productionRoute` instead. A
  * row with neither is an explicit generic demonstration anchored to a fixture pin.
  *
+ * The FTS half added by Task 10 links ftshelpers.cc, fulltextsearch.cc and
+ * articleurls.cc as production sources: parseSearchString() builds the
+ * FtsHighlightSpec, the URL contract has to reproduce the same compiled
+ * expression, and the production dialog is constructed with a plain QWidget
+ * parent. The suite therefore needs a QApplication, which the aggregate supplies
+ * through xvfb.
+ *
  * Wildcard rows are deliberately split: rows with `wildcard` drive
  * QRegularExpression::wildcardToRegularExpression (the API the owner uses), rows
  * with `expectedNormalizerPattern` pin the *preserved* headword grammar of
@@ -27,17 +34,33 @@
 
 #include <QtTest>
 
+#include <QAction>
 #include <QCoreApplication>
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QLineEdit>
+#include <QPushButton>
 #include <QRegularExpression>
 #include <QSet>
+#include <QSignalSpy>
 #include <QStringList>
+#include <QWidget>
 
+#include <vector>
+
+#include "articleurls.hh"
+#include "config.hh"
+#include "ftshelpers.hh"
+#include "fulltextsearch.hh"
+#include "instances.hh"
 #include "wildcard.hh"
 #include "support/fixtures.hh"
+
+#ifdef GD_SAVE_COLLECTOR_AVAILABLE
+#include "savearticle.hh"
+#endif
 
 namespace
 {
@@ -466,6 +489,23 @@ void checkRow( QJsonObject const & row, QStringList & problems )
     }
 }
 
+/// One scan of `expression` over `subject`, reported as "start+length" pairs so a
+/// comparison never depends on the conversion that produced the expression.
+QStringList matchSpans( QRegularExpression const & expression, QString const & subject )
+{
+    QStringList spans;
+
+    QRegularExpressionMatchIterator iterator = expression.globalMatch( subject );
+
+    while ( iterator.hasNext() )
+    {
+        QRegularExpressionMatch const match = iterator.next();
+        spans << QStringLiteral( "%1+%2" ).arg( match.capturedStart() ).arg( match.capturedLength() );
+    }
+
+    return spans;
+}
+
 } // namespace
 
 class TstRegex : public QObject
@@ -493,6 +533,25 @@ class TstRegex : public QObject
     void unmatchedOptionalCaptureIsEmpty();
     void builtInPatternValidationReportsItsError();
     void invalidPatternIsRejectedWithDiagnostic();
+
+    void ftsSourceModesCompileDifferentExpressions();
+    void ftsMatchCaseRecompilesTheExpression();
+    void ftsInvalidUserPatternIsAValidationError();
+    void ftsEmptyUserPatternKeepsLegacyMatchAll();
+    void ftsWildcardHighlightRoundTripsThroughUrlContract();
+    void ftsWordModesKeepQtWordClassification();
+    void ftsConnectorPunctuationIsNotAWordCharacter();
+    void ftsArticleSeparatorKeepsItsOwnWordClass();
+    void ftsRegexpModeKeepsNewlineAndMinimalSemantics();
+    void ftsEscapeTokensAreStrippedFromIndexWords();
+    void ftsSurrogatePairsKeepScalarSafeOffsets();
+    void ftsArticleIndexKeepsScalarWords();
+    void ftsResultHighlightIsRebuiltFromHilites();
+    void ftsDialogUsesSuppliedTextWithAPlainParent();
+
+#ifdef GD_SAVE_COLLECTOR_AVAILABLE
+    void saveCollector();
+#endif
 };
 
 void TstRegex::initTestCase()
@@ -502,6 +561,13 @@ void TstRegex::initTestCase()
     QVERIFY2( TestSupport::fixtureExists( QString::fromLatin1( FixtureFile ) ),
         qPrintable( QStringLiteral( "missing fixture %1" )
                 .arg( TestSupport::fixturePath( QString::fromLatin1( FixtureFile ) ) ) ) );
+
+    // The FTS dialog is a real QWidget dialog: its constructor test needs a
+    // QApplication and a display. Required, never skipped, so an environment
+    // without one fails with a reason instead of silently passing.
+    QString displayReason;
+    QVERIFY2( TestSupport::prerequisiteAvailable( QStringLiteral( "display" ), &displayReason ),
+        qPrintable( displayReason ) );
 
     TestSupport::installWatchdog( TestSupport::PureWatchdogSeconds );
 }
@@ -715,6 +781,19 @@ void TstRegex::requiredPinnedRowsArePresent()
         QStringLiteral( "qt-wildcard-converter-escaped-star-differs" ),
         QStringLiteral( "qt-wildcard-converter-unmatched-bracket-is-invalid" ),
         QStringLiteral( "invalid-builtin-pattern-is-rejected" ),
+        QStringLiteral( "unicode-combining-mc-mark-is-not-pcre-word" ),
+        QStringLiteral( "unicode-combining-me-mark-is-not-pcre-word" ),
+        QStringLiteral( "unicode-combining-mark-stays-inside-the-word" ),
+        QStringLiteral( "space-nbsp-needs-the-unicode-option" ),
+        QStringLiteral( "space-nbsp-with-the-unicode-option" ),
+        QStringLiteral( "space-em-space-with-the-unicode-option" ),
+        QStringLiteral( "space-separators-stay-separators-in-fts" ),
+        QStringLiteral( "dot-needs-the-everything-option-for-newlines" ),
+        QStringLiteral( "dot-matches-newline-with-the-everything-option" ),
+        QStringLiteral( "fts-escape-token-short-hex-is-not-a-token" ),
+        QStringLiteral( "fts-symbol-set-is-removed-from-index-words" ),
+        QStringLiteral( "fts-word-class-excludes-connector-punctuation" ),
+        QStringLiteral( "fts-word-class-keeps-underscore" ),
     };
 
     QStringList present;
@@ -1118,6 +1197,598 @@ void TstRegex::invalidPatternIsRejectedWithDiagnostic()
     QVERIFY( !fromWildcard.errorString().isEmpty() );
 }
 
-QTEST_GUILESS_MAIN( TstRegex )
+void TstRegex::ftsSourceModesCompileDifferentExpressions()
+{
+    // The wildcard flag is a value, not a property of the compiled object: the
+    // same source text has to produce different expressions in the two modes and
+    // neither may be guessed from the other one.
+    QStringList indexWords, searchWords;
+    bool hasCJK = false;
+
+    // "a*b" is the discriminator: as a regular expression it is "zero or more
+    // a, then b", as a wildcard it is "a, then anything, then b".
+    FtsHighlightSpec regexpSpec;
+    QVERIFY( FtsHelpers::parseSearchString( QStringLiteral( "a*b" ), indexWords, searchWords,
+                                            regexpSpec, FTS::RegExp, false, -1, hasCJK ) );
+    QCOMPARE( regexpSpec.sourcePattern, QStringLiteral( "a*b" ) );
+    QVERIFY( !regexpSpec.wildcards );
+    QVERIFY( regexpSpec.expression.isValid() );
+    QCOMPARE( regexpSpec.expression.pattern(), QStringLiteral( "a*b" ) );
+    // Unanchored as before, so the discriminating observation is the span:
+    // "a*b" as a regular expression can only find the trailing 'b'.
+    QString const modeSubject = QStringLiteral( "aaaxxxb" );
+    QCOMPARE( matchSpans( regexpSpec.expression, modeSubject ),
+              QStringList( { QStringLiteral( "6+1" ) } ) );
+
+    FtsHighlightSpec wildcardSpec;
+    QVERIFY( FtsHelpers::parseSearchString( QStringLiteral( "a*b" ), indexWords, searchWords,
+                                            wildcardSpec, FTS::Wildcards, false, -1, hasCJK ) );
+    // Both modes keep the user's text verbatim; only the compiled expression
+    // differs, which is exactly why the specification carries both.
+    QCOMPARE( wildcardSpec.sourcePattern, regexpSpec.sourcePattern );
+    QVERIFY( wildcardSpec.wildcards );
+    QVERIFY( wildcardSpec.expression.isValid() );
+    QVERIFY( wildcardSpec.expression.pattern() != regexpSpec.expression.pattern() );
+    // The same subject under wildcard syntax is one run from the first 'a' to
+    // the last 'b'.
+    QCOMPARE( matchSpans( wildcardSpec.expression, modeSubject ),
+              QStringList( { QStringLiteral( "0+7" ) } ) );
+
+    // NonPathWildcardConversion: a dictionary headword may contain '/', so the
+    // star has to cross it. The subject puts the slash inside the starred run,
+    // which a path-aware conversion refuses to cross.
+    QCOMPARE( matchSpans( wildcardSpec.expression, QStringLiteral( "x/a/xxb" ) ),
+              QStringList( { QStringLiteral( "2+5" ) } ) );
+
+    // UnanchoredWildcardConversion: the highlight has to match inside article
+    // text instead of only as a whole subject.
+    QVERIFY( FtsHelpers::parseSearchString( QStringLiteral( "a*/b" ), indexWords, searchWords,
+                                            wildcardSpec, FTS::Wildcards, false, -1, hasCJK ) );
+    QVERIFY( wildcardSpec.expression.match( QStringLiteral( "alpha/b" ) ).hasMatch() );
+    QCOMPARE( matchSpans( wildcardSpec.expression, QStringLiteral( "see alpha/b now" ) ),
+              QStringList( { QStringLiteral( "4+7" ) } ) );
+}
+
+void TstRegex::ftsMatchCaseRecompilesTheExpression()
+{
+    QStringList indexWords, searchWords;
+    bool hasCJK = false;
+
+    FtsHighlightSpec sensitive, insensitive;
+    QVERIFY( FtsHelpers::parseSearchString( QStringLiteral( "cat" ), indexWords, searchWords,
+                                            sensitive, FTS::RegExp, true, -1, hasCJK ) );
+    QVERIFY( FtsHelpers::parseSearchString( QStringLiteral( "cat" ), indexWords, searchWords,
+                                            insensitive, FTS::RegExp, false, -1, hasCJK ) );
+
+    // The source text is never case-folded or re-spelled; the case flag is a
+    // compilation option, so the identical text recompiles.
+    QCOMPARE( sensitive.sourcePattern, QStringLiteral( "cat" ) );
+    QCOMPARE( insensitive.sourcePattern, sensitive.sourcePattern );
+    QVERIFY( sensitive.matchCase );
+    QVERIFY( !insensitive.matchCase );
+    QCOMPARE( insensitive.expression.pattern(), sensitive.expression.pattern() );
+
+    QVERIFY( bool( insensitive.expression.patternOptions() & QRegularExpression::CaseInsensitiveOption ) );
+    QVERIFY( !bool( sensitive.expression.patternOptions() & QRegularExpression::CaseInsensitiveOption ) );
+
+    QVERIFY( insensitive.expression.match( QStringLiteral( "CAT" ) ).hasMatch() );
+    QVERIFY( !sensitive.expression.match( QStringLiteral( "CAT" ) ).hasMatch() );
+    QVERIFY( sensitive.expression.match( QStringLiteral( "cat" ) ).hasMatch() );
+}
+
+void TstRegex::ftsInvalidUserPatternIsAValidationError()
+{
+    // A malformed user pattern is reported, never turned into an empty
+    // expression that would match every article (the legacy QRegExp fallback).
+    for ( int const mode : { FTS::RegExp, FTS::Wildcards } )
+    {
+        QStringList indexWords, searchWords;
+        bool hasCJK = false;
+        FtsHighlightSpec spec;
+
+        // A previous valid search must not survive the failed parse.
+        QVERIFY( FtsHelpers::parseSearchString( QStringLiteral( "cat" ), indexWords, searchWords,
+                                                spec, mode, false, -1, hasCJK ) );
+        QVERIFY( spec.expression.isValid() );
+
+        QVERIFY( !FtsHelpers::parseSearchString( QStringLiteral( "[" ), indexWords, searchWords,
+                                                 spec, mode, false, -1, hasCJK ) );
+        // The source is kept so the dialog can show what was rejected, and the
+        // invalid expression matches nothing.
+        QCOMPARE( spec.sourcePattern, QStringLiteral( "[" ) );
+        QVERIFY( !spec.expression.isValid() );
+        QVERIFY( !spec.expression.errorString().isEmpty() );
+        QVERIFY( indexWords.isEmpty() );
+        QVERIFY( searchWords.isEmpty() );
+    }
+
+    // A failure before the pattern is compiled must not leave an earlier
+    // search's specification behind: CJK text is refused by the word modes
+    // before any expression is built.
+    QStringList indexWords, searchWords;
+    bool hasCJK = false;
+    FtsHighlightSpec spec;
+    QVERIFY( FtsHelpers::parseSearchString( QStringLiteral( "cat" ), indexWords, searchWords, spec,
+                                            FTS::RegExp, false, -1, hasCJK ) );
+    QCOMPARE( spec.sourcePattern, QStringLiteral( "cat" ) );
+    QVERIFY( !FtsHelpers::parseSearchString( QString::fromUtf8( "\xe4\xb8\xad" ), indexWords,
+                                             searchWords, spec, FTS::WholeWords, false, -1, hasCJK ) );
+    QVERIFY( hasCJK );
+    QVERIFY( spec.sourcePattern.isEmpty() );
+    QVERIFY( spec.expression.pattern().isEmpty() );
+}
+
+void TstRegex::ftsEmptyUserPatternKeepsLegacyMatchAll()
+{
+    // The legacy QRegExp( "" ) was valid and matched every position, so an empty
+    // search line stays a match-all expression; only a malformed pattern is a
+    // validation error.
+    QStringList indexWords, searchWords;
+    bool hasCJK = false;
+    FtsHighlightSpec spec;
+
+    QVERIFY( FtsHelpers::parseSearchString( QString(), indexWords, searchWords, spec,
+                                            FTS::RegExp, false, -1, hasCJK ) );
+    QVERIFY( spec.sourcePattern.isEmpty() );
+    QVERIFY( spec.expression.isValid() );
+    QVERIFY( spec.expression.pattern().isEmpty() );
+    QVERIFY( spec.expression.match( QStringLiteral( "anything at all" ) ).hasMatch() );
+    QVERIFY( indexWords.isEmpty() );
+    QVERIFY( searchWords.isEmpty() );
+    QCOMPARE( matchSpans( spec.expression, QStringLiteral( "abc" ) ).size(), 4 );
+
+    // The word modes still refuse an input without a usable index word.
+    QVERIFY( !FtsHelpers::parseSearchString( QString(), indexWords, searchWords, spec,
+                                             FTS::WholeWords, false, -1, hasCJK ) );
+    QVERIFY( !FtsHelpers::parseSearchString( QString(), indexWords, searchWords, spec,
+                                             FTS::PlainText, false, -1, hasCJK ) );
+}
+
+void TstRegex::ftsWildcardHighlightRoundTripsThroughUrlContract()
+{
+    // The dialog hands the page an FtsHighlightSpec, so the URL contract has to
+    // carry the source text, the wildcard flag and the case flag, and reproduce
+    // the same compiled expression on the way back in.
+    for ( bool const matchCase : { false, true } )
+    {
+        QStringList indexWords, searchWords;
+        bool hasCJK = false;
+        FtsHighlightSpec productionSpec;
+        QVERIFY( FtsHelpers::parseSearchString( QStringLiteral( "a*/b" ), indexWords, searchWords,
+                                                productionSpec, FTS::Wildcards, matchCase, -1,
+                                                hasCJK ) );
+        QVERIFY( productionSpec.expression.isValid() );
+
+        ArticleUrls::Lookup lookup;
+        lookup.phrase = Config::InputPhrase::fromPhrase( QStringLiteral( "headword" ) );
+        lookup.group = 3;
+        lookup.groupSpecified = true;
+        lookup.highlight = productionSpec;
+
+        QUrl const url = ArticleUrls::lookupDocument( lookup );
+        QCOMPARE( url.scheme(), QStringLiteral( "gdlookup" ) );
+
+        ArticleUrls::Parsed const parsed = ArticleUrls::parse( url, ArticleUrls::Use::DocumentLoad );
+        QCOMPARE( parsed.kind, ArticleUrls::Kind::LookupDocument );
+        QVERIFY2( parsed.error.isEmpty(), qPrintable( parsed.error ) );
+        QCOMPARE( parsed.lookup.highlight.sourcePattern, productionSpec.sourcePattern );
+        QCOMPARE( parsed.lookup.highlight.wildcards, productionSpec.wildcards );
+        QCOMPARE( parsed.lookup.highlight.matchCase, productionSpec.matchCase );
+        QVERIFY( parsed.lookup.highlight.expression.isValid() );
+
+        QString const subject = QStringLiteral( "see alpha/b now" );
+        QStringList const expectedSpans = matchSpans( productionSpec.expression, subject );
+        QVERIFY2( !expectedSpans.isEmpty(), "the wildcard highlight matches nothing at all" );
+        QCOMPARE( matchSpans( parsed.lookup.highlight.expression, subject ), expectedSpans );
+    }
+}
+
+void TstRegex::ftsWordModesKeepQtWordClassification()
+{
+    // QRegExp split with its own word table, which counted every mark category as
+    // a word character and every QChar::isSpace() member as a separator. PCRE's
+    // \W under Unicode properties counts Mn but not Mc/Me, so the migrated
+    // classes spell the marks out; these subjects are where the two disagree.
+    // The query is NFC-normalized before it is split (unchanged baseline), so
+    // the first word is the composed form of "cafe" + U+0301; the spacing mark
+    // has no composed form and has to stay inside its own word.
+    QString const input = QString::fromUtf8( "cafe\xcc\x81 abcd\xc2\xa0" "efgh\xe2\x80\x83"
+                                             "a\xe0\xa4\x83" "bcd" );
+    QStringList const expectedWords{
+        QString::fromUtf8( "caf\xc3\xa9" ), QStringLiteral( "abcd" ), QStringLiteral( "efgh" ),
+        QString::fromUtf8( "a\xe0\xa4\x83" "bcd" )
+    };
+
+    QStringList indexWords, searchWords;
+    bool hasCJK = false;
+    FtsHighlightSpec spec;
+
+    QVERIFY( FtsHelpers::parseSearchString( input, indexWords, searchWords, spec,
+                                            FTS::WholeWords, false, -1, hasCJK ) );
+    QVERIFY( !hasCJK );
+    QCOMPARE( searchWords, expectedWords );
+    QCOMPARE( indexWords, expectedWords );
+    // The composed highlight source is a regular expression, not a wildcard.
+    QVERIFY( !spec.wildcards );
+    QVERIFY( spec.expression.isValid() );
+
+    // The whole sequence is found in article text written with the same
+    // separators.
+    QVERIFY( spec.expression.match( input ).hasMatch() );
+
+    // Whole-word boundaries keep QRegExp's meaning: a spacing combining mark
+    // belongs to the word, so it neither starts nor ends one. PCRE's \b would
+    // accept both positions, because Mc is not a PCRE word character.
+    QVERIFY( FtsHelpers::parseSearchString( QStringLiteral( "cafe" ), indexWords, searchWords, spec,
+                                            FTS::WholeWords, false, -1, hasCJK ) );
+    QVERIFY( !spec.matchCase );
+    QVERIFY( bool( spec.expression.patternOptions() & QRegularExpression::CaseInsensitiveOption ) );
+    QVERIFY( spec.expression.match( QStringLiteral( "cafe!" ) ).hasMatch() );
+    QVERIFY( spec.expression.match( QStringLiteral( "CAFE!" ) ).hasMatch() );
+    QVERIFY( !spec.expression.match( QStringLiteral( "xcafe" ) ).hasMatch() );
+    QVERIFY( !spec.expression.match( QString::fromUtf8( "cafe\xe0\xa4\x83" ) ).hasMatch() );
+    QVERIFY( !spec.expression.match( QString::fromUtf8( "\xe0\xa4\x83" "cafe" ) ).hasMatch() );
+
+    // Plain text keeps the surrounding (?:\w*) runs and has no boundaries.
+    QVERIFY( FtsHelpers::parseSearchString( QStringLiteral( "cafe" ), indexWords, searchWords, spec,
+                                            FTS::PlainText, false, -1, hasCJK ) );
+    QCOMPARE( matchSpans( spec.expression, QStringLiteral( "xcafe y" ) ),
+              QStringList( { QStringLiteral( "0+5" ) } ) );
+}
+
+void TstRegex::ftsConnectorPunctuationIsNotAWordCharacter()
+{
+    // Qt's word table contains exactly one connector: the underscore. PCRE's \w
+    // under Unicode properties also contains U+203F, U+2040, U+2054, U+FE33,
+    // U+FE34, U+FE4D, U+FE4E, U+FE4F and U+FF3F, so a class spelled with \w
+    // silently merges words that QRegExp kept apart. These are the connector
+    // samples the legacy oracle and the migrated expression must agree on.
+    // All nine connector-punctuation characters PCRE's \w adds and Qt's word
+    // table lacks; sampling fewer would let two of them drift back.
+    QChar const connectors[] = { QChar( 0x203f ), QChar( 0x2040 ), QChar( 0x2054 ),
+                                 QChar( 0xfe33 ), QChar( 0xfe34 ), QChar( 0xfe4d ),
+                                 QChar( 0xfe4e ), QChar( 0xfe4f ), QChar( 0xff3f ) };
+
+    QStringList indexWords, searchWords;
+    bool hasCJK = false;
+    FtsHighlightSpec spec;
+
+    for( QChar const connector : connectors )
+    {
+        QString const query = QStringLiteral( "alpha" ) + connector + QStringLiteral( "beta" );
+
+        QVERIFY( FtsHelpers::parseSearchString( query, indexWords, searchWords, spec,
+                                                FTS::WholeWords, false, -1, hasCJK ) );
+        QVERIFY( !hasCJK );
+        // QRegExp split on the connector, so the query is two words, not one.
+        QCOMPARE( searchWords, ( QStringList{ QStringLiteral( "alpha" ), QStringLiteral( "beta" ) } ) );
+        QCOMPARE( indexWords, searchWords );
+    }
+
+    // A single word must still match across a connector on either side, because
+    // QRegExp's \b accepted those positions.
+    QVERIFY( FtsHelpers::parseSearchString( QStringLiteral( "cafe" ), indexWords, searchWords, spec,
+                                            FTS::WholeWords, false, -1, hasCJK ) );
+    for( QChar const connector : connectors )
+    {
+        QVERIFY2( spec.expression.match( connector + QStringLiteral( "cafe" ) ).hasMatch(),
+                  qPrintable( QStringLiteral( "left boundary lost at U+%1" )
+                                .arg( uint( connector.unicode() ), 4, 16, QLatin1Char( '0' ) ) ) );
+        QVERIFY2( spec.expression.match( QStringLiteral( "cafe" ) + connector ).hasMatch(),
+                  qPrintable( QStringLiteral( "right boundary lost at U+%1" )
+                                .arg( uint( connector.unicode() ), 4, 16, QLatin1Char( '0' ) ) ) );
+    }
+
+    // The underscore is still a word character in both engines.
+    QVERIFY( !spec.expression.match( QStringLiteral( "cafe_" ) ).hasMatch() );
+}
+
+void TstRegex::ftsArticleSeparatorKeepsItsOwnWordClass()
+{
+    // The article/index separator is a different, older contract: the Qt5 build
+    // already split articles with QRegularExpression [^\\w\\p{M}]+ under
+    // Unicode properties, where a connector joined the word. Correcting the
+    // query class must not re-index existing articles, and no
+    // CurrentFtsFormatVersion change would announce it if it did.
+    QChar const connector( 0x203f );
+    QString const article = QStringLiteral( "alpha" ) + connector + QStringLiteral( "beta" );
+    QString text = article;
+    QMap< QString, QVector< uint32_t > > words;
+
+    FtsHelpers::parseArticleForFts( 1, text, words, false );
+
+    QCOMPARE( words.keys(), QStringList{ article } );
+    QCOMPARE( words.value( article ), QVector< uint32_t >{ 1u } );
+
+    // The query path still treats the same text as two words, which is exactly
+    // why the two separators must stay distinct.
+    QStringList indexWords, searchWords;
+    bool hasCJK = false;
+    FtsHighlightSpec spec;
+    QVERIFY( FtsHelpers::parseSearchString( article, indexWords, searchWords, spec,
+                                            FTS::WholeWords, false, -1, hasCJK ) );
+    QCOMPARE( searchWords, ( QStringList{ QStringLiteral( "alpha" ), QStringLiteral( "beta" ) } ) );
+}
+
+void TstRegex::ftsRegexpModeKeepsNewlineAndMinimalSemantics()
+{
+    QStringList indexWords, searchWords;
+    bool hasCJK = false;
+    FtsHighlightSpec spec;
+
+    // QRegExp's '.' crossed a newline, so DotMatchesEverythingOption is part of
+    // the compiled expression.
+    QVERIFY( FtsHelpers::parseSearchString( QStringLiteral( "a.b" ), indexWords, searchWords, spec,
+                                            FTS::RegExp, false, -1, hasCJK ) );
+    QVERIFY( bool( spec.expression.patternOptions() & QRegularExpression::DotMatchesEverythingOption ) );
+    QVERIFY( spec.expression.match( QStringLiteral( "a\nb" ) ).hasMatch() );
+
+    // QRegExp::setMinimal( true ) is reproduced by InvertedGreedinessOption, so
+    // two tags stay two matches instead of one tag-spanning run.
+    QVERIFY( bool( spec.expression.patternOptions() & QRegularExpression::InvertedGreedinessOption ) );
+    QVERIFY( FtsHelpers::parseSearchString( QStringLiteral( "<b>.*</b>" ), indexWords, searchWords,
+                                            spec, FTS::RegExp, false, -1, hasCJK ) );
+    QCOMPARE( matchSpans( spec.expression, QStringLiteral( "<b>a</b><b>b</b>" ) ),
+              QStringList( { QStringLiteral( "0+8" ), QStringLiteral( "8+8" ) } ) );
+
+    // QRegExp's \w knew Unicode letters; UseUnicodePropertiesOption keeps that.
+    QVERIFY( FtsHelpers::parseSearchString( QStringLiteral( "\\w+" ), indexWords, searchWords,
+                                            spec, FTS::RegExp, false, -1, hasCJK ) );
+    QVERIFY( spec.expression.match( QString::fromUtf8( "Привет" ) ).hasMatch() );
+
+    // MultilineOption is part of the same compile contract (articleurls.cc adds
+    // it too), so '^' also matches after a line break.
+    QVERIFY( FtsHelpers::parseSearchString( QStringLiteral( "^b" ), indexWords, searchWords, spec,
+                                            FTS::RegExp, false, -1, hasCJK ) );
+    QVERIFY( spec.expression.match( QStringLiteral( "a\nb" ) ).hasMatch() );
+}
+
+void TstRegex::ftsEscapeTokensAreStrippedFromIndexWords()
+{
+    QStringList indexWords, searchWords;
+    bool hasCJK = false;
+    FtsHighlightSpec spec;
+
+    // A recognized escape token is removed before the index words are made.
+    QVERIFY( FtsHelpers::parseSearchString( QStringLiteral( "\\dwerty" ), indexWords, searchWords,
+                                            spec, FTS::RegExp, false, -1, hasCJK ) );
+    QCOMPARE( indexWords, QStringList( { QStringLiteral( "werty" ) } ) );
+
+    // An escape the recognizer does not know stays in the searched text. \Z is
+    // a valid PCRE anchor (so the pattern compiles) and is not one of the
+    // recognized FTS tokens; index words are lowercased as before.
+    QVERIFY( FtsHelpers::parseSearchString( QStringLiteral( "\\Zwerty" ), indexWords, searchWords,
+                                            spec, FTS::RegExp, false, -1, hasCJK ) );
+    QCOMPARE( indexWords, QStringList( { QStringLiteral( "zwerty" ) } ) );
+
+    // The legacy \xHHHH token needs exactly four hex digits: a shorter spelling
+    // is not a token, so its text is searched instead of being dropped.
+    QVERIFY( FtsHelpers::parseSearchString( QStringLiteral( "\\x0041" ), indexWords, searchWords,
+                                            spec, FTS::RegExp, false, -1, hasCJK ) );
+    QVERIFY( indexWords.isEmpty() );
+    QVERIFY( FtsHelpers::parseSearchString( QStringLiteral( "\\x041" ), indexWords, searchWords,
+                                            spec, FTS::RegExp, false, -1, hasCJK ) );
+    QCOMPARE( indexWords, QStringList( { QStringLiteral( "x041" ) } ) );
+
+    // Same for the three-digit octal token: it needs all three digits, so a
+    // two-digit spelling is not a token and its text is searched.
+    QVERIFY( FtsHelpers::parseSearchString( QStringLiteral( "\\0101" ), indexWords, searchWords,
+                                            spec, FTS::RegExp, false, -1, hasCJK ) );
+    QVERIFY( indexWords.isEmpty() );
+    QVERIFY( FtsHelpers::parseSearchString( QStringLiteral( "\\01abcdef" ), indexWords, searchWords,
+                                            spec, FTS::RegExp, false, -1, hasCJK ) );
+    QCOMPARE( indexWords, QStringList( { QStringLiteral( "01abcdef" ) } ) );
+
+    // A symbol set is replaced by a separator, so its contents are not searched.
+    QVERIFY( FtsHelpers::parseSearchString( QStringLiteral( "alpha [beta] gamma" ), indexWords,
+                                            searchWords, spec, FTS::RegExp, false, -1, hasCJK ) );
+    QCOMPARE( indexWords, QStringList( { QStringLiteral( "alpha" ), QStringLiteral( "gamma" ) } ) );
+}
+
+void TstRegex::ftsSurrogatePairsKeepScalarSafeOffsets()
+{
+    // A supplementary scalar is two UTF-16 units, so the CJK scalar behind it
+    // starts at offset 2 and is one unit long; the pin is the plan's fixed value.
+    const QString text = QString::fromUtf8( "\xf0\x9f\x98\x80" "\xe4\xb8\xad" );
+    QRegularExpressionMatch const match =
+        QRegularExpression( QString::fromUtf8( "\xe4\xb8\xad" ) ).match( text );
+    QCOMPARE( match.capturedStart(), qsizetype( 2 ) );
+    QCOMPARE( match.capturedLength(), qsizetype( 1 ) );
+
+    // The same offsets come out of the production specification.
+    QStringList indexWords, searchWords;
+    bool hasCJK = false;
+    FtsHighlightSpec spec;
+    QVERIFY( FtsHelpers::parseSearchString( QString::fromUtf8( "\xe4\xb8\xad" ), indexWords,
+                                            searchWords, spec, FTS::RegExp, false, -1, hasCJK ) );
+    QVERIFY( hasCJK );
+    QRegularExpressionMatch const productionMatch = spec.expression.match( text );
+    QVERIFY( productionMatch.hasMatch() );
+    QCOMPARE( productionMatch.capturedStart(), qsizetype( 2 ) );
+    QCOMPARE( productionMatch.capturedLength(), qsizetype( 1 ) );
+    QCOMPARE( productionMatch.captured( 0 ), QString::fromUtf8( "\xe4\xb8\xad" ) );
+
+    // The index-word builder keeps a supplementary CJK scalar together instead
+    // of emitting its two surrogates as separate words.
+    QVERIFY( FtsHelpers::parseSearchString( QString::fromUtf8( "\xf0\xa0\x80\x80" "abcd" ),
+                                            indexWords, searchWords, spec, FTS::RegExp, false, -1,
+                                            hasCJK ) );
+    QVERIFY( hasCJK );
+    QString const astral = QString::fromUtf8( "\xf0\xa0\x80\x80" );
+    QCOMPARE( astral.size(), qsizetype( 2 ) );
+    QVERIFY( indexWords.contains( astral ) );
+    QVERIFY2( !indexWords.contains( QString( QChar( 0xD840 ) ) ),
+              "the surrogate pair was split into a lone high surrogate word" );
+    QVERIFY2( !indexWords.contains( QString( QChar( 0xDC00 ) ) ),
+              "the surrogate pair was split into a lone low surrogate word" );
+}
+
+void TstRegex::ftsArticleIndexKeepsScalarWords()
+{
+    // The index builder stores a supplementary CJK scalar as one word, exactly
+    // as the baseline did. Splitting its surrogate halves would corrupt the
+    // on-disk index without changing the format version.
+    QMap< QString, QVector< uint32_t > > words;
+    QString const astral = QString::fromUtf8( "\xf0\xa0\x80\x80" );
+    QString const article = astral + QStringLiteral( "abcd" );
+    QString articleText( article );
+    FtsHelpers::parseArticleForFts( 7, articleText, words, false );
+
+    QVERIFY( words.contains( astral ) );
+    QVERIFY2( !words.contains( QString( QChar( 0xD840 ) ) ),
+              "the surrogate pair was indexed as a lone high surrogate" );
+    QVERIFY2( !words.contains( QString( QChar( 0xDC00 ) ) ),
+              "the surrogate pair was indexed as a lone low surrogate" );
+    QCOMPARE( words.value( astral ), QVector< uint32_t >( { 7 } ) );
+
+    // An ASCII word without CJK is still indexed as before.
+    QMap< QString, QVector< uint32_t > > asciiWords;
+    QString asciiText( QStringLiteral( "Hello world" ) );
+    FtsHelpers::parseArticleForFts( 9, asciiText, asciiWords, false );
+    QVERIFY( asciiWords.contains( QStringLiteral( "hello" ) ) );
+    QVERIFY( asciiWords.contains( QStringLiteral( "world" ) ) );
+}
+
+void TstRegex::ftsResultHighlightIsRebuiltFromHilites()
+{
+    // A words-mode result carries the matched word sequences, not a wildcard
+    // source, so its specification is rebuilt; every other result keeps the
+    // search's own specification unchanged.
+    QStringList indexWords, searchWords;
+    bool hasCJK = false;
+    FtsHighlightSpec searchSpec;
+    QVERIFY( FtsHelpers::parseSearchString( QStringLiteral( "alpha beta" ), indexWords, searchWords,
+                                            searchSpec, FTS::WholeWords, true, -1, hasCJK ) );
+    QVERIFY( searchSpec.matchCase );
+    QVERIFY( !searchSpec.wildcards );
+    QVERIFY( !bool( searchSpec.expression.patternOptions() & QRegularExpression::CaseInsensitiveOption ) );
+
+    FtsHighlightSpec const passthrough = FTS::makeResultHighlight( QStringList(), true, searchSpec );
+    QCOMPARE( passthrough.sourcePattern, searchSpec.sourcePattern );
+    QCOMPARE( passthrough.wildcards, searchSpec.wildcards );
+    QCOMPARE( passthrough.matchCase, searchSpec.matchCase );
+    QCOMPARE( passthrough.expression.pattern(), searchSpec.expression.pattern() );
+    QCOMPARE( passthrough.expression.patternOptions(), searchSpec.expression.patternOptions() );
+
+    QStringList const hilites{ QStringLiteral( "Alpha" ), QStringLiteral( "beta" ) };
+    FtsHighlightSpec const rebuilt = FTS::makeResultHighlight( hilites, true, searchSpec );
+    QCOMPARE( rebuilt.sourcePattern, QStringLiteral( "Alpha|beta" ) );
+    QVERIFY( !rebuilt.wildcards );
+    QVERIFY( rebuilt.matchCase );
+    QVERIFY( rebuilt.expression.isValid() );
+    // The compiled expression carries a search's grading options, not a bare
+    // compile: minimal matching and Unicode word properties.
+    QVERIFY( bool( rebuilt.expression.patternOptions() & QRegularExpression::InvertedGreedinessOption ) );
+    QVERIFY( bool( rebuilt.expression.patternOptions() & QRegularExpression::UseUnicodePropertiesOption ) );
+    QVERIFY( !bool( rebuilt.expression.patternOptions() & QRegularExpression::CaseInsensitiveOption ) );
+    QVERIFY( rebuilt.expression.match( QStringLiteral( "Alpha" ) ).hasMatch() );
+    QVERIFY( !rebuilt.expression.match( QStringLiteral( "ALPHA" ) ).hasMatch() );
+
+    // A case-insensitive result recompiles with the option instead of folding
+    // the source text.
+    FtsHighlightSpec const folded = FTS::makeResultHighlight( hilites, false, searchSpec );
+    QCOMPARE( folded.sourcePattern, rebuilt.sourcePattern );
+    QVERIFY( bool( folded.expression.patternOptions() & QRegularExpression::CaseInsensitiveOption ) );
+    QVERIFY( folded.expression.match( QStringLiteral( "ALPHA" ) ).hasMatch() );
+}
+
+void TstRegex::ftsDialogUsesSuppliedTextWithAPlainParent()
+{
+    // The dialog is constructed with a plain QWidget parent: it must take its
+    // starting text from the caller and emit help as a signal. A
+    // static_cast<MainWindow *>(parent) would crash here, and the old
+    // qobject_cast help path would silently do nothing.
+    QWidget parent;
+    Config::Class cfg;
+    std::vector< sptr< Dictionary::Class > > dictionaries;
+    std::vector< Instances::Group > groups;
+    FTS::FtsIndexing indexing( dictionaries );
+
+    FTS::FullTextSearchDialog dialog( &parent, cfg, dictionaries, groups, indexing,
+                                      QStringLiteral( "initial text" ) );
+    QLineEdit * searchLine = dialog.findChild< QLineEdit * >( QStringLiteral( "searchLine" ) );
+    QVERIFY( searchLine );
+    QCOMPARE( searchLine->text(), QStringLiteral( "initial text" ) );
+    // The whole line is selected, ready to be replaced by typing.
+    QCOMPARE( searchLine->selectedText(), QStringLiteral( "initial text" ) );
+
+    // The help request leaves the dialog as a signal carrying the page id the
+    // main window used to be told directly.
+    QSignalSpy helpSpy( &dialog, SIGNAL( helpRequested( QString ) ) );
+    QVERIFY( helpSpy.isValid() );
+    QPushButton * helpButton = dialog.findChild< QPushButton * >( QStringLiteral( "helpButton" ) );
+    QVERIFY( helpButton );
+    helpButton->click();
+    QCOMPARE( helpSpy.count(), 1 );
+    QCOMPARE( helpSpy.at( 0 ).at( 0 ).toString(), QStringLiteral( "Full-text search" ) );
+
+    QAction * helpAction = nullptr;
+    for ( QAction * action : dialog.findChildren< QAction * >() )
+        if ( action->shortcut() == QKeySequence( QStringLiteral( "F1" ) ) )
+            helpAction = action;
+    QVERIFY( helpAction );
+    helpAction->trigger();
+    QCOMPARE( helpSpy.count(), 2 );
+    QCOMPARE( helpSpy.at( 1 ).at( 0 ).toString(), QStringLiteral( "Full-text search" ) );
+
+    // Old call sites keep compiling through the empty default.
+    FTS::FullTextSearchDialog legacyDialog( &parent, cfg, dictionaries, groups, indexing );
+    QLineEdit * legacyLine = legacyDialog.findChild< QLineEdit * >( QStringLiteral( "searchLine" ) );
+    QVERIFY( legacyLine );
+    QVERIFY( legacyLine->text().isEmpty() );
+
+    // The result signal carries the specification value, not a pattern string.
+    void ( FTS::FullTextSearchDialog::*showTranslation )( QString const &, QStringList const &,
+                                                          FtsHighlightSpec const &, bool ) =
+        &FTS::FullTextSearchDialog::showTranslationFor;
+    QVERIFY( showTranslation != nullptr );
+}
+
+#ifdef GD_SAVE_COLLECTOR_AVAILABLE
+void TstRegex::saveCollector()
+{
+    // Task 27 delivers the production helper this target was preconfigured for:
+    // SaveArticleDetail::collectResourceSpans() in savearticle.hh. Both the
+    // saving transaction and this Core target have to call that one helper, so
+    // the spans are asserted on production output only.
+    QString const html = QStringLiteral(
+        "<html><head><link rel=\"stylesheet\" href=\"styles/entry.css\"></head>"
+        "<body><img src=\"images/pic.png\"><img src=\"images/pic.png\"></body></html>" );
+    QUrl const base( QStringLiteral( "https://dict.example/articles/entry.html" ) );
+    QVector< SaveArticleDetail::ResourceSpan > const spans =
+        SaveArticleDetail::collectResourceSpans( html, base );
+
+    QVERIFY2( !spans.isEmpty(), "the save collector found no resource spans" );
+
+    bool sawImage = false;
+    bool sawStylesheet = false;
+
+    for ( SaveArticleDetail::ResourceSpan const & span : spans )
+    {
+        QVERIFY( span.offset >= 0 );
+        QVERIFY( span.length >= 0 );
+        QVERIFY( span.offset + span.length <= html.size() );
+        QVERIFY2( span.url.isValid() && !span.url.isRelative(),
+                  qPrintable( QStringLiteral( "unresolved resource URL: %1" ).arg( span.url.toString() ) ) );
+        // The span is a UTF-16 range over the document text, so the attribute
+        // value is visible inside it; a byte offset or a stale view would not be.
+        QVERIFY2( html.mid( span.offset, span.length ).contains( span.url.fileName() ),
+                  qPrintable( QStringLiteral( "span %1+%2 does not cover '%3'" )
+                                  .arg( span.offset )
+                                  .arg( span.length )
+                                  .arg( span.url.fileName() ) ) );
+
+        if ( span.url == QUrl( QStringLiteral( "https://dict.example/articles/images/pic.png" ) ) )
+            sawImage = true;
+        if ( span.url == QUrl( QStringLiteral( "https://dict.example/articles/styles/entry.css" ) ) )
+            sawStylesheet = true;
+    }
+
+    QVERIFY2( sawImage, "the image resource was not resolved against the document URL" );
+    QVERIFY2( sawStylesheet, "the stylesheet resource was not resolved against the document URL" );
+}
+#endif
+
+QTEST_MAIN( TstRegex )
 
 #include "tst_regex.moc"
