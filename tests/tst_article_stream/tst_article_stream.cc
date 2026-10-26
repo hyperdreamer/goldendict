@@ -2,9 +2,12 @@
  * observers forward every observed call to its original implementation. */
 #include <QtTest>
 #include <QApplication>
+#include <QBuffer>
 #include <QDeadlineTimer>
 #include <QNetworkProxy>
 #include <QPointer>
+#include <QRegularExpression>
+#include <QWebEngineHttpRequest>
 #include <QWebEngineLoadingInfo>
 #include <QWebEnginePage>
 #include <QWebEngineProfile>
@@ -36,8 +39,43 @@ struct Observation
     QList<Qt::HANDLE> deviceErrorThreads;
     QList<Qt::HANDLE> producerErrorThreads;
     bool sequential = false, opened = false, jobOwned = false, guiAffinity = false;
-    qint64 size = -1, backlog = -1;
+    bool buffered = false, bufferReadable = false;
+    // The row's expectation for this handoff. When a mutation violates it the
+    // wrapper fails the job instead of forwarding an invalid device: forwarding is
+    // what makes QtWebEngine crash (SIGSEGV) rather than produce an assertion.
+    enum class Expect { Any, Reply, NoReply } expect = Expect::Any;
+    qint64 expectedPosition = -1;
+    qint64 expectedBackingSize = -1;
+    bool expectBuffered = false;
+    // Set when the wrapper refused a handoff; the test asserts this is empty.
+    QString refusedHandoff;
+    qint64 size = -1, backlog = -1, position = -1;
+    // Number of live ArticleStreamDevice children of the job at handoff, so a
+    // Range request that wrongly streamed is visible after the job is gone.
+    int streamDevices = 0;
 };
+
+// Loader-published response header, case-insensitive; an absent header (and an
+// empty one) both yield an empty QByteArray, which is what the oracle expects.
+QByteArray loaderHeader(QWebEngineLoadingInfo const &info, QByteArray const &name)
+{
+    auto const headers = info.responseHeaders();
+    for (auto it = headers.cbegin(); it != headers.cend(); ++it)
+        if (it.key().compare(name, Qt::CaseInsensitive) == 0)
+            return it.value();
+    return {};
+}
+
+// Resolved `bytes <start>-<end>/<total>` start published by the loader. Used as
+// the oracle for the handler's buffer position: the loader's parse is what the
+// response metadata describes, so the delivered bytes have to start there.
+qint64 resolvedRangeStart(QByteArray const &contentRange)
+{
+    static QRegularExpression const resolved(QStringLiteral("^bytes (\\d+)-(\\d+)/(\\d+)$"));
+    auto const match = resolved.match(QString::fromLatin1(contentRange));
+    return match.hasMatch() ? match.captured(1).toLongLong() : -1;
+}
+
 QHash<QWebEngineUrlRequestJob *, std::shared_ptr<Observation>> observations;
 std::atomic<int> ioProducerCalls{0};
 void observeProducer()
@@ -50,6 +88,8 @@ void observeProducer()
 // --wrap observes references from the production translation units. The real
 // methods are always called; no fake job or producer getter is substituted.
 extern "C" {
+void __real__ZN23QWebEngineUrlRequestJob4failENS_5ErrorE(QWebEngineUrlRequestJob *,
+                                                         QWebEngineUrlRequestJob::Error);
 void __real__ZN23QWebEngineUrlRequestJob5replyERK10QByteArrayP9QIODevice(
     QWebEngineUrlRequestJob *, QByteArray const &, QIODevice *);
 void __wrap__ZN23QWebEngineUrlRequestJob5replyERK10QByteArrayP9QIODevice(
@@ -64,6 +104,13 @@ void __wrap__ZN23QWebEngineUrlRequestJob5replyERK10QByteArrayP9QIODevice(
         o->guiAffinity = device->thread() == qApp->thread();
         o->size = device->size();
         o->backlog = device->bytesAvailable();
+        o->streamDevices = job->findChildren<ArticleStreamDevice *>().size();
+        if (auto buffer = qobject_cast<QBuffer *>(device)) {
+            // Buffered handoff: the full backing data at the resolved position.
+            o->buffered = true;
+            o->position = buffer->pos();
+            o->bufferReadable = buffer->isOpen() && buffer->isReadable();
+        }
         o->device = qobject_cast<ArticleStreamDevice *>(device);
         if (o->device) {
             QObject::connect(o->device, &ArticleStreamDevice::completed, job, [o] { ++o->completed; });
@@ -75,9 +122,37 @@ void __wrap__ZN23QWebEngineUrlRequestJob5replyERK10QByteArrayP9QIODevice(
                              });
         }
     }
+    if (o) {
+        // Validate the handoff against the row's expectation *before* exposing the
+        // device to the loader. Forwarding a wrong device kind/position/size makes
+        // QtWebEngine terminate the process, which destroys the whole suite instead
+        // of failing one row.
+        QString problem;
+        if (o->expect == Observation::Expect::NoReply)
+            problem = QStringLiteral("a reply was delivered but this row expects none");
+        else if (o->expectBuffered && !o->buffered)
+            problem = QStringLiteral("expected a buffered handoff");
+        else if (o->expectedPosition >= 0 && o->position != o->expectedPosition)
+            problem = QStringLiteral("position %1, expected %2")
+                          .arg(o->position).arg(o->expectedPosition);
+        else if (o->expectedBackingSize >= 0 && o->size != o->expectedBackingSize)
+            problem = QStringLiteral("backing size %1, expected %2")
+                          .arg(o->size).arg(o->expectedBackingSize);
+
+        if (!problem.isEmpty()) {
+            o->refusedHandoff = problem;
+            if (!device->parent())
+                device->setParent(job);
+            if (!device->isOpen())
+                device->open(QIODevice::ReadOnly);
+            // Terminate the job safely; the row asserts refusedHandoff is empty.
+            __real__ZN23QWebEngineUrlRequestJob4failENS_5ErrorE(
+                job, QWebEngineUrlRequestJob::RequestFailed);
+            return;
+        }
+    }
     __real__ZN23QWebEngineUrlRequestJob5replyERK10QByteArrayP9QIODevice(job, mime, device);
 }
-void __real__ZN23QWebEngineUrlRequestJob4failENS_5ErrorE(QWebEngineUrlRequestJob *, QWebEngineUrlRequestJob::Error);
 void __wrap__ZN23QWebEngineUrlRequestJob4failENS_5ErrorE(QWebEngineUrlRequestJob *job, QWebEngineUrlRequestJob::Error error)
 {
     if (auto o = observations.value(job)) {
@@ -208,6 +283,23 @@ QByteArray firstChunk()
 QString visibleBytes(Browser &b, QDeadlineTimer const &deadline)
 {
     return javascript(b.page, QStringLiteral("document.getElementById('bytes')?.textContent || ''"), deadline).toString();
+}
+
+// Bytes the real loader actually delivered to the document, as text. The oracle
+// bodies are ASCII served as text/plain, so the rendered text is the response
+// body length the loader produced.
+QString deliveredText(Browser &b, QDeadlineTimer const &deadline)
+{
+    return javascript(b.page, QStringLiteral("document.body ? document.body.textContent : ''"), deadline).toString();
+}
+
+// A real navigation carrying a Range field. The loader forwards it to the
+// installed scheme handler as a real QWebEngineUrlRequestJob header.
+QWebEngineHttpRequest rangeRequest(QByteArray const &url, QByteArray const &range)
+{
+    QWebEngineHttpRequest request(QUrl(QString::fromLatin1(url)));
+    request.setHeader("Range", range);
+    return request;
 }
 
 // A blocking observer for a direct lock probe, delegating every byte operation
@@ -603,6 +695,9 @@ private slots:
         auto o = b.observation();
         QVERIFY(o->device);
         QVERIFY(o->sequential && o->opened && o->jobOwned && o->guiAffinity);
+        // A no-Range media request is the live stream, never a completion buffer.
+        QVERIFY(!o->buffered);
+        QCOMPARE(o->streamDevices, 1);
         QCOMPARE(o->size, 0);
         QCOMPARE(o->backlog, firstChunk().size());
         WAIT_FOR(visibleBytes(b, deadline) == QLatin1String("ABC"));
@@ -637,6 +732,364 @@ private slots:
             QCOMPARE(copy.callingThreads.size(), 1);
             QVERIFY(*copy.callingThreads.cbegin() != QThread::currentThreadId());
         }
+    }
+
+    // §6.3 Range oracle: fixed 10-byte body, the loader's real status /
+    // Content-Range / body, and the production handoff (full backing size,
+    // resolved position, never the live streaming device). The boundary rows are
+    // spellings Chromium's HttpUtil::ParseRangeHeader accepts or rejects, and the
+    // handler has to agree with each of them: Qt publishes Content-Range from its
+    // own parse, so a local parse that disagrees delivers bytes contradicting the
+    // metadata (the historical `bytes=-+2` prefix-labelled-as-suffix defect).
+    void realRangeOracle_data()
+    {
+        QTest::addColumn<QByteArray>("range");
+        QTest::addColumn<QByteArray>("body");
+        QTest::addColumn<int>("status");
+        QTest::addColumn<QByteArray>("contentRange");
+        QTest::newRow("open-zero") << QByteArray("bytes=0-") << QByteArray("ABCDEFGHIJ") << 206 << QByteArray("bytes 0-9/10");
+        QTest::newRow("open-three") << QByteArray("bytes=3-") << QByteArray("DEFGHIJ") << 206 << QByteArray("bytes 3-9/10");
+        QTest::newRow("bounded") << QByteArray("bytes=3-5") << QByteArray("DEF") << 206 << QByteArray("bytes 3-5/10");
+        QTest::newRow("suffix") << QByteArray("bytes=-2") << QByteArray("IJ") << 206 << QByteArray("bytes 8-9/10");
+        QTest::newRow("long-suffix") << QByteArray("bytes=-20") << QByteArray("ABCDEFGHIJ") << 206 << QByteArray("bytes 0-9/10");
+        QTest::newRow("invalid-full") << QByteArray("bytes=invalid") << QByteArray("ABCDEFGHIJ") << 200 << QByteArray();
+        // Acceptance boundary: every spelling the loader resolves has to be
+        // positioned the same way by the handler.
+        QTest::newRow("linear-whitespace") << QByteArray(" bytes \t=\t3 - 5 ") << QByteArray("DEF") << 206 << QByteArray("bytes 3-5/10");
+        QTest::newRow("signed-fields") << QByteArray("bytes=+3-+5") << QByteArray("DEF") << 206 << QByteArray("bytes 3-5/10");
+        QTest::newRow("empty-comma-tokens") << QByteArray("bytes=,3-5,") << QByteArray("DEF") << 206 << QByteArray("bytes 3-5/10");
+        QTest::newRow("negative-last-is-open") << QByteArray("bytes=3--1") << QByteArray("DEFGHIJ") << 206 << QByteArray("bytes 3-9/10");
+        QTest::newRow("signed-suffix") << QByteArray("bytes=-+2") << QByteArray("IJ") << 206 << QByteArray("bytes 8-9/10");
+        QTest::newRow("empty-comma-suffix") << QByteArray("bytes=,-2,") << QByteArray("IJ") << 206 << QByteArray("bytes 8-9/10");
+        QTest::newRow("clamped-end") << QByteArray("bytes=3-99") << QByteArray("DEFGHIJ") << 206 << QByteArray("bytes 3-9/10");
+        // Anything that is not one resolvable range is a full representation:
+        // Chromium rejects these too, so both sides agree on 200 and position 0.
+        QTest::newRow("zero-suffix-full") << QByteArray("bytes=-0") << QByteArray("ABCDEFGHIJ") << 200 << QByteArray();
+        QTest::newRow("reverse-full") << QByteArray("bytes=5-3") << QByteArray("ABCDEFGHIJ") << 200 << QByteArray();
+        QTest::newRow("missing-dash-full") << QByteArray("bytes=3") << QByteArray("ABCDEFGHIJ") << 200 << QByteArray();
+        QTest::newRow("empty-set-full") << QByteArray("bytes=") << QByteArray("ABCDEFGHIJ") << 200 << QByteArray();
+        QTest::newRow("multiple-full") << QByteArray("bytes=0-1,5-6") << QByteArray("ABCDEFGHIJ") << 200 << QByteArray();
+        QTest::newRow("overflow-full") << QByteArray("bytes=9223372036854775808-") << QByteArray("ABCDEFGHIJ") << 200 << QByteArray();
+    }
+
+    void realRangeOracle()
+    {
+        QFETCH(QByteArray, range);
+        QFETCH(QByteArray, body);
+        QFETCH(int, status);
+        QFETCH(QByteArray, contentRange);
+        QDeadlineTimer deadline(10000);
+        Browser b;
+        b.page.load(rangeRequest("bres://dict-a/oracle.txt", range));
+        WAIT_FOR(b.request());
+        auto o = b.observation();
+        // Any Range field selects completion buffering: while the producer is
+        // incomplete there is no reply and no fullData(), so an in-progress
+        // producer length can never become the final backing size.
+        // Declare what this row expects from the handoff before any reply can be
+        // made, so a wrong device kind/position/size is refused inside the wrapper
+        // and reported as an assertion instead of crashing the loader.
+        o->expect = Observation::Expect::Reply;
+        o->expectBuffered = true;
+        o->expectedBackingSize = 10;
+        o->expectedPosition = contentRange.isEmpty() ? 0 : resolvedRangeStart(contentRange);
+
+        b.request()->append("ABCD");
+        QCoreApplication::sendPostedEvents();
+        QCOMPARE(o->replies + o->failures, 0);
+        QVERIFY(b.loadResults.isEmpty());
+        QVERIFY(b.request()->readProbe(ReadOperation::FullData).untouched());
+        b.request()->append("EFGHIJ");
+        b.request()->finishSuccess();
+        QCoreApplication::sendPostedEvents();
+        // Exactly one terminal job outcome, and the handoff invariants are
+        // checked as early as the test can observe the real reply: the complete
+        // backing data (never a range-only slice) positioned exactly where the
+        // loader resolves the range. Chromium's own reaction to a corrupt
+        // handoff cannot mask these.
+        QVERIFY2(o->refusedHandoff.isEmpty(), qPrintable(o->refusedHandoff));
+        QCOMPARE(o->replies + o->failures, 1);
+        QCOMPARE(o->replies, 1);
+        QCOMPARE(o->failures, 0);
+        QCOMPARE(o->buffered, true);
+        QCOMPARE(o->bufferReadable, true);
+        QCOMPARE(o->sequential, false);
+        QCOMPARE(o->streamDevices, 0);
+        QVERIFY(o->jobOwned);
+        QCOMPARE(o->size, qint64(10));
+        if (contentRange.isEmpty()) QCOMPARE(o->position, qint64(0));
+        else {
+            QVERIFY2(resolvedRangeStart(contentRange) >= 0, contentRange.constData());
+            QCOMPARE(o->position, resolvedRangeStart(contentRange));
+        }
+        WAIT_FOR(!b.loadResults.isEmpty());
+        QCOMPARE(b.loadResults, QList<bool>{true});
+        QCOMPARE(b.loading.last().status(), QWebEngineLoadingInfo::LoadSucceededStatus);
+        QCOMPARE(b.loading.last().errorCode(), status);
+        QCOMPARE(loaderHeader(b.loading.last(), "Content-Range"), contentRange);
+        // Delivered bytes, read back from the committed document.
+        QCOMPARE(deliveredText(b, deadline).size(), qsizetype(body.size()));
+        QCOMPARE(deliveredText(b, deadline), QString::fromLatin1(body));
+        auto const full = b.request()->readProbe(ReadOperation::FullData);
+        QCOMPARE(full.entered, 1);
+        QCOMPARE(full.returned, 1);
+        QCOMPARE(full.thrown, 0);
+        QCOMPARE(full.callingThreads, QSet<Qt::HANDLE>{QThread::currentThreadId()});
+        QVERIFY(b.request()->readProbe(ReadOperation::Slice).untouched());
+        QVERIFY(b.request()->readProbe(ReadOperation::StreamCopy).untouched());
+        QCOMPARE(o->completed, 0);
+        QCOMPARE(o->channelFinished, 0);
+        QCOMPARE(b.producerFailed->count(), 0);
+        // Late producer notifications cannot produce a second reply.
+        emit b.request()->updated();
+        emit b.request()->finished();
+        QCoreApplication::sendPostedEvents();
+        QCOMPARE(o->replies + o->failures, 1);
+    }
+
+    // Streaming interaction: a media URL carrying a Range field is buffered, so
+    // the live device is never constructed for it, and an empty Range field still
+    // counts as a Range field.
+    void rangeNeverStreams_data()
+    {
+        QTest::addColumn<QString>("scheme");
+        QTest::addColumn<QByteArray>("range");
+        QTest::addColumn<int>("status");
+        QTest::addColumn<QByteArray>("contentRange");
+        QTest::addColumn<QByteArray>("body");
+        QTest::newRow("audio-open") << QStringLiteral("gdau") << QByteArray("bytes=0-") << 206 << QByteArray("bytes 0-9/10") << QByteArray("ABCDEFGHIJ");
+        QTest::newRow("audio-bounded") << QStringLiteral("gdau") << QByteArray("bytes=3-5") << 206 << QByteArray("bytes 3-5/10") << QByteArray("DEF");
+        QTest::newRow("video-suffix") << QStringLiteral("gdvideo") << QByteArray("bytes=-2") << 206 << QByteArray("bytes 8-9/10") << QByteArray("IJ");
+        QTest::newRow("audio-invalid") << QStringLiteral("gdau") << QByteArray("bytes=invalid") << 200 << QByteArray() << QByteArray("ABCDEFGHIJ");
+        // Present but empty: an empty header value still reaches the job. The
+        // no-header case is separate (noRangeMediaStaysLive).
+        QTest::newRow("video-empty-field") << QStringLiteral("gdvideo") << QByteArray("") << 200 << QByteArray() << QByteArray("ABCDEFGHIJ");
+    }
+
+    void rangeNeverStreams()
+    {
+        QFETCH(QString, scheme);
+        QFETCH(QByteArray, range);
+        QFETCH(int, status);
+        QFETCH(QByteArray, contentRange);
+        QFETCH(QByteArray, body);
+        QDeadlineTimer deadline(10000);
+        Browser b;
+        b.page.load(rangeRequest(scheme.toLatin1() + "://dict-a/media.txt", range));
+        WAIT_FOR(b.request());
+        auto o = b.observation();
+        b.request()->append("ABCDEFGHIJ");
+        QCoreApplication::sendPostedEvents();
+        QCOMPARE(o->replies + o->failures, 0);
+        b.request()->finishSuccess();
+        QCoreApplication::sendPostedEvents();
+        // Handoff first: buffered, full backing size, resolved position, and no
+        // live device for a Range request on a media scheme.
+        QCOMPARE(o->replies + o->failures, 1);
+        QCOMPARE(o->replies, 1);
+        QCOMPARE(o->failures, 0);
+        QCOMPARE(o->buffered, true);
+        QCOMPARE(o->size, qint64(10));
+        QCOMPARE(o->position, contentRange.isEmpty() ? qint64(0) : resolvedRangeStart(contentRange));
+        QCOMPARE(o->streamDevices, 0);
+        QVERIFY(!o->device);
+        WAIT_FOR(!b.loadResults.isEmpty());
+        QCOMPARE(b.loadResults, QList<bool>{true});
+        QCOMPARE(b.loading.last().errorCode(), status);
+        QCOMPARE(loaderHeader(b.loading.last(), "Content-Range"), contentRange);
+        QCOMPARE(deliveredText(b, deadline), QString::fromLatin1(body));
+        QVERIFY(b.request()->readProbe(ReadOperation::Slice).untouched());
+        QVERIFY(b.request()->readProbe(ReadOperation::StreamCopy).untouched());
+        QCOMPARE(b.producerFailed->count(), 0);
+    }
+
+    // The no-Range row of the oracle: a media request keeps streaming (live
+    // device, size 0) and never buffers the completed representation.
+    void noRangeMediaStaysLive_data()
+    {
+        QTest::addColumn<QString>("scheme");
+        QTest::newRow("audio") << QStringLiteral("gdau");
+        QTest::newRow("video") << QStringLiteral("gdvideo");
+    }
+
+    void noRangeMediaStaysLive()
+    {
+        QFETCH(QString, scheme);
+        QDeadlineTimer deadline(10000);
+        Browser b;
+        b.page.load(QUrl(scheme + QStringLiteral("://dict-a/live-oracle.txt")));
+        WAIT_FOR(b.request());
+        b.request()->append("ABCD");
+        WAIT_FOR(b.observation() && b.observation()->replies == 1);
+        auto o = b.observation();
+        QVERIFY(!o->buffered);
+        QCOMPARE(o->streamDevices, 1);
+        QVERIFY(o->device);
+        QVERIFY(o->sequential && o->opened && o->jobOwned && o->guiAffinity);
+        QCOMPARE(o->size, qint64(0));
+        WAIT_FOR(deliveredText(b, deadline) == QStringLiteral("ABCD"));
+        b.request()->append("EFGHIJ");
+        WAIT_FOR(deliveredText(b, deadline) == QStringLiteral("ABCDEFGHIJ"));
+        QVERIFY(b.loadResults.isEmpty());
+        b.request()->finishSuccess();
+        WAIT_FOR(!b.loadResults.isEmpty());
+        QCOMPARE(b.loadResults, QList<bool>{true});
+        QCOMPARE(b.loading.last().status(), QWebEngineLoadingInfo::LoadSucceededStatus);
+        QCOMPARE(b.loading.last().errorCode(), 200);
+        QCOMPARE(loaderHeader(b.loading.last(), "Content-Range"), QByteArray());
+        QCOMPARE(deliveredText(b, deadline), QStringLiteral("ABCDEFGHIJ"));
+        QCOMPARE(o->replies, 1);
+        QCOMPARE(o->failures, 0);
+        QCOMPARE(o->size, qint64(0));
+        QCOMPARE(o->completed, 1);
+        QCOMPARE(o->channelFinished, 1);
+        QVERIFY(b.request()->readProbe(ReadOperation::FullData).untouched());
+        QCOMPARE(b.producerFailed->count(), 0);
+    }
+
+    // A parsed Range that selects nothing is one terminal RequestFailed with zero
+    // reply calls: never a truncated 200 and never a buffer for the selection.
+    void unsatisfiableRangeNeverReplies_data()
+    {
+        QTest::addColumn<QByteArray>("range");
+        QTest::addColumn<QByteArray>("content");
+        QTest::newRow("past-end") << QByteArray("bytes=10-") << QByteArray("ABCDEFGHIJ");
+        QTest::newRow("far-past-end") << QByteArray("bytes=99-") << QByteArray("ABCDEFGHIJ");
+        QTest::newRow("integer-max") << QByteArray("bytes=9223372036854775807-") << QByteArray("ABCDEFGHIJ");
+        QTest::newRow("empty-open-zero") << QByteArray("bytes=0-") << QByteArray();
+        QTest::newRow("empty-bounded") << QByteArray("bytes=0-0") << QByteArray();
+        QTest::newRow("empty-suffix") << QByteArray("bytes=-2") << QByteArray();
+    }
+
+    void unsatisfiableRangeNeverReplies()
+    {
+        QFETCH(QByteArray, range);
+        QFETCH(QByteArray, content);
+        QDeadlineTimer deadline(10000);
+        Browser b;
+        b.page.load(rangeRequest("bres://dict-a/unsatisfiable.txt", range));
+        WAIT_FOR(b.request());
+        auto o = b.observation();
+        // No handoff is legal for this row: a reply that does reach the wrapper is
+        // refused there, so a mutant fails an assertion instead of crashing Qt.
+        o->expect = Observation::Expect::NoReply;
+        if (!content.isEmpty()) b.request()->append(content);
+        b.request()->finishSuccess();
+        QCoreApplication::sendPostedEvents();
+        QVERIFY2(o->refusedHandoff.isEmpty(), qPrintable(o->refusedHandoff));
+        // The handler's own outcome is asserted before the loader reacts: the
+        // rejection must be a terminal RequestFailed with no reply at all.
+        QCOMPARE(o->replies, 0);
+        QCOMPARE(o->failures, 1);
+        WAIT_FOR(b.producerFailed->count() == 1);
+        WAIT_FOR(!b.loadResults.isEmpty());
+        QCOMPARE(o->replies, 0);
+        QCOMPARE(o->failures, 1);
+        QCOMPARE(o->errors, QList<QWebEngineUrlRequestJob::Error>{QWebEngineUrlRequestJob::RequestFailed});
+        QCOMPARE(o->buffered, false);
+        QCOMPARE(o->streamDevices, 0);
+        QCOMPARE(b.loadResults, QList<bool>{false});
+        QCOMPARE(b.loading.last().status(), QWebEngineLoadingInfo::LoadFailedStatus);
+        QCOMPARE(b.loading.last().errorCode(), -2);
+        QCOMPARE(b.producerFailed->count(), 1);
+        QCOMPARE(b.producerFailed->first().at(0).toUrl(), QUrl(QStringLiteral("bres://dict-a/unsatisfiable.txt")));
+        QVERIFY(!b.producerFailed->first().at(1).toString().isEmpty());
+        // Terminal: late producer work cannot reply or re-notify.
+        emit b.request()->updated();
+        emit b.request()->finished();
+        QCoreApplication::sendPostedEvents();
+        QCOMPARE(o->replies + o->failures, 1);
+        QCOMPARE(b.producerFailed->count(), 1);
+    }
+
+    // Cancellation of a buffered Range job releases producer ownership and never
+    // replies: the completion buffer is only built for a terminal producer.
+    void rangeCancellationReleasesProducer()
+    {
+        QDeadlineTimer deadline(10000);
+        Browser b;
+        b.page.load(rangeRequest("bres://dict-a/range-cancel.txt", "bytes=3-"));
+        WAIT_FOR(b.request());
+        auto o = b.observation();
+        auto request = b.request();
+        auto lifetime = request->lifetimeToken();
+        request->append("ABCD");
+        QCoreApplication::sendPostedEvents();
+        QCOMPARE(o->replies + o->failures, 0);
+        b.page.triggerAction(QWebEnginePage::Stop);
+        WAIT_FOR(request->cancelCount() == 1);
+        WAIT_FOR(o->job.isNull());
+        QCOMPARE(o->replies, 0);
+        QCOMPARE(o->failures, 0);
+        QCOMPARE(o->buffered, false);
+        QCOMPARE(b.producerFailed->count(), 0);
+        // A cancelled buffered Range job stays terminal.
+        emit request->updated();
+        emit request->finished();
+        QCoreApplication::sendPostedEvents();
+        QCOMPARE(o->replies + o->failures, 0);
+        // Producer ownership was released with the job.
+        b.dictionary->clearObservations();
+        request.reset();
+        QVERIFY(lifetime.expired());
+    }
+
+    void rangeReaderFailureNeverReplies_data()
+    {
+        QTest::addColumn<QString>("failure");
+        QTest::newRow("full-data") << QStringLiteral("full-data");
+        QTest::newRow("producer-error") << QStringLiteral("producer-error");
+        QTest::newRow("not-found") << QStringLiteral("not-found");
+    }
+
+    void rangeReaderFailureNeverReplies()
+    {
+        QFETCH(QString, failure);
+        QDeadlineTimer deadline(10000);
+        Browser b;
+        b.page.load(rangeRequest("bres://dict-a/range-failure.txt", "bytes=3-5"));
+        WAIT_FOR(b.request());
+        auto o = b.observation();
+        QString const message = QStringLiteral("range terminal failure / ") + failure;
+        if (failure == QLatin1String("full-data")) {
+            // The buffered Range path reads the completed request through the
+            // production reader; its exception must become one RequestFailed.
+            b.request()->setFullDataException(message);
+            b.request()->append("ABCDEFGHIJ");
+            b.request()->finishSuccess();
+        } else if (failure == QLatin1String("producer-error")) {
+            b.request()->append("ABCDEFGHIJ");
+            b.request()->finishError(message);
+        } else {
+            b.request()->finishNotFound();
+        }
+        QCoreApplication::sendPostedEvents();
+        // Terminal production outcome before the loader's reaction.
+        QCOMPARE(o->failures, 1);
+        QCOMPARE(o->replies, 0);
+        WAIT_FOR(o->failures == 1);
+        WAIT_FOR(!b.loadResults.isEmpty());
+        bool const missing = failure == QLatin1String("not-found");
+        QCOMPARE(o->replies, 0);
+        QCOMPARE(o->buffered, false);
+        QCOMPARE(o->streamDevices, 0);
+        QCOMPARE(o->errors, QList<QWebEngineUrlRequestJob::Error>{
+                               missing ? QWebEngineUrlRequestJob::UrlNotFound : QWebEngineUrlRequestJob::RequestFailed});
+        QCOMPARE(b.loadResults, QList<bool>{false});
+        QCOMPARE(b.producerFailed->count(), missing ? 0 : 1);
+        if (!missing) QCOMPARE(b.producerFailed->first().at(1).toString(), message);
+        if (failure == QLatin1String("full-data")) {
+            auto const probe = b.request()->readProbe(ReadOperation::FullData);
+            QCOMPARE(probe.entered, 1);
+            QCOMPARE(probe.thrown, 1);
+            QCOMPARE(probe.returned, 0);
+            QCOMPARE(probe.callingThreads, QSet<Qt::HANDLE>{QThread::currentThreadId()});
+        }
+        emit b.request()->updated();
+        emit b.request()->finished();
+        QCoreApplication::sendPostedEvents();
+        QCOMPARE(o->replies + o->failures, 1);
+        QCOMPARE(b.producerFailed->count(), missing ? 0 : 1);
     }
 
     void realReaderFailure_data()
