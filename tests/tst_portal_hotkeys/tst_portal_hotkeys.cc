@@ -209,6 +209,7 @@ private slots:
     void historicalListIsDisplayOnlyAndFiltered();
     void displayPolicyIsIndependentOfTheBindInput();
     void reentrantBindingEditDoesNotDuplicatePortalWork();
+    void bindingNotificationMayUnbind();
     void bindResultsClassifyStateAndGateActivation_data();
     void bindResultsClassifyStateAndGateActivation();
     void shortcutsChangedReplacesActiveSubset();
@@ -908,6 +909,28 @@ void TstPortalHotkeys::reentrantBindingEditDoesNotDuplicatePortalWork()
     QCOMPARE( portal->count( QStringLiteral( "CreateSession" ) ), 1 );
     QCOMPARE( portal->count( QStringLiteral( "ListShortcuts" ) ), 1 );
     QCOMPARE( portal->count( QStringLiteral( "BindShortcuts" ) ), 1 );
+}
+
+void TstPortalHotkeys::bindingNotificationMayUnbind()
+{
+    PortalBackend backend( bus->connection() );
+    bool unbound = false;
+    connect( &backend, &HotkeyBackend::stateChanged, this,
+             [ & ]( HotkeyBackend::State state, QString const & ) {
+                 if ( state == HotkeyBackend::State::Binding )
+                 {
+                     unbound = true;
+                     backend.unbind();
+                 }
+             } );
+    backend.bind( mainBindingOnly() );
+    QVERIFY( QTest::qWaitFor( [ & ]() { return unbound; }, 2000 ) );
+    QVERIFY( QTest::qWaitFor( [ & ]() {
+        return portal->count( QStringLiteral( "Session.Close" ) ) == 1;
+    }, 1000 ) );
+    QVERIFY( flushWire( bus->fixtureConnection() ) );
+    QCOMPARE( backend.state(), HotkeyBackend::State::Closed );
+    QCOMPARE( portal->count( QStringLiteral( "BindShortcuts" ) ), 0 );
 }
 
 void TstPortalHotkeys::displayPolicyIsIndependentOfTheBindInput()
