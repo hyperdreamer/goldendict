@@ -44,6 +44,8 @@ SOURCES += $$GD_REPO_ROOT/atomic_rename.cc \
            $$GD_REPO_ROOT/folding.cc \
            $$GD_REPO_ROOT/gddebug.cc \
            $$GD_REPO_ROOT/hotkeywrapper.cc \
+           $$GD_REPO_ROOT/hotkeybackend.cc \
+           $$GD_REPO_ROOT/portalhotkeys.cc \
            $$GD_REPO_ROOT/hotkeysyntax.cc \
            $$GD_REPO_ROOT/parsecmdline.cc \
            $$GD_REPO_ROOT/platformwindow.cc \
@@ -68,6 +70,7 @@ HEADERS += $$GD_REPO_ROOT/audioplayerfactory.hh \
            $$GD_REPO_ROOT/ffmpegaudio.hh \
            $$GD_REPO_ROOT/ffmpegaudioplayer.hh \
            $$GD_REPO_ROOT/hotkeybackend.hh \
+           $$GD_REPO_ROOT/portalhotkeys.hh \
            $$GD_REPO_ROOT/hotkeysyntax.hh \
            $$GD_REPO_ROOT/config.hh
 

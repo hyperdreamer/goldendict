@@ -209,12 +209,28 @@ private slots:
     void historicalListIsDisplayOnlyAndFiltered();
     void displayPolicyIsIndependentOfTheBindInput();
     void reentrantBindingEditDoesNotDuplicatePortalWork();
+    void bindingNotificationMayUnbind();
+    void bindingNotificationMayEditOrDestroy_data();
+    void bindingNotificationMayEditOrDestroy();
+    void responseNotificationMayDestroyBackend_data();
+    void responseNotificationMayDestroyBackend();
+    void unsupportedBindingsAreNotManufactured();
+    void changesBeforeBindCannotActivate();
+    void closedBeforeBindStillInvalidatesTheSession();
+    void backendRetirementDuringPendingWork_data();
+    void backendRetirementDuringPendingWork();
     void bindResultsClassifyStateAndGateActivation_data();
     void bindResultsClassifyStateAndGateActivation();
     void shortcutsChangedReplacesActiveSubset();
     void slowListCannotOverwriteNewerBinding();
     void sessionClosedAndOwnerLossInvalidateBackend();
     void configureIsV2OnlyAndHasNoRequestLifecycle();
+    void configurePendingReplyIsRetired();
+    void deniedSessionCanBeConfiguredWithoutRebinding();
+    void reportedTriggersAreDisplayOnly();
+    void duplicateBindAttemptIsRefused();
+    void portalSignalsMayDestroyBackend_data();
+    void portalSignalsMayDestroyBackend();
     void portalUnbindClosesSessionAndRebindsOnce();
     void portalWireTypeSignature();
     void wireBarrier( uint marker ) { seenMarker = marker; }
@@ -269,6 +285,9 @@ bool TstPortalHotkeys::noCleanupObservers() const
 
 void TstPortalHotkeys::cleanup()
 {
+    if ( portal )
+        QVERIFY2( portal->protocolViolations().isEmpty(),
+                  qPrintable( portal->protocolViolations().join( '\n' ) ) );
     // Stack requests are already destroyed. Retained cleanup observers see the
     // owner's loss and die before the private daemon and connections do.
     portal.reset();
@@ -898,9 +917,8 @@ void TstPortalHotkeys::reentrantBindingEditDoesNotDuplicatePortalWork()
     QVERIFY( reentered );
     QVERIFY( waitForState( backend, HotkeyBackend::State::Bound, 3000 ) );
 
-    // Let any surviving duplicate watcher deliver, so a stale lookup issued by the
-    // suspended attempt would be counted here.
-    QTest::qWait( 150 );
+    // A bus barrier drains work already queued by either version watcher.
+    QVERIFY( flushWire( bus->fixtureConnection() ) );
 
     // The superseded attempt must issue no portal work at all: one version lookup,
     // one session, one listing and one bind for the surviving generation.
@@ -908,6 +926,231 @@ void TstPortalHotkeys::reentrantBindingEditDoesNotDuplicatePortalWork()
     QCOMPARE( portal->count( QStringLiteral( "CreateSession" ) ), 1 );
     QCOMPARE( portal->count( QStringLiteral( "ListShortcuts" ) ), 1 );
     QCOMPARE( portal->count( QStringLiteral( "BindShortcuts" ) ), 1 );
+}
+
+void TstPortalHotkeys::bindingNotificationMayUnbind()
+{
+    QTest::failOnWarning( QRegularExpression( QStringLiteral( ".*(invalid path|Marshalling failed).*" ) ) );
+    PortalBackend backend( bus->connection() );
+    bool unbound = false;
+    connect( &backend, &HotkeyBackend::stateChanged, this,
+             [ & ]( HotkeyBackend::State state, QString const & ) {
+                 if ( state == HotkeyBackend::State::Binding )
+                 {
+                     unbound = true;
+                     backend.unbind();
+                 }
+             } );
+    backend.bind( mainBindingOnly() );
+    QVERIFY( QTest::qWaitFor( [ & ]() { return unbound; }, 2000 ) );
+    QVERIFY( QTest::qWaitFor( [ & ]() {
+        return portal->count( QStringLiteral( "Session.Close" ) ) == 1;
+    }, 1000 ) );
+    QVERIFY( flushWire( bus->fixtureConnection() ) );
+    QCOMPARE( backend.state(), HotkeyBackend::State::Closed );
+    QCOMPARE( portal->count( QStringLiteral( "BindShortcuts" ) ), 0 );
+}
+
+void TstPortalHotkeys::bindingNotificationMayEditOrDestroy_data()
+{
+    QTest::addColumn< bool >( "destroy" );
+    QTest::newRow( "edit" ) << false;
+    QTest::newRow( "destroy" ) << true;
+}
+
+void TstPortalHotkeys::bindingNotificationMayEditOrDestroy()
+{
+    QFETCH( bool, destroy );
+    auto backend = std::make_unique< PortalBackend >( bus->connection() );
+    bool reentered = false;
+    connect( backend.get(), &HotkeyBackend::stateChanged, this,
+             [ & ]( HotkeyBackend::State state, QString const & ) {
+                 if ( state != HotkeyBackend::State::Binding || reentered )
+                     return;
+                 reentered = true;
+                 if ( destroy )
+                     backend.reset();
+                 else
+                     backend->bind( twoBindings() );
+             } );
+    backend->bind( mainBindingOnly() );
+    QVERIFY( QTest::qWaitFor( [ & ]() { return reentered; }, 2000 ) );
+    if ( !destroy )
+        QVERIFY( waitForState( *backend, HotkeyBackend::State::Bound ) );
+    QVERIFY( QTest::qWaitFor( [ & ]() {
+        return portal->count( QStringLiteral( "Session.Close" ) ) == 1;
+    }, 1000 ) );
+    QVERIFY( flushWire( bus->fixtureConnection() ) );
+    QCOMPARE( portal->count( QStringLiteral( "CreateSession" ) ), destroy ? 1 : 2 );
+    QCOMPARE( portal->count( QStringLiteral( "BindShortcuts" ) ), destroy ? 0 : 1 );
+    QVERIFY( portal->protocolViolations().isEmpty() );
+}
+
+void TstPortalHotkeys::responseNotificationMayDestroyBackend_data()
+{
+    QTest::addColumn< int >( "notification" );
+    QTest::newRow( "creating" ) << int( HotkeyBackend::State::Creating );
+    QTest::newRow( "ready" ) << int( HotkeyBackend::State::Ready );
+    QTest::newRow( "bound" ) << int( HotkeyBackend::State::Bound );
+    QTest::newRow( "unavailable" ) << int( HotkeyBackend::State::Unavailable );
+}
+
+void TstPortalHotkeys::responseNotificationMayDestroyBackend()
+{
+    QFETCH( int, notification );
+    if ( notification == int( HotkeyBackend::State::Unavailable ) )
+        portal->setScenario( QStringLiteral( "bind-wrong-type" ) );
+    auto backend = std::make_unique< PortalBackend >( bus->connection() );
+    connect( backend.get(), &HotkeyBackend::stateChanged, this,
+             [ & ]( HotkeyBackend::State state, QString const & ) {
+                 if ( int( state ) == notification )
+                     backend.reset();
+             } );
+    backend->bind( mainBindingOnly() );
+    QVERIFY( QTest::qWaitFor( [ & ]() { return !backend; }, 2000 ) );
+    QVERIFY( flushWire( bus->fixtureConnection() ) );
+}
+
+void TstPortalHotkeys::unsupportedBindingsAreNotManufactured()
+{
+    PortalBackend backend( bus->connection() );
+    auto bindings = twoBindings();
+    bindings[ 1 ].sequence.clear(); // preferredTrigger rejected the stored shortcut.
+    backend.bind( bindings );
+    QVERIFY( waitForState( backend, HotkeyBackend::State::Bound ) );
+    const auto calls = portal->calls();
+    for ( auto const & call : calls )
+        if ( call.member == QLatin1String( "BindShortcuts" ) )
+            QCOMPARE( call.shortcutIds, QStringList{ QStringLiteral( "main-window" ) } );
+    const int creates = portal->count( QStringLiteral( "CreateSession" ) );
+    bindings[ 0 ].sequence.clear();
+    backend.bind( bindings );
+    QCOMPARE( backend.state(), HotkeyBackend::State::Unavailable );
+    QVERIFY( flushWire( bus->fixtureConnection() ) );
+    QCOMPARE( portal->count( QStringLiteral( "CreateSession" ) ), creates );
+    QCOMPARE( portal->count( QStringLiteral( "BindShortcuts" ) ), 1 );
+}
+
+void TstPortalHotkeys::changesBeforeBindCannotActivate()
+{
+    portal->setScenario( QStringLiteral( "delayed-response" ) );
+    PortalBackend backend( bus->connection() );
+    QSignalSpy activated( &backend, &HotkeyBackend::activated );
+    backend.bind( mainBindingOnly() );
+    QVERIFY( QTest::qWaitFor( [ & ]() {
+        return portal->count( QStringLiteral( "CreateSession" ) ) == 1;
+    }, 1000 ) );
+    connect( &backend, &HotkeyBackend::stateChanged, this,
+             [ & ]( HotkeyBackend::State state, QString const & ) {
+                 if ( state != HotkeyBackend::State::Ready )
+                     return;
+                 portal->emitShortcutsChanged( portal->sessionPath(),
+                     { fakeShortcut( QStringLiteral( "main-window" ), {}, {} ) } );
+                 portal->emitActivation( portal->sessionPath(), QStringLiteral( "main-window" ), {} );
+                 QVERIFY( flushWire( bus->fixtureConnection() ) );
+                 QCOMPARE( activated.count(), 0 );
+                 QCOMPARE( backend.state(), HotkeyBackend::State::Ready );
+             } );
+    portal->releasePending();
+    QVERIFY( QTest::qWaitFor( [ & ]() {
+        return portal->count( QStringLiteral( "BindShortcuts" ) ) == 1;
+    }, 1000 ) );
+    portal->releasePending();
+    QVERIFY( waitForState( backend, HotkeyBackend::State::Bound ) );
+}
+
+void TstPortalHotkeys::closedBeforeBindStillInvalidatesTheSession()
+{
+    // A Closed signal for the live session is authoritative even while BindShortcuts
+    // is still in flight: the session exists from CreateSession's reply onward, so
+    // the backend must retire it rather than let a late successful bind resurrect it.
+    portal->setScenario( QStringLiteral( "delayed-response" ) );
+    PortalBackend backend( bus->connection() );
+    QVector< HotkeyBackend::State > states;
+    connect( &backend, &HotkeyBackend::stateChanged, this,
+             [ &states ]( HotkeyBackend::State state, QString const & ) { states.append( state ); } );
+
+    backend.bind( mainBindingOnly() );
+    QVERIFY( QTest::qWaitFor( [ & ]() {
+        return portal->count( QStringLiteral( "CreateSession" ) ) == 1;
+    }, 1000 ) );
+    portal->releasePending();
+    QVERIFY( QTest::qWaitFor( [ & ]() {
+        return portal->count( QStringLiteral( "BindShortcuts" ) ) == 1;
+    }, 1000 ) );
+    QCOMPARE( backend.state(), HotkeyBackend::State::Binding );
+
+    portal->emitSessionClosed( portal->sessionPath(), {} );
+    QVERIFY( flushWire( bus->fixtureConnection() ) );
+    QVERIFY( waitForState( backend, HotkeyBackend::State::Unavailable ) );
+
+    // The bind response is still pending on the wire: releasing it must not
+    // resurrect the closed session.
+    portal->releasePending();
+    QTest::qWait( 50 );
+    QCOMPARE( backend.state(), HotkeyBackend::State::Unavailable );
+    QCOMPARE( portal->count( QStringLiteral( "BindShortcuts" ) ), 1 );
+}
+
+void TstPortalHotkeys::backendRetirementDuringPendingWork_data()
+{
+    QTest::addColumn< QString >( "stage" );
+    QTest::addColumn< QString >( "retirement" );
+    for ( QString stage : { QStringLiteral( "create" ), QStringLiteral( "bind" ) } )
+        for ( QString retirement : { QStringLiteral( "unbind" ), QStringLiteral( "edit" ),
+                  QStringLiteral( "destroy" ), QStringLiteral( "loss" ), QStringLiteral( "timeout" ) } )
+            QTest::newRow( qPrintable( stage + '-' + retirement ) ) << stage << retirement;
+}
+
+void TstPortalHotkeys::backendRetirementDuringPendingWork()
+{
+    QFETCH( QString, stage );
+    QFETCH( QString, retirement );
+    auto backend = std::make_unique< PortalBackend >( bus->connection() );
+    portal->setScenario( QStringLiteral( "delayed-response" ) );
+    backend->bind( mainBindingOnly() );
+    QVERIFY( QTest::qWaitFor( [ & ]() {
+        return portal->count( QStringLiteral( "CreateSession" ) ) == 1;
+    }, 1000 ) );
+    if ( stage == QLatin1String( "bind" ) )
+    {
+        portal->releasePending();
+        QVERIFY( QTest::qWaitFor( [ & ]() {
+            return portal->count( QStringLiteral( "BindShortcuts" ) ) == 1;
+        }, 1000 ) );
+    }
+    const QString oldSession = portal->sessionPath();
+    QSignalSpy states( backend.get(), &HotkeyBackend::stateChanged );
+    QSignalSpy activations( backend.get(), &HotkeyBackend::activated );
+    if ( retirement == QLatin1String( "destroy" ) )
+        backend.reset();
+    else if ( retirement == QLatin1String( "edit" ) )
+    {
+        portal->setScenario( QStringLiteral( "fast" ) );
+        backend->bind( twoBindings() );
+        QVERIFY( waitForState( *backend, HotkeyBackend::State::Bound ) );
+    }
+    else if ( retirement == QLatin1String( "loss" ) )
+    {
+        portal->loseService();
+        QVERIFY( waitForState( *backend, HotkeyBackend::State::Unavailable ) );
+        QVERIFY( !backend->isSupported() );
+    }
+    else if ( retirement == QLatin1String( "timeout" ) )
+        QVERIFY( waitForState( *backend, HotkeyBackend::State::Unavailable, 5500 ) );
+    else
+        backend->unbind();
+    const int notifications = states.count();
+    portal->releasePending();
+    portal->emitActivation( oldSession, QStringLiteral( "main-window" ), QStringLiteral( "stale" ) );
+    QVERIFY( flushWire( bus->fixtureConnection() ) );
+    if ( retirement != QLatin1String( "loss" ) )
+        QVERIFY( QTest::qWaitFor( [ & ]() {
+            return portal->count( QStringLiteral( "Session.Close" ) ) >= 1;
+        }, 1000 ) );
+    QCOMPARE( activations.count(), 0 );
+    QCOMPARE( states.count(), notifications );
+    QVERIFY( portal->protocolViolations().isEmpty() );
 }
 
 void TstPortalHotkeys::displayPolicyIsIndependentOfTheBindInput()
@@ -977,7 +1220,6 @@ void TstPortalHotkeys::displayPolicyIsIndependentOfTheBindInput()
     portal->emitActivation( portal->sessionPath(), QStringLiteral( "clipboard-lookup" ),
                             QStringLiteral( "stale-token" ) );
     QVERIFY( flushWire( bus->fixtureConnection() ) );
-    QTest::qWait( 20 );
     QCOMPARE( activated.size(), 0 );
 
     portal->emitActivation( portal->sessionPath(), QStringLiteral( "main-window" ),
@@ -1037,6 +1279,7 @@ void TstPortalHotkeys::historicalListIsDisplayOnlyAndFiltered()
               QStringLiteral( "Main window" ) );
     QCOMPARE( bindCall->shortcuts.constFirst().properties.value( QStringLiteral( "preferred_trigger" ) ).toString(),
               QStringLiteral( "CTRL+F11" ) );
+    QCOMPARE( bindCall->options.size(), 1 );
     QVERIFY( !bindCall->options.value( QStringLiteral( "handle_token" ) ).toString().isEmpty() );
 
     const QString session = portal->sessionPath();
@@ -1065,7 +1308,7 @@ void TstPortalHotkeys::bindResultsClassifyStateAndGateActivation_data()
     QTest::newRow( "duplicate-id" ) << QStringLiteral( "bind-duplicate-id" ) << unavailable << 0;
     QTest::newRow( "wrong-type" ) << QStringLiteral( "bind-wrong-type" ) << unavailable << 0;
     QTest::newRow( "denied" ) << QStringLiteral( "bind-denied" ) << denied << 0;
-    QTest::newRow( "failed" ) << QStringLiteral( "bind-failed" ) << unavailable << 0;
+    QTest::newRow( "failed" ) << QStringLiteral( "bind-failed" ) << denied << 0;
 }
 
 void TstPortalHotkeys::bindResultsClassifyStateAndGateActivation()
@@ -1129,6 +1372,7 @@ void TstPortalHotkeys::shortcutsChangedReplacesActiveSubset()
 
     portal->emitDeactivated( session, QStringLiteral( "clipboard-lookup" ), QStringLiteral( "ignored" ) );
     QVERIFY( flushWire( bus->fixtureConnection() ) );
+    QCOMPARE( activated.count(), 1 );
     QCOMPARE( portal->count( QStringLiteral( "ListShortcuts" ) ), listCalls );
 }
 
@@ -1205,6 +1449,8 @@ void TstPortalHotkeys::configureIsV2OnlyAndHasNoRequestLifecycle()
     backend.bind( mainBindingOnly() );
     QVERIFY( waitForState( backend, HotkeyBackend::State::Bound ) );
     QCOMPARE( portal->count( QStringLiteral( "BindShortcuts" ) ), 1 );
+    const int requestPaths = portal->requestPaths().size();
+    QSignalSpy states( &backend, &HotkeyBackend::stateChanged );
 
     backend.configure( QStringLiteral( "configure-token" ) );
     QVERIFY( QTest::qWaitFor( [ this ]() {
@@ -1218,6 +1464,8 @@ void TstPortalHotkeys::configureIsV2OnlyAndHasNoRequestLifecycle()
     QCOMPARE( configureCall->parentWindow, QString() );
     QCOMPARE( configureCall->activationToken, QStringLiteral( "configure-token" ) );
     QCOMPARE( configureCall->signature, QByteArray( "osa{sv}" ) );
+    QCOMPARE( configureCall->options.size(), 1 );
+    QVERIFY( configureCall->options.contains( QStringLiteral( "activation_token" ) ) );
     QCOMPARE( portal->count( QStringLiteral( "BindShortcuts" ) ), 1 );
 
     portal->setScenario( QStringLiteral( "configure-error" ) );
@@ -1225,11 +1473,18 @@ void TstPortalHotkeys::configureIsV2OnlyAndHasNoRequestLifecycle()
     QVERIFY( QTest::qWaitFor( [ this ]() {
                  return portal->count( QStringLiteral( "ConfigureShortcuts" ) ) == 2;
              }, 1000 ) );
-    QVERIFY( QTest::qWaitFor( [ &backend ]() {
-                 return backend.state() == HotkeyBackend::State::Bound;
-             }, 1000 ) );
+    QVERIFY( QTest::qWaitFor( [ & ]() { return states.count() == 1; }, 1000 ) );
+    QCOMPARE( states.first().first().value< HotkeyBackend::State >(), HotkeyBackend::State::Bound );
+    QVERIFY( states.first().at( 1 ).toString().contains( QStringLiteral( "ConfigureShortcuts failed" ) ) );
     QCOMPARE( portal->count( QStringLiteral( "BindShortcuts" ) ), 1 );
     QCOMPARE( portal->count( QStringLiteral( "Request.Close" ) ), 0 );
+    QCOMPARE( portal->requestPaths().size(), requestPaths );
+    portal->setScenario( QStringLiteral( "fast" ) );
+    backend.configure( {} );
+    QVERIFY( QTest::qWaitFor( [ & ]() {
+        return portal->count( QStringLiteral( "ConfigureShortcuts" ) ) == 3;
+    }, 1000 ) );
+    QCOMPARE( portal->calls().constLast().options.size(), 0 );
 
     QVERIFY2( restartPortal( &portal, bus->fixtureConnection(), 1 ), qPrintable( portal->errorString() ) );
     PortalBackend versionOne( bus->connection() );
@@ -1239,6 +1494,140 @@ void TstPortalHotkeys::configureIsV2OnlyAndHasNoRequestLifecycle()
     QVERIFY( flushWire( bus->fixtureConnection() ) );
     QCOMPARE( portal->count( QStringLiteral( "ConfigureShortcuts" ) ), 0 );
     QCOMPARE( int( versionOne.state() ), int( HotkeyBackend::State::Bound ) );
+}
+
+void TstPortalHotkeys::reportedTriggersAreDisplayOnly()
+{
+    portal->setBoundShortcuts( { fakeShortcut( QStringLiteral( "main-window" ), {},
+                                               QStringLiteral( "Portal's chosen trigger" ) ),
+                                fakeShortcut( QStringLiteral( "clipboard-lookup" ), {}, {} ) } );
+    PortalBackend backend( bus->connection() );
+    QVector< PortalBindingDisplay > displayed;
+    connect( &backend, &HotkeyBackend::bindingsChanged, this,
+             [ & ]( QVector< PortalBindingDisplay > const & entries ) { displayed = entries; } );
+    backend.bind( twoBindings() );
+    QVERIFY( waitForState( backend, HotkeyBackend::State::Bound ) );
+    QCOMPARE( displayed.size(), 2 );
+    QCOMPARE( displayed.at( 0 ).triggerDescription, QStringLiteral( "Portal's chosen trigger" ) );
+    QCOMPARE( displayed.at( 1 ).triggerDescription, QStringLiteral( "Assigned by portal" ) );
+    const auto calls = portal->calls();
+    const auto binding = std::find_if( calls.cbegin(), calls.cend(), []( auto const & call ) {
+        return call.member == QLatin1String( "BindShortcuts" );
+    } );
+    QVERIFY( binding != calls.cend() );
+    QCOMPARE( binding->shortcuts.at( 0 ).properties.value( QStringLiteral( "preferred_trigger" ) ).toString(),
+              QStringLiteral( "CTRL+F11" ) );
+    QCOMPARE( binding->shortcuts.at( 1 ).properties.value( QStringLiteral( "preferred_trigger" ) ).toString(),
+              QStringLiteral( "CTRL+C" ) );
+}
+
+void TstPortalHotkeys::deniedSessionCanBeConfiguredWithoutRebinding()
+{
+    portal->setScenario( QStringLiteral( "bind-empty" ) );
+    PortalBackend backend( bus->connection() );
+    backend.bind( mainBindingOnly() );
+    QVERIFY( waitForState( backend, HotkeyBackend::State::Denied ) );
+    const int paths = portal->requestPaths().size();
+    backend.configure( {} );
+    QVERIFY( QTest::qWaitFor( [ & ]() {
+        return portal->count( QStringLiteral( "ConfigureShortcuts" ) ) == 1;
+    }, 1000 ) );
+    portal->emitShortcutsChanged( portal->sessionPath(),
+        { fakeShortcut( QStringLiteral( "main-window" ), {}, QStringLiteral( "Assigned later" ) ) } );
+    QVERIFY( waitForState( backend, HotkeyBackend::State::Bound ) );
+    QCOMPARE( portal->requestPaths().size(), paths );
+    QCOMPARE( portal->count( QStringLiteral( "BindShortcuts" ) ), 1 );
+}
+
+void TstPortalHotkeys::duplicateBindAttemptIsRefused()
+{
+    PortalBackend backend( bus->connection() );
+    backend.bind( mainBindingOnly() );
+    QVERIFY( waitForState( backend, HotkeyBackend::State::Bound ) );
+    const QString session = portal->sessionPath();
+    const auto calls = portal->calls();
+    const auto create = std::find_if( calls.cbegin(), calls.cend(), []( auto const & call ) {
+        return call.member == QLatin1String( "CreateSession" );
+    } );
+    QVERIFY( create != calls.cend() );
+    // Replaying completion, configuring or a Changed signal must never retry Bind.
+    QVERIFY( sendResponse( bus->fixtureConnection(), create->requestPath, uint( 0 ),
+                          QVariantMap{ { QStringLiteral( "session_handle" ), session } } ) );
+    backend.configure( {} );
+    portal->emitShortcutsChanged( session, { fakeShortcut( QStringLiteral( "main-window" ), {}, {} ) } );
+    QVERIFY( QTest::qWaitFor( [ & ]() {
+        return portal->count( QStringLiteral( "ConfigureShortcuts" ) ) == 1;
+    }, 1000 ) );
+    QVERIFY( flushWire( bus->fixtureConnection() ) );
+    // Replaying completion, configuring or a Changed signal must never retry Bind.
+    // A second bind path for the same live session and generation must be refused
+    // by the one-bind guard itself, not merely unreachable: this seam reaches it.
+    backend.startBindForCurrentGenerationForTest();
+    QVERIFY( flushWire( bus->fixtureConnection() ) );
+
+    QCOMPARE( portal->bindCountForSession( session ), 1 );
+    QCOMPARE( backend.state(), HotkeyBackend::State::Bound );
+    QVERIFY( portal->protocolViolations().isEmpty() );
+}
+
+void TstPortalHotkeys::configurePendingReplyIsRetired()
+{
+    class ConfigureGate final : public QDBusVirtualObject
+    {
+    public:
+        QDBusMessage pending;
+        QString introspect( QString const & ) const override { return {}; }
+        bool handleMessage( QDBusMessage const & message, QDBusConnection const & ) override
+        {
+            if ( message.member() != QLatin1String( "ConfigureShortcuts" ) )
+                return false;
+            pending = message;
+            pending.setDelayedReply( true );
+            return true;
+        }
+    } gate;
+    PortalBackend backend( bus->connection() );
+    backend.bind( mainBindingOnly() );
+    QVERIFY( waitForState( backend, HotkeyBackend::State::Bound ) );
+    bus->fixtureConnection().unregisterObject( TestSupport::FakePortal::portalPath(),
+                                               QDBusConnection::UnregisterTree );
+    QVERIFY( bus->fixtureConnection().registerVirtualObject( TestSupport::FakePortal::portalPath(),
+              &gate, QDBusConnection::SubPath ) );
+    backend.configure( QStringLiteral( "pending-token" ) );
+    QVERIFY( QTest::qWaitFor( [ & ]() { return gate.pending.type() == QDBusMessage::MethodCallMessage; }, 1000 ) );
+    QSignalSpy states( &backend, &HotkeyBackend::stateChanged );
+    backend.unbind();
+    QCOMPARE( backend.state(), HotkeyBackend::State::Closed );
+    const int count = states.count();
+    QVERIFY( bus->fixtureConnection().send( gate.pending.createErrorReply(
+      QStringLiteral( "org.goldendict.Test" ), QStringLiteral( "late configuration error" ) ) ) );
+    QVERIFY( flushWire( bus->fixtureConnection() ) );
+    QCOMPARE( states.count(), count );
+    bus->fixtureConnection().unregisterObject( TestSupport::FakePortal::portalPath() );
+}
+
+void TstPortalHotkeys::portalSignalsMayDestroyBackend_data()
+{
+    QTest::addColumn< QString >( "signal" );
+    for ( QString const & name : { QStringLiteral( "changed" ), QStringLiteral( "closed" ),
+                                   QStringLiteral( "owner-loss" ) } )
+        QTest::newRow( qPrintable( name ) ) << name;
+}
+
+void TstPortalHotkeys::portalSignalsMayDestroyBackend()
+{
+    QFETCH( QString, signal );
+    auto backend = std::make_unique< PortalBackend >( bus->connection() );
+    backend->bind( twoBindings() );
+    QVERIFY( waitForState( *backend, HotkeyBackend::State::Bound ) );
+    connect( backend.get(), &HotkeyBackend::stateChanged, this, [ & ]() { backend.reset(); } );
+    if ( signal == QLatin1String( "changed" ) )
+        portal->emitShortcutsChanged( portal->sessionPath(), {} );
+    else if ( signal == QLatin1String( "closed" ) )
+        portal->emitSessionClosed( portal->sessionPath(), {} );
+    else
+        portal->loseService();
+    QVERIFY( QTest::qWaitFor( [ & ]() { return !backend; }, 1000 ) );
 }
 
 void TstPortalHotkeys::portalUnbindClosesSessionAndRebindsOnce()

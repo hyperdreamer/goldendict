@@ -21,6 +21,7 @@
 #include <QObject>
 #include <QString>
 #include <QVector>
+#include <memory>
 
 #include "config.hh"
 
@@ -94,6 +95,9 @@ signals:
   /// transition, without a retry loop.
   void stateChanged( HotkeyBackend::State state, QString const & explanation );
 };
+
+/// Select strictly from the active QPA; absence of a portal never selects X11.
+std::unique_ptr< HotkeyBackend > createHotkeyBackend( QObject * parent );
 
 Q_DECLARE_METATYPE( HotkeyBackend::State )
 
