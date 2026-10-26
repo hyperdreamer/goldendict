@@ -68,6 +68,14 @@ public:
   void unbind() override;
   void configure( QString const & activationToken ) override;
 
+  /// Decides which shortcut IDs may be shown. The config/UI layer owns this
+  /// policy; it is deliberately independent of the IDs the current bind attempt
+  /// carries, because a portal session may be unable to bind a shortcut whose
+  /// stored value should still be displayed. Until it is called, the IDs of the
+  /// first request are used, so a caller that has no separate policy keeps the
+  /// previous behaviour.
+  void setDisplayPolicy( QSet< QString > const & ids );
+
 private slots:
   void receivePortalSignal( QDBusMessage const & message );
 
@@ -86,6 +94,7 @@ private:
   void handleBindResponse( quint64 generation, uint code, QVariantMap const & results );
   void failGeneration( QString const & explanation, bool supported = true );
   void cancelRequests() noexcept;
+  void forgetRequest( PortalRequest * request ) noexcept;
   void closeSession() noexcept;
   void ownerChanged( QString const & oldOwner, QString const & newOwner );
 
