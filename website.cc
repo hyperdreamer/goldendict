@@ -10,7 +10,10 @@
 #include <QFileInfo>
 #include "gddebug.hh"
 
+#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
 #include <QRegularExpression>
+#else
+#endif
 
 namespace WebSite {
 
@@ -106,6 +109,7 @@ public:
 private:
 
   virtual void requestFinished( QNetworkReply * );
+  static Encoding codecForHtml( QByteArray const & ba );
 };
 
 void WebSiteArticleRequest::cancel()
@@ -130,6 +134,13 @@ WebSiteArticleRequest::WebSiteArticleRequest( QString const & url_,
   connect( netReply, SIGNAL( sslErrors( QList< QSslError > ) ),
            netReply, SLOT( ignoreSslErrors() ) );
 #endif
+}
+
+Encoding WebSiteArticleRequest::codecForHtml( QByteArray const & ba )
+{
+  // Detection precedence (BOM before HTML metadata, then meta/http-equiv) lives
+  // in Encoding::forHtml; the old Qt-codec lookup is gone.
+  return Encoding::forHtml( ba, QByteArray() );
 }
 
 void WebSiteArticleRequest::requestFinished( QNetworkReply * r )
@@ -165,27 +176,105 @@ void WebSiteArticleRequest::requestFinished( QNetworkReply * r )
     // Handle reply data
 
     QByteArray replyData = netReply->readAll();
-    const Encoding codec = Encoding::forHtml( replyData, netReply->rawHeader( "Content-Type" ) );
-    QString articleString = resolveInlineUrls( codec.decode( replyData ), netReply->url() );
-    articleString = detail::mapStylesheets( articleString, QString::fromStdString( dictPtr->getId() ) );
+    QString articleString;
 
+  
+
+    // Change links from relative to absolute
+
+    QString root = netReply->url().scheme() + "://" + netReply->url().host();
+    QString base = root + netReply->url().path();
+    while( !base.isEmpty() && !base.endsWith( "/" ) )
+      base.chop( 1 );
+
+    QRegularExpression tags( "<\\s*(a|link|img|script)\\s+[^>]*(src|href)\\s*=\\s*['\"][^>]+>",
+                             QRegularExpression::CaseInsensitiveOption );
+    QRegularExpression links( "\\b(src|href)\\s*=\\s*(['\"])([^'\"]+['\"])",
+                              QRegularExpression::CaseInsensitiveOption );
+    int pos = 0;
+    QString articleNewString;
+    QRegularExpressionMatchIterator it = tags.globalMatch( articleString );
+    while( it.hasNext() )
+    {
+      QRegularExpressionMatch match = it.next();
+      articleNewString += articleString.mid( pos, match.capturedStart() - pos );
+      pos = match.capturedEnd();
+
+      QString tag = match.captured();
+
+      QRegularExpressionMatch match_links = links.match( tag );
+      if( !match_links.hasMatch() )
+      {
+        articleNewString += tag;
+        continue;
+      }
+
+      QString url = match_links.captured( 3 );
+
+      if( url.indexOf( ":/" ) >= 0 || url.indexOf( "data:" ) >= 0
+          || url.indexOf( "mailto:" ) >= 0 || url.startsWith( "#" )
+          || url.startsWith( "javascript:" ) )
+      {
+        // External link, anchor or base64-encoded data
+        articleNewString += tag;
+        continue;
+      }
+
+      QString newUrl = match_links.captured( 1 ) + "=" + match_links.captured( 2 );
+      if( url.startsWith( "//" ) )
+        newUrl += netReply->url().scheme() + ":";
+      else
+      if( url.startsWith( "/" ) )
+        newUrl += root;
+      else
+        newUrl += base;
+      newUrl += match_links.captured( 3 );
+
+      tag.replace( match_links.capturedStart(), match_links.capturedLength(), newUrl );
+      articleNewString += tag;
+    }
+    if( pos )
+    {
+      articleNewString += articleString.mid( pos );
+      articleString = articleNewString;
+      articleNewString.clear();
+    }
+
+    // Redirect CSS links to own handler
+
+    QString prefix = QString( "bres://" ) + dictPtr->getId().c_str() + "/";
+    QRegularExpression linkTags( "(<\\s*link\\s[^>]*rel\\s*=\\s*['\"]stylesheet['\"]\\s+[^>]*href\\s*=\\s*['\"])([^'\"]+)://([^'\"]+['\"][^>]+>)",
+                                 QRegularExpression::CaseInsensitiveOption );
+    pos = 0;
+    it = linkTags.globalMatch( articleString );
+    while( it.hasNext() )
+    {
+      QRegularExpressionMatch match = it.next();
+      articleNewString += articleString.mid( pos, match.capturedStart() - pos );
+      pos = match.capturedEnd();
+
+      QString newTag = match.captured( 1 ) + prefix + match.captured( 2 )
+                       + "/" + match.captured( 3 );
+      articleNewString += newTag;
+    }
+    if( pos )
+    {
+      articleNewString += articleString.mid( pos );
+      articleString = articleNewString;
+      articleNewString.clear();
+    }
     // Check for unclosed <span> and <div>
 
-    static const QRegularExpression openSpan( QStringLiteral( "<\\s*span\\b" ), QRegularExpression::CaseInsensitiveOption );
-    static const QRegularExpression closeSpan( QStringLiteral( "<\\s*/span\\s*>" ), QRegularExpression::CaseInsensitiveOption );
-    static const QRegularExpression openDiv( QStringLiteral( "<\\s*div\\b" ), QRegularExpression::CaseInsensitiveOption );
-    static const QRegularExpression closeDiv( QStringLiteral( "<\\s*/div\\s*>" ), QRegularExpression::CaseInsensitiveOption );
-    Q_ASSERT( openSpan.isValid() && closeSpan.isValid() && openDiv.isValid() && closeDiv.isValid() );
-    int openTags = articleString.count( openSpan );
-    int closedTags = articleString.count( closeSpan );
+    int openTags = articleString.count( QRegularExpression( "<\\s*span\\b", QRegularExpression::CaseInsensitiveOption ) );
+    int closedTags = articleString.count( QRegularExpression( "<\\s*/span\\s*>", QRegularExpression::CaseInsensitiveOption ) );
     while( openTags > closedTags )
     {
       articleString += "</span>";
       closedTags += 1;
     }
 
-    openTags = articleString.count( openDiv );
-    closedTags = articleString.count( closeDiv );
+    openTags = articleString.count( QRegularExpression( "<\\s*div\\b", QRegularExpression::CaseInsensitiveOption ) );
+    closedTags = articleString.count( QRegularExpression( "<\\s*/div\\s*>", QRegularExpression::CaseInsensitiveOption ) );
     while( openTags > closedTags )
     {
       articleString += "</div>";
@@ -251,7 +340,13 @@ sptr< DataRequest > WebSiteDictionary::getArticle( wstring const & str,
     urlString = Utf8::encode( context ).c_str();
   else
   {
-    urlString = detail::substituteUrlPlaceholders( urlTemplate, gd::toQString( str ) );
+    urlString = urlTemplate;
+
+    QString inputWord = gd::toQString( str );
+
+    urlString.replace( "%25GDWORD%25", inputWord.toUtf8().toPercentEncoding() );
+
+    urlString = detail::substituteUrlPlaceholders( urlString, inputWord );
   }
 
   if( inside_iframe )
@@ -263,7 +358,6 @@ sptr< DataRequest > WebSiteDictionary::getArticle( wstring const & str,
     string result = "<div class=\"website_padding\"></div>";
 
     result += string( "<iframe id=\"gdexpandframe-" ) + getId() +
-                      "\" name=\"gdexpandframe-" + getId() +
                       "\" src=\"" + urlString.data() +
                       "\" onmouseover=\"processIframeMouseOver('gdexpandframe-" + getId() + "');\" "
                       "onmouseout=\"processIframeMouseOut();\" "
@@ -348,10 +442,9 @@ void WebSiteResourceRequest::requestFinished( QNetworkReply * r )
     QUrl redirectUrl = possibleRedirectUrl.toUrl();
     if( !redirectUrl.isEmpty() )
     {
-      const QUrl resolved = netReply->url().resolved( redirectUrl );
       disconnect( netReply, 0, 0, 0 );
       netReply->deleteLater();
-      netReply = mgr.get( QNetworkRequest( resolved ) );
+      netReply = mgr.get( QNetworkRequest( redirectUrl ) );
 #ifndef QT_NO_OPENSSL
       connect( netReply, SIGNAL( sslErrors( QList< QSslError > ) ),
                netReply, SLOT( ignoreSslErrors() ) );
@@ -362,8 +455,7 @@ void WebSiteResourceRequest::requestFinished( QNetworkReply * r )
     // Handle reply data
 
     QByteArray replyData = netReply->readAll();
-    const Encoding codec = Encoding::forHtml( replyData, netReply->rawHeader( "Content-Type" ) );
-    QString cssString = detail::resolveCss( codec.decode( replyData ), netReply->url() );
+    QString cssString = QString::fromUtf8( replyData );
 
     dictPtr->isolateWebCSS( cssString );
 
@@ -391,19 +483,9 @@ void WebSiteResourceRequest::requestFinished( QNetworkReply * r )
 sptr< Dictionary::DataRequest > WebSiteDictionary::getResource( string const & name ) THROW_SPEC( std::exception )
 {
   QString link = QString::fromUtf8( name.c_str() );
-  // Current resources retain the entire absolute URL as one encoded path.
-  // The dispatch layer removes that path's encoding once, not the remote URL's
-  // own percent escapes. Accept old scheme/host paths for in-flight articles.
-  if( !link.startsWith( "http://" ) && !link.startsWith( "https://" ) )
-  {
-    if( link.startsWith( "http%3A", Qt::CaseInsensitive ) || link.startsWith( "https%3A", Qt::CaseInsensitive ) )
-      link = QUrl::fromPercentEncoding( link.toUtf8() );
-    else
-    {
-      const auto pos = link.indexOf( '/' );
-      if( pos > 0 ) link.replace( pos, 1, "://" );
-    }
-  }
+  int pos = link.indexOf( '/' );
+  if( pos > 0 )
+    link.replace( pos, 1, "://" );
   return new WebSiteResourceRequest( link, netMgr, this );
 }
 
