@@ -23,6 +23,7 @@ include(../testsupport.pri)
 
 QT += core
 
-SOURCES += tst_regex.cc
+SOURCES += $$GD_REPO_ROOT/wildcard.cc \
+           tst_regex.cc
 
 DISTFILES += $$GD_REPO_ROOT/tests/fixtures/regex/cases.json

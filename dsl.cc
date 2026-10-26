@@ -47,11 +47,7 @@
 #include <QMap>
 #include <QStringList>
 
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-#include <QRegularExpression>
-#else
-#include <QRegExp>
-#endif
+#include "wildcard.hh"
 
 // For TIFF conversion
 #include <QImage>
@@ -61,7 +57,7 @@
 // For SVG handling
 #include <QtSvg/QSvgRenderer>
 
-#include "qt4x5.hh"
+#include <QUrlQuery>
 
 namespace Dsl {
 
@@ -381,11 +377,11 @@ public:
 
 void DslDictionary::deferredInit()
 {
-  if ( !Qt4x5::AtomicInt::loadAcquire( deferredInitDone ) )
+  if ( !deferredInitDone.loadAcquire() )
   {
     Mutex::Lock _( deferredInitMutex );
 
-    if ( Qt4x5::AtomicInt::loadAcquire( deferredInitDone ) )
+    if ( deferredInitDone.loadAcquire() )
       return;
 
     if ( !deferredInitRunnableStarted )
@@ -409,11 +405,11 @@ string const & DslDictionary::ensureInitDone()
 
 void DslDictionary::doDeferredInit()
 {
-  if ( !Qt4x5::AtomicInt::loadAcquire( deferredInitDone ) )
+  if ( !deferredInitDone.loadAcquire() )
   {
     Mutex::Lock _( deferredInitMutex );
 
-    if ( Qt4x5::AtomicInt::loadAcquire( deferredInitDone ) )
+    if ( deferredInitDone.loadAcquire() )
       return;
 
     // Do deferred init
@@ -900,9 +896,12 @@ string DslDictionary::nodeToHtml( ArticleDom::Node const & node )
       QUrl url;
       url.setScheme( "gdau" );
       url.setHost( QString::fromUtf8( search ? "search" : getId().c_str() ) );
-      url.setPath( Qt4x5::Url::ensureLeadingSlash( QString::fromUtf8( filename.c_str() ) ) );
+      QString resourcePath = QString::fromUtf8( filename.c_str() );
+      if( !resourcePath.startsWith( '/' ) )
+        resourcePath.prepend( '/' );
+      url.setPath( resourcePath, QUrl::DecodedMode );
       if( search && idxHeader.hasSoundDictionaryName )
-        Qt4x5::Url::setFragment( url, QString::fromUtf8( preferredSoundDictionary.c_str() ) );
+        url.setFragment( QString::fromUtf8( preferredSoundDictionary.c_str() ), QUrl::DecodedMode );
 
       string ref = string( "\"" ) + url.toEncoded().data() + "\"";
 
@@ -917,7 +916,10 @@ string DslDictionary::nodeToHtml( ArticleDom::Node const & node )
       QUrl url;
       url.setScheme( "bres" );
       url.setHost( QString::fromUtf8( getId().c_str() ) );
-      url.setPath( Qt4x5::Url::ensureLeadingSlash( QString::fromUtf8( filename.c_str() ) ) );
+      QString resourcePath = QString::fromUtf8( filename.c_str() );
+      if( !resourcePath.startsWith( '/' ) )
+        resourcePath.prepend( '/' );
+      url.setPath( resourcePath, QUrl::DecodedMode );
 
       vector< char > imgdata;
       bool resize = false;
@@ -1006,7 +1008,10 @@ string DslDictionary::nodeToHtml( ArticleDom::Node const & node )
       QUrl url;
       url.setScheme( "gdvideo" );
       url.setHost( QString::fromUtf8( getId().c_str() ) );
-      url.setPath( Qt4x5::Url::ensureLeadingSlash( QString::fromUtf8( filename.c_str() ) ) );
+      QString resourcePath = QString::fromUtf8( filename.c_str() );
+      if( !resourcePath.startsWith( '/' ) )
+        resourcePath.prepend( '/' );
+      url.setPath( resourcePath, QUrl::DecodedMode );
 
       result += string( "<a class=\"dsl_s dsl_video\" href=\"" ) + url.toEncoded().data() + "\">"
              + "<span class=\"img\"></span>"
@@ -1019,7 +1024,10 @@ string DslDictionary::nodeToHtml( ArticleDom::Node const & node )
       QUrl url;
       url.setScheme( "bres" );
       url.setHost( QString::fromUtf8( getId().c_str() ) );
-      url.setPath( Qt4x5::Url::ensureLeadingSlash( QString::fromUtf8( filename.c_str() ) ) );
+      QString resourcePath = QString::fromUtf8( filename.c_str() );
+      if( !resourcePath.startsWith( '/' ) )
+        resourcePath.prepend( '/' );
+      url.setPath( resourcePath, QUrl::DecodedMode );
 
       result += string( "<a class=\"dsl_s\" href=\"" ) + url.toEncoded().data()
              + "\">" + processNodeChildren( node ) + "</a>";
@@ -1057,7 +1065,7 @@ string DslDictionary::nodeToHtml( ArticleDom::Node const & node )
       if( info.isFile() )
       {
         name = info.canonicalFilePath();
-        url.setPath( Qt4x5::Url::ensureLeadingSlash( QUrl::fromLocalFile( name ).path() ) );
+        url.setPath( QUrl::fromLocalFile( name ).path(), QUrl::DecodedMode );
         link = string( url.toEncoded().data() );
       }
     }
@@ -1195,7 +1203,10 @@ string DslDictionary::nodeToHtml( ArticleDom::Node const & node )
     if( refStr.empty() )
       refStr = node.renderAsText();
     normalizeHeadword( refStr );
-    url.setPath( Qt4x5::Url::ensureLeadingSlash( gd::toQString( refStr ) ) );
+    QString lookupPath = gd::toQString( refStr );
+    if( !lookupPath.startsWith( '/' ) )
+      lookupPath.prepend( '/' );
+    url.setPath( lookupPath, QUrl::DecodedMode );
     if( !attrs.isEmpty() )
     {
       QString attr = attrs.remove( '\"' );
@@ -1204,7 +1215,9 @@ string DslDictionary::nodeToHtml( ArticleDom::Node const & node )
       {
         QList< QPair< QString, QString > > query;
         query.append( QPair< QString, QString >( attr.left( n ), attr.mid( n + 1 ) ) );
-        Qt4x5::Url::setQueryItems( url, query );
+        QUrlQuery urlQuery;
+        urlQuery.setQueryItems( query );
+        url.setQuery( urlQuery );
       }
     }
 
@@ -1222,7 +1235,10 @@ string DslDictionary::nodeToHtml( ArticleDom::Node const & node )
     url.setHost( "localhost" );
     wstring nodeStr = node.renderAsText();
     normalizeHeadword( nodeStr );
-    url.setPath( Qt4x5::Url::ensureLeadingSlash( gd::toQString( nodeStr ) ) );
+    QString lookupPath = gd::toQString( nodeStr );
+    if( !lookupPath.startsWith( '/' ) )
+      lookupPath.prepend( '/' );
+    url.setPath( lookupPath, QUrl::DecodedMode );
 
     result += string( "<a class=\"dsl_ref\" href=\"" ) + url.toEncoded().data() +"\">"
               + processNodeChildren( node ) + "</a>";
@@ -1603,15 +1619,9 @@ void DslDictionary::getArticleText( uint32_t articleAddress, QString & headword,
 
     // Strip tags
 
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-    text.replace( QRegularExpression( "\\[(|/)(p|trn|ex|com|\\*|t|br|m[0-9]?)\\]" ), " " );
-    text.replace( QRegularExpression( "\\[(|/)lang(\\s[^\\]]*)?\\]" ), " " );
-    text.remove( QRegularExpression( "\\[[^\\\\\\[\\]]+\\]" ) );
-#else
-    text.replace( QRegExp( "\\[(|/)(p|trn|ex|com|\\*|t|br|m[0-9]?)\\]" ), " " );
-    text.replace( QRegExp( "\\[(|/)lang(\\s[^\\]]*)?\\]" ), " " );
-    text.remove( QRegExp( "\\[[^\\\\\\[\\]]+\\]" ) );
-#endif
+    text.replace( Regex::validated( "\\[(|/)(p|trn|ex|com|\\*|t|br|m[0-9]?)\\]" ), " " );
+    text.replace( Regex::validated( "\\[(|/)lang(\\s[^\\]]*)?\\]" ), " " );
+    text.remove( Regex::validated( "\\[[^\\\\\\[\\]]+\\]" ) );
     text.remove( QString::fromLatin1( "<<" ) );
     text.remove( QString::fromLatin1( ">>" ) );
 
@@ -1725,7 +1735,7 @@ void DslArticleRequestRunnable::run()
 
 void DslArticleRequest::run()
 {
-  if ( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+  if ( isCancelled.loadAcquire() )
   {
     finish();
     return;
@@ -1760,7 +1770,7 @@ void DslArticleRequest::run()
   for( unsigned x = 0; x < chain.size(); ++x )
   {
     // Check if we're cancelled occasionally
-    if ( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+    if ( isCancelled.loadAcquire() )
     {
       finish();
       return;
@@ -1928,7 +1938,7 @@ void DslResourceRequestRunnable::run()
 void DslResourceRequest::run()
 {
   // Some runnables linger enough that they are cancelled before they start
-  if ( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+  if ( isCancelled.loadAcquire() )
   {
     finish();
     return;

@@ -4,11 +4,7 @@
 #include <QString>
 #include <QTextDocumentFragment>
 
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-#include <QRegularExpression>
-#else
-#include <QRegExp>
-#endif
+#include "wildcard.hh"
 
 #include "htmlescape.hh"
 
@@ -151,15 +147,9 @@ QString unescape( QString const & str, bool saveFormat )
     QString tmp = str;
     if( !saveFormat )
     {
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-        tmp.replace( QRegularExpression( "<(?:\\s*/?(?:div|h[1-6r]|q|p(?![alr])|br|li(?![ns])|td|blockquote|[uo]l|pre|d[dl]|nav|address))[^>]{0,}>",
+        tmp.replace( Regex::validated( "<(?:\\s*/?(?:div|h[1-6r]|q|p(?![alr])|br|li(?![ns])|td|blockquote|[uo]l|pre|d[dl]|nav|address))[^>]{0,}>",
                                          QRegularExpression::CaseInsensitiveOption ), " " );
-        tmp.remove( QRegularExpression( "<[^>]*>" ) );
-#else
-      tmp.replace( QRegExp( "<(?:\\s*/?(?:div|h[1-6r]|q|p(?![alr])|br|li(?![ns])|td|blockquote|[uo]l|pre|d[dl]|nav|address))[^>]{0,}>",
-                            Qt::CaseInsensitive, QRegExp::RegExp2 ), " " );
-      tmp.remove( QRegExp( "<[^>]*>", Qt::CaseSensitive, QRegExp::RegExp2 ) );
-#endif
+        tmp.remove( Regex::validated( "<[^>]*>" ) );
     }
     return QTextDocumentFragment::fromHtml( tmp.trimmed() ).toPlainText();
   }
@@ -169,6 +159,83 @@ QString unescape( QString const & str, bool saveFormat )
 string unescapeUtf8( const string &str, bool saveFormat )
 {
   return string( unescape( QString::fromUtf8( str.c_str(), str.size() ) ).toUtf8().data(), saveFormat );
+}
+
+
+void balanceSpanDivTags( QString & article )
+{
+  // Check for unclosed <span> and <div>. The original QRegExp patterns classified
+  // characters with Qt's own tables (\s is QChar::isSpace(); \b breaks on any
+  // character that is not a letter, number, mark or underscore), which PCRE does
+  // not reproduce, so the counts use those classes directly.
+  auto isMdxWordChar = []( QChar c ) {
+    return c.isLetterOrNumber() || c.isMark() || c == QLatin1Char( '_' );
+  };
+
+  auto countMdxOpen = [ & ]( QString const & name ) {
+    qsizetype const length = name.size();
+    int count = 0;
+    for( qsizetype i = 0; i + length < article.size(); ++i )
+    {
+      if( article[ i ] != QLatin1Char( '<' ) )
+        continue;
+      qsizetype j = i + 1;
+      while( j < article.size() && article[ j ].isSpace() )
+        ++j;
+      qsizetype k = 0;
+      while( k < length && j + k < article.size() && article[ j + k ].toLower() == name.at( k ).toLower() )
+        ++k;
+      if( k != length )
+        continue;
+      qsizetype const after = j + length;
+      if( after >= article.size() || !isMdxWordChar( article[ after ] ) )
+        ++count;
+    }
+    return count;
+  };
+
+  auto countMdxClose = [ & ]( QString const & name ) {
+    qsizetype const length = name.size();
+    int count = 0;
+    for( qsizetype i = 0; i + length < article.size(); ++i )
+    {
+      if( article[ i ] != QLatin1Char( '<' ) )
+        continue;
+      qsizetype j = i + 1;
+      while( j < article.size() && article[ j ].isSpace() )
+        ++j;
+      if( j >= article.size() || article[ j ] != QLatin1Char( '/' ) )
+        continue;
+      ++j;
+      qsizetype k = 0;
+      while( k < length && j + k < article.size() && article[ j + k ].toLower() == name.at( k ).toLower() )
+        ++k;
+      if( k != length )
+        continue;
+      j += length;
+      while( j < article.size() && article[ j ].isSpace() )
+        ++j;
+      if( j < article.size() && article[ j ] == QLatin1Char( '>' ) )
+        ++count;
+    }
+    return count;
+  };
+
+  int openTags = countMdxOpen( QStringLiteral( "span" ) );
+  int closedTags = countMdxClose( QStringLiteral( "span" ) );
+  while( openTags > closedTags )
+  {
+    article += "</span>";
+    closedTags += 1;
+  }
+
+  openTags = countMdxOpen( QStringLiteral( "div" ) );
+  closedTags = countMdxClose( QStringLiteral( "div" ) );
+  while( openTags > closedTags )
+  {
+    article += "</div>";
+    closedTags += 1;
+  }
 }
 
 }

@@ -36,6 +36,7 @@
 #include <QSet>
 #include <QStringList>
 
+#include "wildcard.hh"
 #include "support/fixtures.hh"
 
 namespace
@@ -240,7 +241,11 @@ void checkRow( QJsonObject const & row, QStringList & problems )
                                 .arg( id );
         }
 
-        expressionText = normalizerPattern;
+        QString const actualPattern = wildcardsToRegexp( pattern );
+        if ( actualPattern != normalizerPattern )
+            problems << QStringLiteral( "%1: production wildcard grammar changed: got %2, expected %3" )
+                            .arg( id, display( actualPattern ), display( normalizerPattern ) );
+        expressionText = actualPattern;
     }
     else if ( !wildcardMode.isEmpty() )
     {
@@ -486,6 +491,7 @@ class TstRegex : public QObject
     void unicodeCapturesPreserveExactText();
     void literalHexAndOctalTokenMigrationIsPinned();
     void unmatchedOptionalCaptureIsEmpty();
+    void builtInPatternValidationReportsItsError();
     void invalidPatternIsRejectedWithDiagnostic();
 };
 
@@ -1072,6 +1078,19 @@ void TstRegex::unmatchedOptionalCaptureIsEmpty()
 
     QString const assembled = QStringLiteral( "[" ) + match.captured( 1 ) + QStringLiteral( "]" );
     QCOMPARE( assembled, QStringLiteral( "[]" ) );
+}
+
+void TstRegex::builtInPatternValidationReportsItsError()
+{
+    QTest::ignoreMessage( QtWarningMsg,
+        QRegularExpression( "^Invalid built-in regular expression .*\\[:.*$" ) );
+    QRegularExpression const invalid = Regex::validated( QStringLiteral( "[" ) );
+    QVERIFY( !invalid.isValid() );
+    QVERIFY( !invalid.errorString().isEmpty() );
+    QRegularExpression const valid = Regex::validated( QStringLiteral( "\\d+" ),
+        QRegularExpression::UseUnicodePropertiesOption );
+    QVERIFY( valid.isValid() );
+    QVERIFY( valid.match( QStringLiteral( "١٢" ) ).hasMatch() );
 }
 
 void TstRegex::invalidPatternIsRejectedWithDiagnostic()

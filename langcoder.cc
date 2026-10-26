@@ -12,6 +12,7 @@
 
 #include <cctype>
 #include <QLocale>
+#include "wildcard.hh"
 
 LangCoder langCoder;
 
@@ -325,17 +326,19 @@ quint32 LangCoder::guessId( const QString & lang )
 QPair<quint32,quint32> LangCoder::findIdsForName( QString const & name )
 {
   QString nameFolded = "|" + name.toCaseFolded() + "|";
-  QRegExp reg( "[^a-z]([a-z]{2,3})-([a-z]{2,3})[^a-z]" ); reg.setMinimal(true);
-  int off = 0;
+  QRegularExpression const reg = Regex::validated( "[^a-z]([a-z]{2,3})-([a-z]{2,3})[^a-z]",
+                                QRegularExpression::InvertedGreedinessOption );
+  if( !reg.isValid() )
+    return QPair< quint32, quint32 >( 0, 0 );
+  auto matches = reg.globalMatch( nameFolded );
 
-  while ( reg.indexIn( nameFolded, off ) >= 0 )
+  while ( matches.hasNext() )
   {
-    quint32 from = guessId( reg.cap(1) );
-    quint32 to = guessId( reg.cap(2) );
+    QRegularExpressionMatch const match = matches.next();
+    quint32 from = guessId( match.captured( 1 ) );
+    quint32 to = guessId( match.captured( 2 ) );
     if (from && to)
       return QPair<quint32,quint32>(from, to);
-
-    off += reg.matchedLength();
   }
 
   return QPair<quint32,quint32>(0, 0);
@@ -353,11 +356,7 @@ bool LangCoder::isLanguageRTL( quint32 code )
     GDLangCode &lc = LangCodes[ langCoder.codeMap[ code ] ];
     if( lc.isRTL < 0 )
     {
-#if QT_VERSION >= 0x040700
       lc.isRTL = ( int )( QLocale( lc.code ).textDirection() == Qt::RightToLeft );
-#else
-      lc.isRTL = 0;
-#endif
     }
     return lc.isRTL != 0;
   }
