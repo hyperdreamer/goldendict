@@ -5,15 +5,15 @@
  * declarations of the scheme handler, its streaming device and the request
  * interceptor.
  *
- * The reader contract and buffered scheme coordinator are complete here.
- * ArticleStreamDevice and the request interceptor remain forward declarations
- * until the tasks that implement them.
+ * The reader, buffered coordinator and live streaming device are implemented
+ * here. The request interceptor is supplied by its profile/policy task.
  */
 
 #ifndef GOLDENDICT_ARTICLESCHEMES_HH_INCLUDED
 #define GOLDENDICT_ARTICLESCHEMES_HH_INCLUDED
 
 #include <QByteArray>
+#include <QIODevice>
 #include <QUrl>
 #include <QWebEngineUrlSchemeHandler>
 #include <QtGlobal>
@@ -79,6 +79,40 @@ std::shared_ptr< DataRequestReader const > makeDataRequestReader();
 /// terminal failure of that job.
 using DataRequestReaderFactory = std::function< std::shared_ptr< DataRequestReader const >(
   sptr< Dictionary::DataRequest > const & ) >;
+
+/// Job-owned live reply. Its producer and connections are GUI-only; every IO
+/// virtual uses just synchronized byte state and the producer-free reader.
+class ArticleStreamDevice : public QIODevice
+{
+  Q_OBJECT
+public:
+  ArticleStreamDevice( sptr< Dictionary::DataRequest > const & request,
+                       std::shared_ptr< DataRequestReader const > reader, QObject * jobParent );
+  ~ArticleStreamDevice() override;
+  bool isSequential() const override;
+  qint64 size() const override;
+  qint64 bytesAvailable() const override;
+  bool atEnd() const override;
+  void close() override;
+  void cancel() noexcept;
+
+signals:
+  void completed();
+  void failed( QString const & message );
+
+protected:
+  qint64 readData( char * data, qint64 maxSize ) override;
+  qint64 writeData( char const * data, qint64 maxSize ) override;
+
+private:
+  friend class ArticleSchemeHandler;
+  struct State;
+  struct Producer;
+  std::unique_ptr< State > state;
+  std::unique_ptr< Producer > producer;
+  void pump();
+  void publish( bool appended );
+};
 
 /// GUI-owned coordinator. The resource manager must outlive this handler;
 /// reply devices belong to their jobs and are never deleted by the handler.

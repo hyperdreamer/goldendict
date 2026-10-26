@@ -13,6 +13,7 @@
 #include <QWebEngineUrlRequestJob>
 #include <QWebEngineUrlScheme>
 
+#include <algorithm>
 #include <cstring>
 #include <exception>
 #include <mutex>
@@ -146,6 +147,270 @@ std::shared_ptr< DataRequestReader const > makeDataRequestReader()
   return std::make_shared< DictionaryDataRequestReader >();
 }
 
+struct ArticleStreamDevice::State
+{
+  // IO methods must never access Producer, even to copy/release its sptr.
+  mutable std::mutex mutex;
+  QByteArray bytes;
+  qint64 readOffset = 0;
+  bool completed = false, failed = false, cancelled = false;
+  bool failureNotified = false, completionNotified = false;
+  QString failureMessage;
+  std::shared_ptr< DataRequestReader const > const reader;
+
+  explicit State( std::shared_ptr< DataRequestReader const > reader_ ): reader( std::move( reader_ ) ) {}
+
+  void fail( QString message )
+  {
+    if( failed || cancelled ) return;
+    failed = true;
+    failureMessage = std::move( message );
+  }
+};
+
+struct ArticleStreamDevice::Producer
+{
+  sptr< Dictionary::DataRequest > request;
+  QList< QMetaObject::Connection > connections;
+  bool cancelled = false;
+  explicit Producer( sptr< Dictionary::DataRequest > const & request_ ): request( request_ ) {}
+};
+
+ArticleStreamDevice::ArticleStreamDevice( sptr< Dictionary::DataRequest > const & request,
+    std::shared_ptr< DataRequestReader const > reader, QObject * jobParent ):
+  QIODevice( jobParent ), state( std::make_unique< State >( std::move( reader ) ) ),
+  producer( std::make_unique< Producer >( request ) )
+{
+  Q_ASSERT( QThread::currentThread() == thread() );
+  open( QIODevice::ReadOnly | QIODevice::Unbuffered );
+  if( request )
+  {
+    producer->connections.append( connect( request.get(), &Dictionary::DataRequest::updated,
+        this, [this] { pump(); }, Qt::QueuedConnection ) );
+    producer->connections.append( connect( request.get(), &Dictionary::DataRequest::finished,
+        this, [this] { pump(); }, Qt::QueuedConnection ) );
+  }
+  // Initial staging is synchronous, before the handler can hand us to Qt.
+  // Notifications are queued so the handler can connect before initial failure
+  // or successful empty completion is published.
+  pump();
+}
+
+ArticleStreamDevice::~ArticleStreamDevice()
+{
+  cancel();
+}
+
+bool ArticleStreamDevice::isSequential() const { return true; }
+qint64 ArticleStreamDevice::size() const { return 0; }
+
+qint64 ArticleStreamDevice::bytesAvailable() const
+{
+  std::lock_guard< std::mutex > lock( state->mutex );
+  return state->bytes.size() - state->readOffset;
+}
+
+bool ArticleStreamDevice::atEnd() const
+{
+  std::lock_guard< std::mutex > lock( state->mutex );
+  return state->cancelled || ( state->completed && !state->failed && state->readOffset == state->bytes.size() );
+}
+
+void ArticleStreamDevice::publish( bool appended )
+{
+  // Called after releasing the state mutex, including on Chromium's IO thread.
+  // Only this GUI continuation emits device signals; no producer is captured.
+  QMetaObject::invokeMethod( this, [this, appended] {
+    QString message;
+    bool failure = false, completion = false, wake = false;
+    {
+      std::lock_guard< std::mutex > lock( state->mutex );
+      if( state->failed )
+      {
+        // Failure selected before loader close still has to be reported.
+        if( state->failureNotified ) return;
+        state->failureNotified = true;
+        failure = true;
+        message = state->failureMessage;
+      }
+      else
+      {
+        wake = appended && !state->cancelled;
+        // A successful producer completion selected before the loader drains
+        // an empty body still notifies once, even if IO close wins the race
+        // with this queued GUI delivery. Cancelling an unfinished producer
+        // never sets completed.
+        if( state->completed && !state->completionNotified )
+        {
+          state->completionNotified = true;
+          completion = true;
+        }
+        else if( state->failed && !state->failureNotified )
+        {
+          // A failure that latched after the completion was selected wins; the
+          // completion observer must not report success afterwards.
+          state->failureNotified = true;
+          failure = true;
+          message = state->failureMessage;
+          completion = false;
+        }
+      }
+    }
+    // Slots may reenter the device or cancel it: never emit under the mutex.
+    QPointer< ArticleStreamDevice > alive( this );
+
+    // Between two emissions a slot can drive the producer far enough for a copy
+    // failure to latch. Success notifications are therefore re-validated against
+    // the terminal state before each emission: failure wins over a completion that
+    // was merely selected earlier.
+    auto failureWon = [ this ] {
+      std::lock_guard< std::mutex > lock( state->mutex );
+      return state->failed;
+    };
+
+    if( failure )
+    {
+      emit readyRead();
+      if( alive ) emit failed( message );
+      return;
+    }
+    if( wake ) emit readyRead();
+    if( !alive ) return;
+    if( completion )
+    {
+      emit readyRead();
+      if( !alive || failureWon() ) return;
+      emit completed();
+      if( alive && !failureWon() ) emit readChannelFinished();
+    }
+  }, Qt::QueuedConnection );
+}
+
+void ArticleStreamDevice::pump()
+{
+  Q_ASSERT( QThread::currentThread() == thread() );
+  bool appended = false, changed = false;
+  {
+    std::lock_guard< std::mutex > lock( state->mutex );
+    if( state->cancelled || state->failed || state->completed ) return;
+    try
+    {
+      if( !producer->request || !state->reader )
+        state->fail( QStringLiteral( "no article stream reader or producer" ) );
+      else
+      {
+        // The producer may publish its final bytes, its error or its completion
+        // while a slice is being copied, so the terminal state is sampled first
+        // and the loop re-samples after every append: a slice that raced with the
+        // producer's final append is followed by another iteration that copies the
+        // rest, instead of marking the stream complete with stale bytes.
+        for( int guard = 0; guard < 1000000; ++guard )
+        {
+          bool const finished = producer->request->isFinished();
+
+          QString const error = producer->request->getErrorString();
+          if( !error.isEmpty() )
+          {
+            state->fail( error );
+            break;
+          }
+
+          qint64 const available = producer->request->dataSize();
+          if( available < 0 )
+          {
+            // No bytes and no more coming: a finished producer with a negative
+            // size is the resource-not-found case.
+            if( finished )
+              state->fail( QStringLiteral( "article stream resource not found" ) );
+            break;
+          }
+
+          if( available > state->bytes.size() )
+          {
+            qint64 const count = available - state->bytes.size();
+            QByteArray delta( qsizetype( count ), Qt::Uninitialized );
+            state->reader->dataSlice( *producer->request, size_t( state->bytes.size() ),
+                                      size_t( count ), delta.data() );
+            // Neither append length nor read offset changes on a thrown slice.
+            state->bytes.append( delta );
+            appended = true;
+            // The slice may have taken long enough for the producer to finish and
+            // publish more bytes; re-sample rather than trusting `available`.
+            continue;
+          }
+
+          if( finished )
+            state->completed = true;
+          break;
+        }
+      }
+    }
+    catch( std::exception const & error ) { state->fail( QString::fromUtf8( error.what() ) ); }
+    catch( ... ) { state->fail( QStringLiteral( "article stream reader failed" ) ); }
+    changed = appended || state->failed || state->completed;
+  }
+  if( changed ) publish( appended );
+}
+
+qint64 ArticleStreamDevice::readData( char * data, qint64 maxSize )
+{
+  {
+    std::lock_guard< std::mutex > lock( state->mutex );
+    if( state->cancelled ) return -1;
+    if( maxSize == 0 ) return 0;
+    if( maxSize < 0 ) return -1;
+    qint64 const count = std::min( maxSize, qint64( state->bytes.size() ) - state->readOffset );
+    if( count > 0 )
+    {
+      try
+      {
+        state->reader->copyStreamBytes( data, state->bytes.constData() + state->readOffset, count );
+        state->readOffset += count;
+        return count;
+      }
+      catch( std::exception const & error ) { state->fail( QString::fromUtf8( error.what() ) ); }
+      catch( ... ) { state->fail( QStringLiteral( "article stream copy failed" ) ); }
+    }
+    else return state->failed || state->completed ? -1 : 0;
+  }
+  // Failed copy: offset is unchanged. Queue the wakeup only after unlocking.
+  publish( false );
+  return -1;
+}
+
+qint64 ArticleStreamDevice::writeData( char const *, qint64 ) { return -1; }
+
+void ArticleStreamDevice::cancel() noexcept
+{
+  Q_ASSERT( QThread::currentThread() == thread() );
+  {
+    std::lock_guard< std::mutex > lock( state->mutex );
+    state->cancelled = true;
+  }
+  if( producer->cancelled ) return;
+  producer->cancelled = true;
+  for( auto const & connection : producer->connections ) disconnect( connection );
+  producer->connections.clear();
+  // Producer cancellation may synchronously emit finished and reenter cancel.
+  // Keep a local owning handle on GUI, after dropping the state lock.
+  auto request = producer->request;
+  producer->request.reset(); // sptr has no move constructor; keep every ref change on GUI.
+  if( request )
+    try { request->cancel(); } catch( ... ) {}
+}
+
+void ArticleStreamDevice::close()
+{
+  {
+    std::lock_guard< std::mutex > lock( state->mutex );
+    state->cancelled = true;
+  }
+  QIODevice::close();
+  // This closure owns no request/connection/job/handler reference. Qt removes
+  // it on device destruction; the job remains the sole QObject owner.
+  QMetaObject::invokeMethod( this, [this] { cancel(); }, Qt::QueuedConnection );
+}
+
 struct ArticleSchemeHandler::State
 {
   struct Job
@@ -158,7 +423,7 @@ struct ArticleSchemeHandler::State
     QByteArray mime;
     QUrl url;
     bool replied = false, terminal = false, cancelled = false;
-    bool rangeRequested = false;
+    bool rangeRequested = false, live = false;
     std::optional< Range > range;
     std::optional< RangeBounds > rangeBounds;
     QString failureMessage;
@@ -187,7 +452,10 @@ struct ArticleSchemeHandler::State
       return;
     // Set before calling a producer: cancel() is allowed to emit finished.
     record.cancelled = true;
-    try { record.request->cancel(); }
+    if( auto stream = qobject_cast< ArticleStreamDevice * >( record.device.data() ) )
+      stream->cancel();
+    else
+      try { record.request->cancel(); }
     catch( ... ) { /* Destruction/cancellation cannot propagate producer errors. */ }
   }
 
@@ -238,7 +506,7 @@ struct ArticleSchemeHandler::State
   void inspect( std::shared_ptr< Job > const & record )
   {
     Q_ASSERT( QThread::currentThread() == owner.thread() );
-    if( record->terminal || record->replied || record->cancelled || !record->job )
+    if( record->terminal || record->replied || record->cancelled || !record->job || record->device )
       return;
 
     try
@@ -250,19 +518,51 @@ struct ArticleSchemeHandler::State
         fail( record, QWebEngineUrlRequestJob::RequestFailed, error );
         return;
       }
-      // T14 buffers unfinished producers. T16 can attach ArticleStreamDevice
-      // here; no stream methods or Chromium IO-thread callbacks exist yet.
-      if( !record->request->isFinished() )
-        return;
-      if( record->request->dataSize() < 0 )
+      bool const finished = record->request->isFinished();
+      qint64 const available = record->request->dataSize();
+      if( finished && available < 0 )
       {
         fail( record, QWebEngineUrlRequestJob::UrlNotFound );
         return;
       }
+      if( record->live && !record->rangeRequested )
+      {
+        if( available <= 0 && !finished ) return;
+        auto stream = new ArticleStreamDevice( record->request, record->reader, record->job );
+        record->device = stream;
+        record->connections.append( QObject::connect( stream, &ArticleStreamDevice::failed, &owner,
+          [this, record]( QString const & message ) {
+            if( record->failureNotified || record->cancelled || !record->job ) return;
+            if( !record->replied )
+            {
+              fail( record, QWebEngineUrlRequestJob::RequestFailed, message );
+              return;
+            }
+            record->terminal = true;
+            record->failureNotified = true;
+            record->failureMessage = message;
+            emit owner.producerFailed( record->url, message );
+          } ) );
+        bool initiallyFailed;
+        {
+          // This is still before handoff. GUI never calls device IO virtuals
+          // after reply; only the queued failure/cancellation protocol remains.
+          std::lock_guard< std::mutex > lock( stream->state->mutex );
+          initiallyFailed = stream->state->failed;
+        }
+        // The initial pump already queued failed(). Let that notification
+        // select RequestFailed before Qt can destroy the job-owned device.
+        // inspect() ignores this installed device while delivery is pending.
+        if( initiallyFailed ) return;
+        record->replied = true;
+        record->job->reply( record->mime, stream );
+        return;
+      }
+      if( !finished ) return;
       QByteArray const bytes = record->reader->fullData( *record->request );
       qint64 const total = bytes.size();
       qint64 position = 0, last = total - 1;
-      if( record->rangeRequested )
+      if( record->range )
       {
         Range const & range = *record->range;
         // A parsed range is unsatisfiable against an empty representation: the
@@ -335,13 +635,14 @@ struct ArticleSchemeHandler::State
       fail( record, QWebEngineUrlRequestJob::UrlInvalid );
       return;
     }
+    record->live = parsed.kind == ArticleUrls::Kind::AudioAction || parsed.kind == ArticleUrls::Kind::VideoAction;
     auto const headers = job->requestHeaders();
     for( auto const & key : headers.keys() )
     {
       if( key.compare( "Range", Qt::CaseInsensitive ) == 0 )
       {
         record->range = parseRange( headers.value( key ) );
-        record->rangeRequested = record->range.has_value();
+        record->rangeRequested = true;
         break;
       }
     }

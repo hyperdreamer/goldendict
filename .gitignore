@@ -48,6 +48,8 @@ GoldenDict.xcodeproj/
 tests/**/.qmake.stash
 tests/**/target_wrapper.sh
 tests/tst_*/tst_article_schemes
+tests/tst_*/tst_article_stream
+tests/tst_*/tst_portal_hotkeys
 tests/tst_*/tst_encoding
 tests/tst_*/tst_htmlescape
 tests/tst_*/tst_hotkeys
