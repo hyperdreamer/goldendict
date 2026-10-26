@@ -12,9 +12,7 @@
 #include <QScrollBar>
 #include <QStyle>
 
-#ifdef Q_OS_WIN32
-#include <QDesktopWidget>
-#endif
+#include "platformwindow.hh"
 
 namespace
 {
@@ -55,7 +53,10 @@ bool CompletionList::eventFilter( QObject * obj, QEvent * ev )
 
 int CompletionList::preferredHeight() const
 {
-  const QSize itemSizeHint = itemDelegate()->sizeHint(viewOptions(), model()->index( 0, 0 ) );
+  // Qt 6 fills the option structure instead of handing out a viewOptions() copy.
+  QStyleOptionViewItem option;
+  initViewItemOption( &option );
+  const QSize itemSizeHint = itemDelegate()->sizeHint( option, model()->index( 0, 0 ) );
   int rows = qMin( count(), MAX_POPUP_ROWS );
 
   int scrollBarHeight = 0;
@@ -102,9 +103,7 @@ TranslateBox::TranslateBox(QWidget *parent) : QWidget(parent),
 
   setFocusProxy(translate_line);
   translate_line->setObjectName("translateLine");
-#if QT_VERSION >= 0x040700
   translate_line->setPlaceholderText( tr( "Type a word or phrase to search dictionaries" ) );
-#endif
 
   word_list->setTranslateLine(translate_line);
 
@@ -114,7 +113,7 @@ TranslateBox::TranslateBox(QWidget *parent) : QWidget(parent),
 
   QHBoxLayout *layout = new QHBoxLayout(this);
   setLayout(layout);
-  layout->setMargin(0);
+  layout->setContentsMargins( 0, 0, 0, 0 );
   layout->addWidget(translate_line);
 
   QPixmap image(":/icons/system-search.png");
@@ -290,7 +289,10 @@ void TranslateBox::showPopup()
 #ifdef Q_OS_WIN32
   QPoint topLeft = word_list->isWindow() ? rect.topLeft() : mapToGlobal( rect.topLeft() );
   QPoint bottomLeft = word_list->isWindow() ? rect.bottomLeft() : mapToGlobal( rect.bottomLeft() );
-  if( bottomLeft.y() >= QApplication::desktop()->screenGeometry( topLeft ).bottom() )
+  // The screen the popup would open on, resolved through the platform helper: the
+  // desktop reservation (a task bar) is what decides whether it fits below.
+  QRect const screen = PlatformWindow::availableGeometryForPoint( topLeft );
+  if( !screen.isEmpty() && bottomLeft.y() >= screen.bottom() )
     rect.moveTop( rect.top() - preferredHeight - translate_line->height() );
 #else
   if( !isWindow() )

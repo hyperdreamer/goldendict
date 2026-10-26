@@ -36,17 +36,32 @@ QT += core gui widgets
 INCLUDEPATH += $$GD_REPO_ROOT
 
 SOURCES += $$GD_REPO_ROOT/platformwindow.cc \
+           $$GD_REPO_ROOT/gddebug.cc \
+           $$GD_REPO_ROOT/hotkeywrapper.cc \
+           $$GD_REPO_ROOT/qtsingleapplication/src/qtsingleapplication.cpp \
+           $$GD_REPO_ROOT/qtsingleapplication/src/qtlocalpeer.cpp \
            tst_platformwindow.cc
 
 HEADERS += $$GD_REPO_ROOT/platformwindow.hh \
+           $$GD_REPO_ROOT/hotkeybackend.hh \
+           $$GD_REPO_ROOT/hotkeywrapper.hh \
+           $$GD_REPO_ROOT/qtsingleapplication/src/qtsingleapplication.h \
+           $$GD_REPO_ROOT/qtsingleapplication/src/qtlocalpeer.h \
            $$GD_REPO_ROOT/config.hh
+
+INCLUDEPATH += $$GD_REPO_ROOT/qtsingleapplication/src
 
 unix:!mac {
     # x11Display() borrows Qt's display; the suite only needs Xlib itself to
     # prove the borrowed handle is live and to emulate a panel-like desktop
     # reservation on the xvfb gate.
-    LIBS += -lX11
+    LIBS += -lX11 -lXtst
 }
+
+# hotkeywrapper.cc is compiled here because the runtime platform decision of the X11
+# recorder is the same rule this suite already pins for the window helpers, and the
+# portable variant is the build that proves the recorder's no-X11 paths compile and
+# stay disabled. Its X11 session needs Xlib as well (linked above).
 
 # The KDE windowing-system helper is an optional application dependency
 # (design §7.4): when KF6WindowSystem is available the helper is linked and

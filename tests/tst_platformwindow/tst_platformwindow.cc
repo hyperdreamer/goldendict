@@ -39,6 +39,7 @@
 #include "support/fixtures.hh"
 
 #include "config.hh"
+#include "hotkeywrapper.hh"
 #include "platformwindow.hh"
 
 #ifdef HAVE_X11
@@ -240,6 +241,7 @@ private slots:
     void activationRequestReachesThePlatform();
 
     void x11DisplayIsBorrowedOnlyOnXcb();
+    void recorderSessionFollowsTheActivePlatformName();
 };
 
 void TstPlatformWindow::initTestCase()
@@ -827,6 +829,30 @@ void TstPlatformWindow::x11DisplayIsBorrowedOnlyOnXcb()
     // the helper does not exist there at all, and initTestCase() already proved
     // that the variant really dropped the capability.
     QVERIFY( !QGuiApplication::platformName().isEmpty() );
+#endif
+}
+
+void TstPlatformWindow::recorderSessionFollowsTheActivePlatformName()
+{
+    // The X11 recorder's platform gate is the same runtime rule as the window
+    // helpers': this build's X11 capability (HAVE_X11) never makes a session an X11
+    // one, and the name comparison is case-insensitive so a capitalised "Wayland"
+    // cannot be taken for X11.
+    QVERIFY( HotkeyRuntime::isX11Session( QStringLiteral( "xcb" ) ) );
+    QVERIFY( HotkeyRuntime::isX11Session( QStringLiteral( "XCB" ) ) );
+    QVERIFY( !HotkeyRuntime::isX11Session( QStringLiteral( "Wayland" ) ) );
+    QVERIFY( !HotkeyRuntime::isX11Session( QStringLiteral( "WAYLAND" ) ) );
+    QVERIFY( !HotkeyRuntime::isX11Session( QStringLiteral( "wayland/xcb" ) ) );
+    QVERIFY( !HotkeyRuntime::isX11Session( QStringLiteral( "offscreen" ) ) );
+
+    // The recorder session exists only for an X11 session of the running platform.
+#ifdef GD_TEST_PLATFORMWINDOW_PORTABLE
+    // This variant is compiled without the X11 capability: the production sources
+    // take their disabled paths and no recorder session can be created at all.
+    QVERIFY( !createRecorderSession() );
+#else
+    QCOMPARE( bool( createRecorderSession() ),
+              HotkeyRuntime::isX11Session( QGuiApplication::platformName() ) );
 #endif
 }
 

@@ -43,10 +43,15 @@ void HotKeyEdit::renderCurrentValue()
 
   if ( currentKey1 )
   {
-    result = QKeySequence( currentKey1 | currentModifiers ).toString( QKeySequence::NativeText );
+    // Qt 6 keys are QKeyCombination values: the modifier mask and the key are
+    // combined by the constructor instead of by an integer bitmask.
+    result = QKeySequence( QKeyCombination( currentModifiers, Qt::Key( currentKey1 ) ) )
+               .toString( QKeySequence::NativeText );
 
     if ( currentKey2 )
-     result += "+" + QKeySequence( currentKey2 ).toString( QKeySequence::NativeText );
+     result += QLatin1Char( '+' )
+               + QKeySequence( QKeyCombination( Qt::KeyboardModifiers(), Qt::Key( currentKey2 ) ) )
+                   .toString( QKeySequence::NativeText );
   }
 
   setText( result );
