@@ -37,6 +37,10 @@
 #include <QFile>
 #include <QHash>
 #include <QKeySequence>
+#include <QProcess>
+#include <QProcessEnvironment>
+#include <QStandardPaths>
+#include <QDBusConnection>
 #include <QScopedPointer>
 #include <QSet>
 #include <QSignalSpy>
@@ -57,6 +61,8 @@
 #include "hotkeywrapper.hh"
 #include "keyboardstate.hh"
 #include "platformwindow.hh"
+#include "portalhotkeys.hh"
+#include "support/fake_portal.hh"
 
 // Xlib last, because Qt's own headers reject a Status/Bool definition that
 // precedes them, and its colliding macros dropped below the way fixx11h.h does it
@@ -402,6 +408,10 @@ private slots:
   void backendContractSignatures();
   void backendPublishesBindingActivationAndStateContract();
   void unsupportedBackendStillReportsState();
+  void unsupportedFactory();
+  void factorySelection_data();
+  void factorySelection();
+  void factorySelectionProbe();
 
   // The X11 recorder (§2.10): platform gate, matcher, core and backend.
   void x11SessionNamesAreDecidedCaseInsensitively_data();
@@ -1037,6 +1047,146 @@ void TstHotkeys::unsupportedBackendStillReportsState()
 // ---------------------------------------------------------------------------
 // Legacy configuration
 // ---------------------------------------------------------------------------
+
+void TstHotkeys::unsupportedFactory()
+{
+  // The named offscreen invocation is required independently of the table.
+  if ( qEnvironmentVariable( "QT_QPA_PLATFORM" ) != QLatin1String( "offscreen" ) )
+    return;
+  QVERIFY( !QGuiApplication::platformName().startsWith( QStringLiteral( "xcb" ) ) );
+  QVERIFY( !QGuiApplication::platformName().startsWith( QStringLiteral( "wayland" ) ) );
+  QObject owner;
+  auto backend = createHotkeyBackend( &owner );
+  QVERIFY( backend );
+  QCOMPARE( backend->parent(), &owner );
+  QVERIFY( !backend->isSupported() );
+  QCOMPARE( backend->state(), HotkeyBackend::State::Unsupported );
+  QSignalSpy states( backend.get(), &HotkeyBackend::stateChanged );
+  backend->bind( { HotkeyBinding{ QStringLiteral( "main-window" ), {}, QStringLiteral( "CTRL+F11" ) } } );
+  QCOMPARE( states.count(), 1 );
+  QVERIFY( !states.first().at( 1 ).toString().isEmpty() );
+  QCOMPARE( backend->state(), HotkeyBackend::State::Unsupported );
+  backend.reset();
+  QCOMPARE( owner.children().size(), 0 );
+}
+
+void TstHotkeys::factorySelection_data()
+{
+  QTest::addColumn< QString >( "platform" );
+  QTest::addColumn< QString >( "availability" );
+  QTest::newRow( "xcb" ) << QStringLiteral( "xcb" ) << QStringLiteral( "present" );
+  QTest::newRow( "other" ) << QStringLiteral( "offscreen" ) << QStringLiteral( "present" );
+  QTest::newRow( "wayland" ) << QStringLiteral( "wayland" ) << QStringLiteral( "present" );
+  QTest::newRow( "wayland-absent-portal" ) << QStringLiteral( "wayland" ) << QStringLiteral( "absent" );
+  QTest::newRow( "wayland-no-bus" ) << QStringLiteral( "wayland" ) << QStringLiteral( "no-bus" );
+}
+
+void TstHotkeys::factorySelection()
+{
+  QFETCH( QString, platform );
+  QFETCH( QString, availability );
+  TestSupport::PrivateSessionBus privateBus;
+  QString reason;
+  QVERIFY2( privateBus.start( &reason ), qPrintable( reason ) );
+  TestSupport::FakePortal portal;
+  QVERIFY2( portal.start( privateBus.fixtureConnection(), 2 ), qPrintable( portal.errorString() ) );
+  QTemporaryDir runtime;
+  QVERIFY( runtime.isValid() );
+  QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
+  environment.insert( QStringLiteral( "DBUS_SESSION_BUS_ADDRESS" ), privateBus.address() );
+  environment.insert( QStringLiteral( "XDG_RUNTIME_DIR" ), runtime.path() );
+  QProcess compositor;
+  // QProcess destruction reaps the isolated compositor even when an assertion fails.
+  if ( platform == QLatin1String( "wayland" ) )
+  {
+    const QString kwin = QStandardPaths::findExecutable( QStringLiteral( "kwin_wayland" ) );
+    QVERIFY2( !kwin.isEmpty(), "required native Wayland factory probe needs kwin_wayland" );
+    environment.insert( QStringLiteral( "QT_QPA_PLATFORM" ), QStringLiteral( "offscreen" ) );
+    environment.insert( QStringLiteral( "KWIN_COMPOSE" ), QStringLiteral( "Q" ) );
+    environment.insert( QStringLiteral( "LIBGL_ALWAYS_SOFTWARE" ), QStringLiteral( "1" ) );
+    compositor.setProcessEnvironment( environment );
+    compositor.start( kwin, { QStringLiteral( "--virtual" ), QStringLiteral( "--no-kactivities" ),
+      QStringLiteral( "--no-global-shortcuts" ), QStringLiteral( "--socket" ), QStringLiteral( "gd-t32" ) } );
+    QVERIFY2( QTest::qWaitFor( [ & ]() {
+      return QFile::exists( runtime.filePath( QStringLiteral( "gd-t32" ) ) )
+             || compositor.state() == QProcess::NotRunning;
+    }, 5000 ), "native Wayland compositor startup deadline" );
+    QVERIFY2( QFile::exists( runtime.filePath( QStringLiteral( "gd-t32" ) ) ),
+              compositor.readAllStandardError().constData() );
+    environment.insert( QStringLiteral( "WAYLAND_DISPLAY" ), QStringLiteral( "gd-t32" ) );
+  }
+  if ( availability == QLatin1String( "absent" ) )
+    portal.loseService();
+  if ( availability == QLatin1String( "no-bus" ) )
+    environment.insert( QStringLiteral( "DBUS_SESSION_BUS_ADDRESS" ),
+                        QStringLiteral( "unix:path=" ) + runtime.filePath( QStringLiteral( "missing-bus" ) ) );
+  environment.insert( QStringLiteral( "QT_QPA_PLATFORM" ), platform );
+  environment.insert( QStringLiteral( "GD_T32_FACTORY_PROBE" ), availability );
+  QProcess child;
+  child.setProcessEnvironment( environment );
+  child.start( QCoreApplication::applicationFilePath(), { QStringLiteral( "factorySelectionProbe" ) } );
+  QVERIFY2( QTest::qWaitFor( [ & ]() { return child.state() == QProcess::NotRunning; }, 8000 ),
+            "factory subprocess exceeded deadline" );
+  const QByteArray output = child.readAllStandardOutput() + child.readAllStandardError();
+  QCOMPARE( child.exitStatus(), QProcess::NormalExit );
+  QVERIFY2( child.exitCode() == 0, output.constData() );
+  QCOMPARE( portal.count( QStringLiteral( "BindShortcuts" ) ),
+            platform == QLatin1String( "wayland" ) && availability == QLatin1String( "present" ) ? 1 : 0 );
+  QVERIFY( portal.protocolViolations().isEmpty() );
+  if ( compositor.state() != QProcess::NotRunning )
+  {
+    compositor.terminate();
+    QVERIFY( QTest::qWaitFor( [ & ]() { return compositor.state() == QProcess::NotRunning; }, 2000 ) );
+  }
+}
+
+void TstHotkeys::factorySelectionProbe()
+{
+  const QString availability = qEnvironmentVariable( "GD_T32_FACTORY_PROBE" );
+  if ( availability.isEmpty() )
+    return; // This slot is the subprocess side of factorySelection.
+  QObject owner;
+  auto backend = createHotkeyBackend( &owner );
+  QVERIFY( backend );
+  QCOMPARE( backend->parent(), &owner );
+  const QString platform = QGuiApplication::platformName();
+  if ( platform.startsWith( QLatin1String( "wayland" ) ) )
+  {
+    QVERIFY( dynamic_cast< PortalBackend * >( backend.get() ) );
+    QVERIFY( QTest::qWaitFor( [ & ]() {
+      return backend->state() == HotkeyBackend::State::Ready
+             || backend->state() == HotkeyBackend::State::Unavailable;
+    }, 5500 ) );
+    QCOMPARE( backend->isSupported(), availability == QLatin1String( "present" ) );
+    QCOMPARE( backend->state(), availability == QLatin1String( "present" )
+      ? HotkeyBackend::State::Ready : HotkeyBackend::State::Unavailable );
+    backend->bind( { HotkeyBinding{ QStringLiteral( "main-window" ), {}, QStringLiteral( "CTRL+F11" ) } } );
+    QVERIFY( QTest::qWaitFor( [ & ]() {
+      return backend->state() == HotkeyBackend::State::Bound
+             || backend->state() == HotkeyBackend::State::Unavailable;
+    }, 5500 ) );
+    QCOMPARE( backend->state(), availability == QLatin1String( "present" )
+      ? HotkeyBackend::State::Bound : HotkeyBackend::State::Unavailable );
+  }
+  else if ( platform.startsWith( QLatin1String( "xcb" ) ) )
+  {
+#ifdef HAVE_X11
+    QVERIFY( dynamic_cast< X11RecordBackend * >( backend.get() ) );
+    QVERIFY( backend->isSupported() );
+    QCOMPARE( backend->state(), HotkeyBackend::State::Ready );
+#else
+    QVERIFY( !backend->isSupported() );
+#endif
+  }
+  else
+  {
+    QVERIFY( !dynamic_cast< PortalBackend * >( backend.get() ) );
+    QVERIFY( !backend->isSupported() );
+    QCOMPARE( backend->state(), HotkeyBackend::State::Unsupported );
+  }
+  backend.reset();
+  QCOMPARE( owner.children().size(), 0 );
+}
 
 void TstHotkeys::legacyConfigLoadsWithoutRewriting()
 {

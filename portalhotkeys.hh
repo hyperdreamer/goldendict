@@ -80,11 +80,19 @@ private slots:
   void receivePortalSignal( QDBusMessage const & message );
 
 private:
+  friend class TstPortalHotkeys;
+
+  /// Test-only seam: re-runs the bind path for the live session and generation, so
+  /// the one-bind rule can be exercised from the suite. Never called by production
+  /// code; the guard it reaches is real.
+  void startBindForCurrentGenerationForTest();
+
   struct Private;
 
   void setState( HotkeyBackend::State state, QString const & explanation );
   void beginGeneration( QVector< HotkeyBinding > const & bindings );
   void readVersion( quint64 generation );
+  void readVersionForOwner( quint64 generation, QString const & owner );
   void createSession( quint64 generation );
   void startList( quint64 generation );
   void startBind( quint64 generation );
