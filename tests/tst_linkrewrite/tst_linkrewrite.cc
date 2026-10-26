@@ -507,6 +507,19 @@ void TstLinkRewrite::websiteRewritesRetainedBaselineBehaviour()
                   page, QStringLiteral( "dict" ) ),
               QStringLiteral( "<link rel='stylesheet' href='bres://dict/https/cdn.test/site.css' type='text/css'>" ) );
 
+    // Unicode classification matches the QRegExp baseline: a non-ASCII character
+    // after the tag name is not a word boundary, and a non-ASCII space does not
+    // close a closing tag.
+    QCOMPARE( WebSite::detail::rewriteWebsiteLinks( QStringLiteral( "<span\u00e9>plain" ), page,
+                                                    QStringLiteral( "dict" ) ),
+              QStringLiteral( "<span\u00e9>plain" ) );
+    QCOMPARE( WebSite::detail::rewriteWebsiteLinks( QStringLiteral( "<div\u00e9>plain" ), page,
+                                                    QStringLiteral( "dict" ) ),
+              QStringLiteral( "<div\u00e9>plain" ) );
+    QCOMPARE( WebSite::detail::rewriteWebsiteLinks( QStringLiteral( "<span>text</span\u00a0>" ), page,
+                                                    QStringLiteral( "dict" ) ),
+              QStringLiteral( "<span>text</span\u00a0>" ) );
+
     // Unclosed span/div wrappers are still closed.
     QCOMPARE( WebSite::detail::rewriteWebsiteLinks( QStringLiteral( "<span><div>t" ), page,
                                                     QStringLiteral( "dict" ) ),

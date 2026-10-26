@@ -140,12 +140,17 @@ inline QString rewriteWebsiteLinks( QString html, QUrl const & pageUrl, QString 
     html = articleNewString;
   }
 
-  int openTags = html.count( QRegularExpression( QStringLiteral( "<\\s*span\\b" ), QRegularExpression::CaseInsensitiveOption ) );
-  int closedTags = html.count( QRegularExpression( QStringLiteral( "<\\s*/span\\s*>" ), QRegularExpression::CaseInsensitiveOption ) );
+  // QRegExp classified \s and \b with Unicode property tables; QRegularExpression
+  // only does so with this option, and the baseline counting depends on it
+  // (for example "<spané>" and "<span>text</span\u00a0>" must not be miscounted).
+  QRegularExpression::PatternOptions const balanceOptions =
+      QRegularExpression::CaseInsensitiveOption | QRegularExpression::UseUnicodePropertiesOption;
+  int openTags = html.count( QRegularExpression( QStringLiteral( "<\\s*span\\b" ), balanceOptions ) );
+  int closedTags = html.count( QRegularExpression( QStringLiteral( "<\\s*/span\\s*>" ), balanceOptions ) );
   while( openTags > closedTags ) { html += QStringLiteral( "</span>" ); closedTags += 1; }
 
-  openTags = html.count( QRegularExpression( QStringLiteral( "<\\s*div\\b" ), QRegularExpression::CaseInsensitiveOption ) );
-  closedTags = html.count( QRegularExpression( QStringLiteral( "<\\s*/div\\s*>" ), QRegularExpression::CaseInsensitiveOption ) );
+  openTags = html.count( QRegularExpression( QStringLiteral( "<\\s*div\\b" ), balanceOptions ) );
+  closedTags = html.count( QRegularExpression( QStringLiteral( "<\\s*/div\\s*>" ), balanceOptions ) );
   while( openTags > closedTags ) { html += QStringLiteral( "</div>" ); closedTags += 1; }
 
   return html;
