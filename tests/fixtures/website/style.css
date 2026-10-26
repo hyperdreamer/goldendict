@@ -1,0 +1,18 @@
+/*
+ * GoldenDict remote-website fixture stylesheet.
+ *
+ * The unique marker class paints the body of a fixture page, which proves the
+ * stylesheet was fetched from the page's own real origin (host and non-default
+ * port) rather than from a gdlookup document. The relative image rule is the
+ * second request the fixture server records for a page load.
+ */
+
+.website-marker {
+  color: rgb(17, 34, 51);
+  background-image: url(pixel.png);
+  background-repeat: repeat;
+}
+
+#height-target {
+  width: 100%;
+}

@@ -34,8 +34,11 @@
 #ifndef GOLDENDICT_TESTS_SUPPORT_FIXTURES_HH_INCLUDED
 #define GOLDENDICT_TESTS_SUPPORT_FIXTURES_HH_INCLUDED
 
+#include <QDBusConnection>
 #include <QString>
 #include <QStringList>
+
+#include <memory>
 
 namespace TestSupport {
 
@@ -113,6 +116,8 @@ QStringList compiledFeatureDefines();
 ///   "x11"        an X11 DISPLAY is connectable and the QPA is not forced elsewhere
 ///   "wayland"    a Wayland compositor socket is connectable
 ///   "webengine"  the QtWebEngineProcess helper of this Qt installation exists
+///   "dbus"       a dbus-daemon executable exists, so a private test bus can be
+///                started (see PrivateSessionBus)
 /// Unknown tokens are reported as unavailable: a typo must not pass a required
 /// suite. `reason` may be null.
 bool prerequisiteAvailable( QString const & token, QString * reason );
@@ -127,6 +132,71 @@ bool x11DisplayReachable( QString const & display, QString * reason );
 /// Bounded reachability probe of one WAYLAND_DISPLAY value, resolved against
 /// XDG_RUNTIME_DIR unless it is already a path. `reason` may be null.
 bool waylandDisplayReachable( QString const & waylandDisplay, QString * reason );
+
+/// A D-Bus daemon this process owns, on a socket path nobody else uses.
+///
+/// Portal tests must never touch the user's desktop bus: they start
+/// `dbus-daemon --session --nofork --print-address=1` as a child process, read
+/// the printed address back, connect to *that* address and only then export the
+/// fixture service. The daemon dies with this object.
+///
+/// Teardown order matters and is the caller's responsibility: destroy the
+/// exported objects (FakePortal, requests, backend) **before** this object, so
+/// no live object is left unexporting from a dead connection.
+struct PrivateSessionBusPrivate;
+
+class PrivateSessionBus
+{
+public:
+    PrivateSessionBus();
+    ~PrivateSessionBus();
+
+    PrivateSessionBus( PrivateSessionBus const & ) = delete;
+    PrivateSessionBus & operator=( PrivateSessionBus const & ) = delete;
+
+    /// Starts the daemon and connects to its printed address. Returns false with
+    /// a diagnostic reason when the executable is missing, prints no address, or
+    /// the connection cannot be established; a portal suite must fail on that.
+    bool start( QString * reason = nullptr );
+
+    /// Same, with an explicit executable. The self-tests use a nonexistent path
+    /// to prove that a missing bus is a required failure, never a silent skip.
+    bool start( QString const & daemonProgram, QString * reason );
+
+    /// Disconnects this process from the bus and terminates the daemon. Safe to
+    /// call twice.
+    void stop();
+
+    QString address() const;
+
+    /// The connection a *client* under test uses (PortalRequest, PortalBackend,
+    /// signals, calls). One named connection per process.
+    QDBusConnection connection() const;
+
+    /// A second connection to the same private daemon, for the fixture that
+    /// exports the fake service.
+    ///
+    /// The fixture must not share the client's connection: QtDBus short-circuits
+    /// a call between two objects of the same connection into a *local* call
+    /// that never reaches the bus, which turns the asynchronous portal protocol
+    /// (early Response before method result, owner change, service loss) into
+    /// something else entirely. Two connections to the same private daemon keep
+    /// the fixture a real remote peer.
+    QDBusConnection fixtureConnection() const;
+
+    bool isRunning() const;
+    qint64 daemonProcessId() const;
+
+    /// The connection names of the client and fixture connections. Distinct from
+    /// the session/system bus names, so nothing can accidentally resolve to them.
+    static QString connectionName();
+    static QString fixtureConnectionName();
+
+    static QString defaultDaemonProgram();
+
+private:
+    std::unique_ptr< PrivateSessionBusPrivate > d;
+};
 
 } // namespace TestSupport
 

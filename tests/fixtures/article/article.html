@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<!--
+  GoldenDict article fixture.
+
+  This file is the dictionary *body* the article tests inject in place of a real
+  backend: it keeps the exact structure ArticleMaker emits for two contributing
+  dictionaries (dict-a and dict-b) so a test can address `#gdfrom-dict-a`,
+  `#gdfrom-dict-b`, `#gdarticlefrom-dict-a` and the `gdactivearticle` class
+  without guessing markup.
+
+  Fixed oracles a suite may rely on:
+    * headword text                     `fixture-headword`
+    * active/dictionary wrappers        `gdfrom-dict-a`, `gdfrom-dict-b`
+    * early parser-time callback marker `#early-active-callback`
+    * late (delayed) callback marker    `#late-active-callback`
+    * internal bres image                `#bres-image`
+    * audio link                         `#gdau-link`
+    * long body text                     `#long-text` (repeatable, > 4 KiB)
+    * DSL optional part                  `#optional-part` inside `.dsl_opt`
+
+  The two callbacks are what the bridge tests need: the early one runs while the
+  parser is still building the document (before any JS handshake could be
+  ready), the late one runs 250 ms after parsing. Both call the bridge method
+  the production article page installs, and both degrade to the marker element
+  when it is absent, so the fixture never throws on its own.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>fixture-headword</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<span id="early-active-callback"></span>
+<script type="text/javascript">
+/* Early callback: fires during parsing, before the article bridge can be ready. */
+(function () {
+  var marker = document.getElementById('early-active-callback');
+  if (marker) { marker.setAttribute('data-called', 'early'); }
+  if (window.articleview && typeof articleview.onJsActiveArticleChanged === 'function') {
+    articleview.onJsActiveArticleChanged('gdfrom-dict-a');
+  }
+})();
+</script>
+<h1 id="headword">fixture-headword</h1>
+
+<div class="gdarticle gdactivearticle" id="gdfrom-dict-a" onClick="gdMakeArticleActive('dict-a');" onContextMenu="gdMakeArticleActive('dict-a');">
+  <div class="gddictname" id="gddictname-dict-a"><span class="gdfromprefix">From </span><span class="gddicttitle">Fixture Dictionary A</span></div>
+  <div class="gddictnamebodyseparator"></div>
+  <div class="gdarticlebody" id="gdarticlefrom-dict-a">
+    <p class="article-sentence" id="sentence-a">Alpha entry of the first fixture dictionary.</p>
+    <p class="gd-fixture-marker" id="style-marker">styled by the fixture stylesheet</p>
+    <p><img id="bres-image" src="bres://dict-a/fixture-image.png" alt="fixture image"></p>
+    <p><a id="gdau-link" href="gdau://dict-a/fixture-sound.ogg">fixture sound</a></p>
+    <div class="dsl_opt" id="optional-part"><p>Optional part of the Alpha entry.</p></div>
+    <div id="long-text">Long fixture body text used by the layout and history probes. </div>
+    <div class="gdarticle-selection" id="selection-target">selectable fixture text</div>
+    <div class="gdarticle-highlight" id="highlight-target">highlighted fixture text</div>
+    <div class="gdarticle-context" id="context-target">contextual fixture text</div>
+  </div>
+</div>
+
+<div class="gdarticle" id="gdfrom-dict-b" onClick="gdMakeArticleActive('dict-b');" onContextMenu="gdMakeArticleActive('dict-b');">
+  <div class="gddictname" id="gddictname-dict-b"><span class="gdfromprefix">From </span><span class="gddicttitle">Fixture Dictionary B</span></div>
+  <div class="gddictnamebodyseparator"></div>
+  <div class="gdarticlebody" id="gdarticlefrom-dict-b">
+    <p class="article-sentence" id="sentence-b">Beta entry of the second fixture dictionary.</p>
+    <p id="supplementary-text">Supplementary plane text: 😀 𝄞</p>
+    <p id="multilingual-text">Multilingual: Привет 中文 العربية</p>
+    <div class="dsl_opt" id="optional-part-b"><p>Optional part of the Beta entry.</p></div>
+  </div>
+</div>
+
+<span id="late-active-callback"></span>
+<script type="text/javascript">
+/* Late callback: 250 ms after parsing, still inside the same document. */
+(function () {
+  var repeat = function () { return 'long fixture body text used by the layout probes. '; };
+  var node = document.getElementById('long-text');
+  if (node) { for (var i = 0; i < 40; ++i) { node.appendChild(document.createTextNode(repeat())); } }
+  window.setTimeout(function () {
+    var marker = document.getElementById('late-active-callback');
+    if (marker) { marker.setAttribute('data-called', 'late'); }
+    if (window.articleview && typeof articleview.onJsActiveArticleChanged === 'function') {
+      articleview.onJsActiveArticleChanged('gdfrom-dict-b');
+    }
+  }, 250);
+})();
+</script>
+</body>
+</html>
