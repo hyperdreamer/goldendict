@@ -7,7 +7,10 @@
 #ifdef Q_OS_WIN32
 #include <windows.h>
 #elif defined(HAVE_X11)
-#include <QX11Info>
+// The X11 modifier state is read through the running session's display, never
+// through a display of our own: HAVE_X11 says this build can talk to Xlib, the
+// active QPA platform says whether there is anything to talk to.
+#include "platformwindow.hh"
 #include <X11/X.h>
 #include <X11/XKBlib.h>
 #elif defined Q_OS_MAC
@@ -17,9 +20,7 @@
 
 bool KeyboardState::checkModifiersPressed( int mask )
 {
-  #if defined(Q_WS_QWS)
-    return false;
-  #elif defined(Q_OS_WIN32)
+  #if defined(Q_OS_WIN32)
 
   return !(
     ( mask & Alt && !( GetAsyncKeyState( VK_MENU ) & 0x8000 ) ) ||
@@ -39,16 +40,27 @@ bool KeyboardState::checkModifiersPressed( int mask )
     ( mask & Ctrl && !( keys & ( 1 << cmdKeyBit ) ) ) ||
     ( mask & Shift && !( keys & ( 1 << shiftKeyBit ) ) ) ||
     ( mask & Win && !( keys & ( 1 << controlKeyBit ) ) ) );
-  #else
+  #elif defined(HAVE_X11)
+  Display * const display = PlatformWindow::x11Display();
+
+  if ( !display )
+  {
+    // A Wayland or offscreen session has no X11 modifier state to read. Nothing
+    // is claimed: only an empty request is trivially satisfied.
+    return mask == 0;
+  }
+
   XkbStateRec state;
 
-  XkbGetState( QX11Info::display(), XkbUseCoreKbd, &state );
+  XkbGetState( display, XkbUseCoreKbd, &state );
 
   return !(
     ( mask & Alt && !( state.base_mods & Mod1Mask ) ) ||
     ( mask & Ctrl && !( state.base_mods & ControlMask ) ) ||
     ( mask & Shift && !( state.base_mods & ShiftMask ) ) ||
     ( mask & Win && !( state.base_mods & Mod4Mask ) ) );
+  #else
+  // This build has no keyboard-state source at all.
+  return mask == 0;
   #endif
 }
-

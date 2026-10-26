@@ -33,21 +33,59 @@
 #include <QDir>
 #include <QDomDocument>
 #include <QDomElement>
+#include <QElapsedTimer>
 #include <QFile>
+#include <QHash>
 #include <QKeySequence>
 #include <QScopedPointer>
+#include <QSet>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QVector>
 
+#include <memory>
+
 #include "support/fixtures.hh"
 
 #include "audioplayerfactory.hh"
+#include "broken_xrecord.hh"
 #include "config.hh"
 #include "externalaudioplayer.hh"
 #include "ffmpegaudioplayer.hh"
 #include "hotkeybackend.hh"
 #include "hotkeysyntax.hh"
+#include "hotkeywrapper.hh"
+#include "keyboardstate.hh"
+#include "platformwindow.hh"
+
+// Xlib last, because Qt's own headers reject a Status/Bool definition that
+// precedes them, and its colliding macros dropped below the way fixx11h.h does it
+// for the application: the recorder fixtures need the server's own keymap and
+// input generator, the rest of this suite stays free of Xlib's identifiers.
+#ifdef HAVE_X11
+#include <X11/Xlib.h>
+#include <X11/keysym.h>
+#include <X11/extensions/XTest.h>
+
+#undef Bool
+#undef None
+#undef Status
+#undef Success
+#undef KeyPress
+#undef KeyRelease
+#undef Above
+#undef Below
+#undef Expose
+#undef FocusIn
+#undef FocusOut
+#undef Always
+#undef Unsorted
+#undef GrayScale
+#undef CursorShape
+#undef FontChange
+#undef min
+#undef max
+#endif
 
 namespace {
 
@@ -136,6 +174,204 @@ bool hasFfmpegPlayer()
   return TestSupport::compiledFeatureDefines().contains( QStringLiteral( "MAKE_FFMPEG_PLAYER" ) );
 }
 
+/// True when the running QPA is an actual X11 session. HAVE_X11 is only a build
+/// capability: the cases that bind real X11 combinations assert this instead of
+/// assuming that the gate happens to be xcb.
+bool xcbSession()
+{
+  return HotkeyRuntime::isX11Session( QGuiApplication::platformName() );
+}
+
+/// A recorder session with no server behind it. It records what the production
+/// recorder asks of its session (keycodes and grabs) and feeds key transitions
+/// back in through the production sink, so every recording rule is driven without
+/// a RECORD server. Its keymap is the fixture's own, so no assertion depends on
+/// the host's keyboard layout.
+class FixtureRecorderSession : public RecorderSession
+{
+public:
+  /// Counts destructions so a test can prove an abandoned session stays alive.
+  static inline int destroyedCount = 0;
+  ~FixtureRecorderSession() override { ++destroyedCount; }
+  enum Codes : quint32
+  {
+    LeftShift = 50,
+    RightShift = 62,
+    LeftControl = 37,
+    RightControl = 105,
+    LeftAlt = 64,
+    RightAlt = 108,
+    LeftMeta = 133,
+    RightMeta = 134,
+    KeyG = 55,
+    KeyC = 54,
+    KeyF = 41,
+    KeyInsert = 118,
+    KeyKeypadInsert = 119
+  };
+
+  FixtureRecorderSession()
+  {
+    modifiers.leftShift = LeftShift;
+    modifiers.rightShift = RightShift;
+    modifiers.leftControl = LeftControl;
+    modifiers.rightControl = RightControl;
+    modifiers.leftAlt = LeftAlt;
+    modifiers.rightAlt = RightAlt;
+    modifiers.leftMeta = LeftMeta;
+    modifiers.rightMeta = RightMeta;
+
+    cCode = KeyC;
+    insertCode = KeyInsert;
+    keypadInsertCode = KeyKeypadInsert;
+  }
+
+  bool start( QString * error ) override
+  {
+    Q_UNUSED( error )
+    running = true;
+    return true;
+  }
+
+  RecorderSession::Shutdown stop() override { running = false; return RecorderSession::Shutdown::Joined; }
+
+  quint32 keyCodeForQtKey( int key ) override { return quint32( key ) & 0xff; }
+
+  quint32 keyCodeForKeysymName( QString const & name ) override
+  {
+    if ( name == QStringLiteral( "g" ) )
+      return KeyG;
+    if ( name == QStringLiteral( "c" ) )
+      return KeyC;
+    if ( name == QStringLiteral( "F" ) )
+      return KeyF;
+    if ( name == QStringLiteral( "Insert" ) )
+      return KeyInsert;
+    if ( name == QStringLiteral( "KP_Insert" ) )
+      return KeyKeypadInsert;
+    return 0;
+  }
+
+  RecorderModifierKeycodes modifierKeyCodes() const override { return modifiers; }
+  quint32 copyKeyCode() const override { return cCode; }
+  quint32 insertKeyCode() const override { return insertCode; }
+  quint32 keypadInsertKeyCode() const override { return keypadInsertCode; }
+
+  bool grab( quint32 keyCode, quint32 modifiersValue ) override
+  {
+    grabCalls.append( qMakePair( keyCode, modifiersValue ) );
+
+    if ( refuseGrabs )
+      return false;
+
+    grabs.insert( qMakePair( keyCode, modifiersValue ) );
+    return true;
+  }
+
+  void ungrab( quint32 keyCode, quint32 modifiersValue ) override
+  {
+    ungrabCalls.append( qMakePair( keyCode, modifiersValue ) );
+    grabs.remove( qMakePair( keyCode, modifiersValue ) );
+  }
+
+  void ungrabAll() override
+  {
+    for( QPair< quint32, quint32 > const & grab : grabs )
+      ungrabCalls.append( grab );
+    grabs.clear();
+  }
+
+  void setEventSink( RecorderEventSink * sinkValue ) override { sink = sinkValue; }
+  bool isEventSink( RecorderEventSink const * sinkValue ) const override { return sink == sinkValue; }
+
+  /// The server side of the fixture: one recorded key transition arriving from the
+  /// recording thread.
+  void pressRecorded( quint32 keyCode )
+  {
+    if ( sink )
+      sink->postRecordedKey( true, keyCode );
+  }
+
+  void releaseRecorded( quint32 keyCode )
+  {
+    if ( sink )
+      sink->postRecordedKey( false, keyCode );
+  }
+
+  bool holdsGrab( quint32 keyCode, quint32 modifiersValue ) const
+  {
+    return grabs.contains( qMakePair( keyCode, modifiersValue ) );
+  }
+
+  bool running = false;
+  bool refuseGrabs = false;
+  RecorderModifierKeycodes modifiers;
+  quint32 cCode = 0;
+  quint32 insertCode = 0;
+  quint32 keypadInsertCode = 0;
+  QSet< QPair< quint32, quint32 > > grabs;
+  QVector< QPair< quint32, quint32 > > grabCalls;
+  QVector< QPair< quint32, quint32 > > ungrabCalls;
+  RecorderEventSink * sink = nullptr;
+};
+
+#ifdef HAVE_X11
+/// Set by the X11 error handler below, so a refused grab is a return value instead
+/// of a message on stderr and a process-wide handler left behind.
+bool secondClientGrabError = false;
+
+int secondClientGrabErrorHandler( Display *, XErrorEvent * event )
+{
+  if ( event->error_code == BadAccess )
+    secondClientGrabError = true;
+  return 0;
+}
+
+/// True when another X client can still take the combination, i.e. this process
+/// does not hold it. The attempt is made on a connection of its own, because
+/// Xlib only refuses a grab that another *client* holds.
+bool anotherClientCanGrab( quint32 keyCode, quint32 modifiers )
+{
+  Display * const display = XOpenDisplay( nullptr );
+
+  if ( !display )
+    return false;
+
+  bool const previousError = secondClientGrabError;
+  secondClientGrabError = false;
+
+  int ( *previousHandler )( Display *, XErrorEvent * ) = XSetErrorHandler( secondClientGrabErrorHandler );
+
+  XGrabKey( display, keyCode, modifiers, DefaultRootWindow( display ), True, GrabModeAsync, GrabModeAsync );
+  XSync( display, False );
+
+  bool const took = !secondClientGrabError;
+
+  if ( took )
+    XUngrabKey( display, keyCode, modifiers, DefaultRootWindow( display ) );
+
+  XSync( display, False );
+
+  XSetErrorHandler( previousHandler );
+  secondClientGrabError = previousError;
+  XCloseDisplay( display );
+
+  return took;
+}
+
+/// Presses and releases one key on the server's own input generator, i.e. exactly
+/// the way a user would: the RECORD context sees a real device event.
+bool fakeKey( Display * display, KeySym keySym, bool press )
+{
+  KeyCode const keyCode = XKeysymToKeycode( display, keySym );
+
+  if ( keyCode == 0 )
+    return false;
+
+  return XTestFakeKeyEvent( display, keyCode, press ? True : False, 0 ) != 0;
+}
+#endif
+
 } // namespace
 
 class TstHotkeys : public QObject
@@ -166,6 +402,24 @@ private slots:
   void backendContractSignatures();
   void backendPublishesBindingActivationAndStateContract();
   void unsupportedBackendStillReportsState();
+
+  // The X11 recorder (§2.10): platform gate, matcher, core and backend.
+  void x11SessionNamesAreDecidedCaseInsensitively_data();
+  void x11SessionNamesAreDecidedCaseInsensitively();
+  void recorderModifierTrackingUsesTheXProtocolMasks();
+  void recorderMatcherActivatesASingleKeyCombination();
+  void recorderMatcherHandlesTwoKeyAndRepeatedPresses();
+  void recorderCoreGrabsTheSecondKeyAndReleasesItAgain();
+  void recorderCoreSecondKeyWindowExpiresAndRestarts();
+  void recorderCoreRefusedGrabIsReportedNotFatal();
+  void nonXcbCapability();
+  void recorderBackendBindsStableIdsAndReportsEmptyTokens();
+  void recorderBackendReportsUnbindableSequences();
+  void recorderBackendRetiresItsBindings();
+  void xcbRecorderDeliversTheCombinationThroughRecord();
+  void brokenXRecordCheckToleratesASessionWithoutDisplay();
+  void keyboardStateNeverClaimsAModifierWithoutADisplay();
+  void shutdownPolicyAbandonsAWedgedRecorderInsteadOfHanging();
 
   // Legacy configuration loading and the audio backend migration.
   void legacyConfigLoadsWithoutRewriting();
@@ -1151,6 +1405,624 @@ void TstHotkeys::recorderEditClearsTheRawTextMarker()
               .namedItem( QStringLiteral( "clipboardHotkey" ) )
               .toElement().text(),
             QStringLiteral( "Ctrl+F11,F11,F11" ) );
+}
+
+// ---------------------------------------------------------------------------
+// The X11 recorder
+// ---------------------------------------------------------------------------
+
+void TstHotkeys::x11SessionNamesAreDecidedCaseInsensitively_data()
+{
+  QTest::addColumn< QString >( "platformName" );
+  QTest::addColumn< bool >( "x11Session" );
+
+  // The names a QPA actually reports, including the capitalised spelling that a
+  // case-sensitive comparison gets wrong, and names that merely contain "xcb".
+  QTest::newRow( "xcb" ) << QStringLiteral( "xcb" ) << true;
+  QTest::newRow( "xcb capitalised" ) << QStringLiteral( "XCB" ) << true;
+  QTest::newRow( "xcb variant" ) << QStringLiteral( "xcb-gl" ) << true;
+  QTest::newRow( "wayland" ) << QStringLiteral( "wayland" ) << false;
+  QTest::newRow( "Wayland capitalised" ) << QStringLiteral( "Wayland" ) << false;
+  QTest::newRow( "WAYLAND" ) << QStringLiteral( "WAYLAND" ) << false;
+  QTest::newRow( "wayland-egl" ) << QStringLiteral( "wayland-egl" ) << false;
+  QTest::newRow( "wayland plus xcb" ) << QStringLiteral( "wayland/xcb" ) << false;
+  QTest::newRow( "offscreen" ) << QStringLiteral( "offscreen" ) << false;
+  QTest::newRow( "minimal" ) << QStringLiteral( "minimal" ) << false;
+  QTest::newRow( "empty" ) << QString() << false;
+}
+
+void TstHotkeys::x11SessionNamesAreDecidedCaseInsensitively()
+{
+  QFETCH( QString, platformName );
+  QFETCH( bool, x11Session );
+
+  QCOMPARE( HotkeyRuntime::isX11Session( platformName ), x11Session );
+}
+
+void TstHotkeys::recorderModifierTrackingUsesTheXProtocolMasks()
+{
+  // The masks a decision carries are handed to XGrabKey/XUngrabKey unchanged, so
+  // they must be the X protocol's own values and nothing invented.
+#ifdef HAVE_X11
+  QCOMPARE( int( RecorderShiftMask ), int( ShiftMask ) );
+  QCOMPARE( int( RecorderControlMask ), int( ControlMask ) );
+  QCOMPARE( int( RecorderAltMask ), int( Mod1Mask ) );
+  QCOMPARE( int( RecorderMetaMask ), int( Mod4Mask ) );
+#else
+  QCOMPARE( int( RecorderShiftMask ), 1 );
+  QCOMPARE( int( RecorderControlMask ), 4 );
+  QCOMPARE( int( RecorderAltMask ), 8 );
+  QCOMPARE( int( RecorderMetaMask ), 64 );
+#endif
+
+  FixtureRecorderSession session;
+  RecorderMatcher matcher;
+  matcher.setModifierKeyCodes( session.modifierKeyCodes() );
+
+  QVERIFY( matcher.isModifierKeyCode( FixtureRecorderSession::LeftControl ) );
+  QVERIFY( matcher.isModifierKeyCode( FixtureRecorderSession::RightControl ) );
+  QVERIFY( !matcher.isModifierKeyCode( FixtureRecorderSession::KeyG ) );
+
+  QCOMPARE( matcher.modifiers(), 0u );
+  QCOMPARE( matcher.modifierPressed( FixtureRecorderSession::LeftControl ),
+            quint32( RecorderControlMask ) );
+  QCOMPARE( matcher.modifierPressed( FixtureRecorderSession::RightShift ),
+            quint32( RecorderControlMask | RecorderShiftMask ) );
+  // Releasing a key that is not held changes nothing.
+  QCOMPARE( matcher.modifierReleased( FixtureRecorderSession::RightShift ),
+            quint32( RecorderControlMask ) );
+  QCOMPARE( matcher.modifierReleased( FixtureRecorderSession::LeftControl ), 0u );
+
+  // Both sides of one modifier carry the same mask.
+  QCOMPARE( RecorderMatcher::modifierFlagForKeyCode( FixtureRecorderSession::RightAlt,
+                                                     session.modifierKeyCodes() ),
+            quint32( RecorderAltMask ) );
+  QCOMPARE( RecorderMatcher::modifierFlagForKeyCode( FixtureRecorderSession::KeyG,
+                                                     session.modifierKeyCodes() ),
+            quint32( 0 ) );
+}
+
+void TstHotkeys::recorderMatcherActivatesASingleKeyCombination()
+{
+  FixtureRecorderSession session;
+  RecorderMatcher matcher;
+  matcher.setModifierKeyCodes( session.modifierKeyCodes() );
+  matcher.setCopyKeyCodes( session.copyKeyCode(), session.insertKeyCode(),
+                           session.keypadInsertKeyCode() );
+
+  matcher.addBinding( FixtureRecorderSession::KeyG, 0,
+                      RecorderControlMask | RecorderAltMask, 7 );
+  QCOMPARE( matcher.bindings().size(), 1 );
+
+  matcher.modifierPressed( FixtureRecorderSession::LeftControl );
+  matcher.modifierPressed( FixtureRecorderSession::LeftAlt );
+
+  RecorderMatcher::Decision decision = matcher.press( FixtureRecorderSession::KeyG,
+                                                      matcher.modifiers() );
+  QCOMPARE( int( decision.kind ), int( RecorderMatcher::Kind::Activated ) );
+  QCOMPARE( decision.handle, 7 );
+
+  // The modifiers are part of the combination: the same key alone is nothing.
+  matcher.modifierReleased( FixtureRecorderSession::LeftAlt );
+  decision = matcher.press( FixtureRecorderSession::KeyG, matcher.modifiers() );
+  QCOMPARE( int( decision.kind ), int( RecorderMatcher::Kind::Ignored ) );
+
+  matcher.modifierReleased( FixtureRecorderSession::LeftControl );
+  QCOMPARE( matcher.modifiers(), 0u );
+  decision = matcher.press( FixtureRecorderSession::KeyG, matcher.modifiers() );
+  QCOMPARE( int( decision.kind ), int( RecorderMatcher::Kind::Ignored ) );
+
+  // Neither does another key with the right modifiers.
+  matcher.modifierPressed( FixtureRecorderSession::LeftControl );
+  matcher.modifierPressed( FixtureRecorderSession::LeftAlt );
+  decision = matcher.press( FixtureRecorderSession::KeyF, matcher.modifiers() );
+  QCOMPARE( int( decision.kind ), int( RecorderMatcher::Kind::Ignored ) );
+}
+
+void TstHotkeys::recorderMatcherHandlesTwoKeyAndRepeatedPresses()
+{
+  FixtureRecorderSession session;
+  RecorderMatcher matcher;
+  matcher.setModifierKeyCodes( session.modifierKeyCodes() );
+  matcher.setCopyKeyCodes( session.copyKeyCode(), session.insertKeyCode(),
+                           session.keypadInsertKeyCode() );
+  matcher.modifierPressed( FixtureRecorderSession::LeftControl );
+
+  // The stored Ctrl+C,C layout: the first key starts a 500 ms window, the same key
+  // pressed again inside it is the second key.
+  matcher.addBinding( FixtureRecorderSession::KeyC, FixtureRecorderSession::KeyC,
+                      RecorderControlMask, 9 );
+
+  RecorderMatcher::Decision decision = matcher.press( FixtureRecorderSession::KeyC,
+                                                      matcher.modifiers() );
+  QCOMPARE( int( decision.kind ), int( RecorderMatcher::Kind::SecondKeyWait ) );
+  QCOMPARE( decision.handle, 9 );
+  QCOMPARE( decision.secondKey, quint32( FixtureRecorderSession::KeyC ) );
+  QCOMPARE( decision.secondKeyModifiers, quint32( RecorderControlMask ) );
+  // The combination begins with the copy key, so its second key is grabbed: the
+  // double press has to reach the recorder rather than the application.
+  QVERIFY( decision.grabSecondKey );
+  QVERIFY( matcher.awaitingSecondKey() );
+  QCOMPARE( matcher.awaitedHandle(), 9 );
+
+  decision = matcher.press( FixtureRecorderSession::KeyC, matcher.modifiers() );
+  QCOMPARE( int( decision.kind ), int( RecorderMatcher::Kind::Activated ) );
+  QCOMPARE( decision.handle, 9 );
+  QVERIFY( !matcher.awaitingSecondKey() );
+
+  // A second key with a different modifier mask is not the awaited press, and the
+  // wait does not survive it: a later Ctrl+C starts a new window instead of firing
+  // the one that was abandoned.
+  decision = matcher.press( FixtureRecorderSession::KeyC, matcher.modifiers() );
+  QCOMPARE( int( decision.kind ), int( RecorderMatcher::Kind::SecondKeyWait ) );
+  decision = matcher.press( FixtureRecorderSession::KeyC, 0 );
+  QCOMPARE( int( decision.kind ), int( RecorderMatcher::Kind::Ignored ) );
+  QVERIFY( !matcher.awaitingSecondKey() );
+  decision = matcher.press( FixtureRecorderSession::KeyC, matcher.modifiers() );
+  QCOMPARE( int( decision.kind ), int( RecorderMatcher::Kind::SecondKeyWait ) );
+
+  // The timeout cancels the wait without an activation.
+  matcher.cancelSecondKeyWait();
+  QVERIFY( !matcher.awaitingSecondKey() );
+
+  // A combination that begins with a non-copy key and ends with the copy key must
+  // not grab that copy key: pressing Ctrl+F and then Ctrl+C has to let the copy
+  // through to the application below.
+  matcher.clearBindings();
+  matcher.addBinding( FixtureRecorderSession::KeyF, FixtureRecorderSession::KeyC,
+                      RecorderControlMask, 3 );
+  decision = matcher.press( FixtureRecorderSession::KeyF, matcher.modifiers() );
+  QCOMPARE( int( decision.kind ), int( RecorderMatcher::Kind::SecondKeyWait ) );
+  QVERIFY2( !decision.grabSecondKey,
+            "grabbing the second copy key would swallow the application's copy" );
+}
+
+void TstHotkeys::recorderCoreGrabsTheSecondKeyAndReleasesItAgain()
+{
+  FixtureRecorderSession session;
+  RecorderCore core( &session );
+  QSignalSpy activations( &core, &RecorderCore::activated );
+
+  // A plain combination is grabbed as soon as it is bound: other clients must not
+  // receive it.
+  core.addBinding( FixtureRecorderSession::KeyG, 0,
+                   RecorderControlMask | RecorderAltMask, 7 );
+  QVERIFY( core.isGrabbed( FixtureRecorderSession::KeyG,
+                           RecorderControlMask | RecorderAltMask ) );
+  QCOMPARE( session.grabCalls.size(), 1 );
+
+  // The copy combination is not grabbed before its first key: the copy still has to
+  // reach the application.
+  core.addBinding( FixtureRecorderSession::KeyC, FixtureRecorderSession::KeyC,
+                   RecorderControlMask, 9 );
+  QVERIFY( !session.holdsGrab( FixtureRecorderSession::KeyC, RecorderControlMask ) );
+  QCOMPARE( session.grabCalls.size(), 1 );
+
+  session.pressRecorded( FixtureRecorderSession::LeftControl );
+  session.pressRecorded( FixtureRecorderSession::KeyC );
+
+  QCOMPARE( activations.count(), 0 );
+  QVERIFY( core.matcher().awaitingSecondKey() );
+  // While the second key is awaited it is grabbed, so the second copy cannot be
+  // swallowed by the application below either.
+  QVERIFY( session.holdsGrab( FixtureRecorderSession::KeyC, RecorderControlMask ) );
+
+  session.pressRecorded( FixtureRecorderSession::KeyC );
+  QCOMPARE( activations.count(), 1 );
+  QCOMPARE( activations.at( 0 ).at( 0 ).toInt(), 9 );
+  // ... and released again once it has been used.
+  QVERIFY( !session.holdsGrab( FixtureRecorderSession::KeyC, RecorderControlMask ) );
+
+  // An unrelated press ends a wait and releases its grab with it.
+  session.pressRecorded( FixtureRecorderSession::KeyC );
+  QVERIFY( session.holdsGrab( FixtureRecorderSession::KeyC, RecorderControlMask ) );
+  session.pressRecorded( FixtureRecorderSession::KeyC );
+  QCOMPARE( activations.count(), 2 );
+  QVERIFY( !session.holdsGrab( FixtureRecorderSession::KeyC, RecorderControlMask ) );
+
+  core.clear();
+  QVERIFY( session.grabs.isEmpty() );
+}
+
+void TstHotkeys::recorderCoreSecondKeyWindowExpiresAndRestarts()
+{
+  QCOMPARE( RecorderMatcher::secondKeyTimeoutMs, 500 );
+
+  FixtureRecorderSession session;
+  RecorderCore core( &session );
+  QSignalSpy activations( &core, &RecorderCore::activated );
+
+  core.addBinding( FixtureRecorderSession::KeyC, FixtureRecorderSession::KeyC,
+                   RecorderControlMask, 9 );
+  session.pressRecorded( FixtureRecorderSession::LeftControl );
+
+  QElapsedTimer elapsed;
+  elapsed.start();
+  session.pressRecorded( FixtureRecorderSession::KeyC );
+  QVERIFY( core.matcher().awaitingSecondKey() );
+  QVERIFY( session.holdsGrab( FixtureRecorderSession::KeyC, RecorderControlMask ) );
+
+  // The window really expires: no activation, and the grab is released so the copy
+  // key works again.
+  QTRY_VERIFY_WITH_TIMEOUT( !core.matcher().awaitingSecondKey(), 3000 );
+  QVERIFY2( elapsed.elapsed() >= RecorderMatcher::secondKeyTimeoutMs,
+            "the second-key window expired early" );
+  QCOMPARE( activations.count(), 0 );
+  QVERIFY( !session.holdsGrab( FixtureRecorderSession::KeyC, RecorderControlMask ) );
+
+  // A press after the window starts a fresh one instead of completing the expired
+  // one, and the fresh window drives the same activation.
+  session.pressRecorded( FixtureRecorderSession::KeyC );
+  QVERIFY( core.matcher().awaitingSecondKey() );
+  QCOMPARE( activations.count(), 0 );
+  session.pressRecorded( FixtureRecorderSession::KeyC );
+  QCOMPARE( activations.count(), 1 );
+  QCOMPARE( activations.at( 0 ).at( 0 ).toInt(), 9 );
+}
+
+void TstHotkeys::recorderCoreRefusedGrabIsReportedNotFatal()
+{
+  FixtureRecorderSession session;
+  session.refuseGrabs = true;
+
+  RecorderCore core( &session );
+  QSignalSpy activations( &core, &RecorderCore::activated );
+
+  core.addBinding( FixtureRecorderSession::KeyG, 0,
+                   RecorderControlMask | RecorderAltMask, 7 );
+
+  // The attempt was made and refused; the core never pretends to hold the grab.
+  QCOMPARE( session.grabCalls.size(), 1 );
+  QVERIFY( !core.isGrabbed( FixtureRecorderSession::KeyG,
+                            RecorderControlMask | RecorderAltMask ) );
+
+  // Recording does not depend on the grab, so the combination still fires.
+  session.pressRecorded( FixtureRecorderSession::LeftControl );
+  session.pressRecorded( FixtureRecorderSession::LeftAlt );
+  session.pressRecorded( FixtureRecorderSession::KeyG );
+  QCOMPARE( activations.count(), 1 );
+  QCOMPARE( activations.at( 0 ).at( 0 ).toInt(), 7 );
+}
+
+void TstHotkeys::shutdownPolicyAbandonsAWedgedRecorderInsteadOfHanging()
+{
+  // A blocking XRecordEnableContext cannot be cancelled from another connection,
+  // so the rule is: a loop that returned by the shutdown bound is joined, one that
+  // did not is abandoned. A wedged X server cannot be produced inside the gate, so
+  // the policy is pinned directly here, and the parking helper is pinned by
+  // showing that it does not destroy the session handed to it.
+  QVERIFY( HotkeyRuntime::recordingLoopReturnedInTime( true ) );
+  QVERIFY( !HotkeyRuntime::recordingLoopReturnedInTime( false ) );
+
+  int const destroyedBefore = FixtureRecorderSession::destroyedCount;
+  {
+    std::unique_ptr< RecorderSession > owned( new FixtureRecorderSession() );
+    parkAbandonedRecorder( std::move( owned ), nullptr );
+
+    // A parked core must survive its former QObject owner: if the parent is not
+    // detached before parking, destroying the owner frees the core the detached
+    // worker may still be inside.
+    FixtureRecorderSession session;
+    QObject * const owner = new QObject();
+    auto * const core = new RecorderCore( &session, owner );
+    QPointer< RecorderCore > watch( core );
+
+    std::unique_ptr< RecorderSession > parkedSession( new FixtureRecorderSession() );
+    parkAbandonedRecorder( std::move( parkedSession ),
+                           std::unique_ptr< RecorderCore >( core ) );
+    delete owner;
+
+    QVERIFY2( !watch.isNull(), "parking must detach the core from its QObject parent" );
+  }
+  // Exactly one fixture session was destroyed here: the stack-local one used to
+  // own a core. The parked sessions must still be alive, because a detached
+  // recording thread would otherwise be reading freed storage.
+  QCOMPARE( FixtureRecorderSession::destroyedCount, destroyedBefore + 1 );
+}
+
+void TstHotkeys::nonXcbCapability()
+{
+  // This case is the required offscreen run of this suite:
+  //   QT_QPA_PLATFORM=offscreen timeout 60 tests/tst_hotkeys/tst_hotkeys nonXcbCapability
+  // On an xcb session there is a display and nothing to disable, so the case is
+  // not applicable there instead of being green by accident.
+  if( HotkeyRuntime::isX11Session( QGuiApplication::platformName() ) )
+    QSKIP( "start the suite with a non-X11 QPA (QT_QPA_PLATFORM=offscreen) for this case" );
+
+  QVERIFY( !QGuiApplication::platformName().startsWith( QStringLiteral( "xcb" ) ) );
+
+#ifdef HAVE_X11
+  X11RecordBackend backend;
+  QSignalSpy activations( &backend, &HotkeyBackend::activated );
+
+  QVERIFY( !backend.isSupported() );
+
+  backend.bind( { { QStringLiteral( "main-window" ), QStringLiteral( "Main window" ),
+                    QStringLiteral( "Ctrl+Alt+G" ) } } );
+  backend.unbind();
+
+  QCOMPARE( activations.count(), 0 );
+
+  // A session without an X11 display gets a concrete disabled backend that
+  // explains itself, never a silent no-op and never a fallback.
+  QCOMPARE( backend.state(), HotkeyBackend::State::Unsupported );
+  QVERIFY( !backend.explanation().isEmpty() );
+  QVERIFY( backend.explanation().contains( QGuiApplication::platformName() ) );
+
+  // And every Xlib call of the recorder lives behind the session factory, which
+  // answers only for an xcb session: nothing here can open a display.
+  QVERIFY( !createRecorderSession() );
+  QVERIFY( !PlatformWindow::x11Display() );
+  QVERIFY( !HotkeyRuntime::isX11Session( QGuiApplication::platformName() ) );
+#endif
+
+  // The other X11 consumers of the hotkey machinery are gated the same way: on this
+  // session they answer instead of asking a null display.
+  QCOMPARE( isRECORDBroken(), false );
+
+  KeyboardState state;
+  QVERIFY( state.checkModifiersPressed( 0 ) );
+  QVERIFY( !state.checkModifiersPressed( KeyboardState::Alt ) );
+  QVERIFY( !state.checkModifiersPressed( KeyboardState::Ctrl | KeyboardState::Shift ) );
+
+  // The historical integer-handle wrapper is gated the same way.
+  HotkeyWrapper wrapper( nullptr );
+  QVERIFY( !wrapper.setGlobalKey( int( Qt::Key_G ), 0,
+                                  Qt::ControlModifier | Qt::AltModifier, 0 ) );
+}
+
+void TstHotkeys::recorderBackendBindsStableIdsAndReportsEmptyTokens()
+{
+#ifdef HAVE_X11
+  QVERIFY2( xcbSession(), "this case binds real X11 combinations and needs the xcb gate" );
+
+  Display * const display = PlatformWindow::x11Display();
+  QVERIFY( display != nullptr );
+
+  X11RecordBackend backend;
+  QVERIFY( backend.isSupported() );
+  QCOMPARE( backend.state(), HotkeyBackend::State::Ready );
+
+  QSignalSpy activations( &backend, &HotkeyBackend::activated );
+  QSignalSpy states( &backend, &HotkeyBackend::stateChanged );
+
+  backend.bind( { { QStringLiteral( "main-window" ), QStringLiteral( "Main window" ),
+                    QStringLiteral( "CTRL+ALT+g" ) },
+                  { QStringLiteral( "clipboard-lookup" ), QStringLiteral( "Clipboard lookup" ),
+                    QStringLiteral( "CTRL+C" ) } } );
+
+  QCOMPARE( backend.state(), HotkeyBackend::State::Bound );
+  QCOMPARE( states.count(), 1 );
+  QCOMPARE( states.at( 0 ).at( 0 ).value< HotkeyBackend::State >(),
+            HotkeyBackend::State::Bound );
+  QVERIFY( backend.explanation().isEmpty() );
+
+  int const mainHandle = backend.handleForId( QStringLiteral( "main-window" ) );
+  int const clipboardHandle = backend.handleForId( QStringLiteral( "clipboard-lookup" ) );
+  QVERIFY( mainHandle > 0 );
+  QVERIFY( clipboardHandle > 0 );
+  QVERIFY( mainHandle != clipboardHandle );
+
+  quint32 const control = XKeysymToKeycode( display, XK_Control_L );
+  quint32 const alt = XKeysymToKeycode( display, XK_Alt_L );
+  quint32 const g = backend.keyCodeForKey( int( Qt::Key_G ) );
+  quint32 const c = backend.keyCodeForKey( int( Qt::Key_C ) );
+  QVERIFY( control != 0 );
+  QVERIFY( alt != 0 );
+  QVERIFY( g != 0 );
+  QVERIFY( c != 0 );
+
+  // The live session really holds the bound combination: a second client is refused
+  // it. That is what "the recorder hooked it" means to the rest of the system.
+  QVERIFY2( !anotherClientCanGrab( g, RecorderControlMask | RecorderAltMask ),
+            "the bound combination was not grabbed on the running server" );
+  // The copy combination must not be grabbed: its press has to reach the
+  // application, which is the difference between recording and swallowing a copy.
+  QVERIFY2( anotherClientCanGrab( c, RecorderControlMask ),
+            "the plain copy combination must stay available to other clients" );
+
+  // An activation reports the ID of the combination that fired, with an empty
+  // token: X11 has no portal activation token and none is invented.
+  backend.recordedKey( true, control );
+  backend.recordedKey( true, alt );
+  backend.recordedKey( true, g );
+  QCOMPARE( activations.count(), 1 );
+  QCOMPARE( activations.at( 0 ).at( 0 ).toString(), QStringLiteral( "main-window" ) );
+  QCOMPARE( activations.at( 0 ).at( 1 ).toString(), QString() );
+
+  backend.recordedKey( false, g );
+  backend.recordedKey( false, alt );
+  backend.recordedKey( false, control );
+
+  // The second combination reports its own ID, never the first one.
+  backend.recordedKey( true, control );
+  backend.recordedKey( true, c );
+  backend.recordedKey( false, c );
+  backend.recordedKey( false, control );
+  QCOMPARE( activations.count(), 2 );
+  QCOMPARE( activations.at( 1 ).at( 0 ).toString(),
+            QStringLiteral( "clipboard-lookup" ) );
+  QCOMPARE( activations.at( 1 ).at( 1 ).toString(), QString() );
+
+  // A key that is bound to nothing reports nothing: no clipboard fallback, no
+  // invented activation.
+  backend.recordedKey( true, XKeysymToKeycode( display, XK_z ) );
+  QCOMPARE( activations.count(), 2 );
+
+  backend.unbind();
+#else
+  QSKIP( "this build has no X11 capability, so there is no X11 backend to bind" );
+#endif
+}
+
+void TstHotkeys::recorderBackendReportsUnbindableSequences()
+{
+#ifdef HAVE_X11
+  QVERIFY2( xcbSession(), "this case binds real X11 combinations and needs the xcb gate" );
+
+  X11RecordBackend backend;
+  QSignalSpy activations( &backend, &HotkeyBackend::activated );
+
+  backend.bind( { { QStringLiteral( "main-window" ), QStringLiteral( "Main window" ),
+                    QStringLiteral( "CTRL+ALT+g" ) },
+                  { QStringLiteral( "clipboard-lookup" ), QStringLiteral( "Clipboard lookup" ),
+                    QStringLiteral( "CTRL+F11,F11" ) } } );
+
+  // A sequence the recorder cannot represent is reported, never dropped silently
+  // and never rewritten into something else.
+  QCOMPARE( backend.state(), HotkeyBackend::State::Partial );
+  QVERIFY( backend.handleForId( QStringLiteral( "main-window" ) ) > 0 );
+  QCOMPARE( backend.handleForId( QStringLiteral( "clipboard-lookup" ) ), 0 );
+  QVERIFY( backend.explanation().contains( QStringLiteral( "clipboard-lookup" ) ) );
+
+  // The bindable half still works.
+  Display * const display = PlatformWindow::x11Display();
+  QVERIFY( display != nullptr );
+  backend.recordedKey( true, XKeysymToKeycode( display, XK_Control_L ) );
+  backend.recordedKey( true, XKeysymToKeycode( display, XK_Alt_L ) );
+  backend.recordedKey( true, backend.keyCodeForKey( int( Qt::Key_G ) ) );
+  QCOMPARE( activations.count(), 1 );
+  QCOMPARE( activations.at( 0 ).at( 0 ).toString(), QStringLiteral( "main-window" ) );
+
+  // A trigger with a modifier the recorder does not know is refused as well.
+  backend.bind( { { QStringLiteral( "main-window" ), QStringLiteral( "Main window" ),
+                    QStringLiteral( "HYPER+a" ) } } );
+  QCOMPARE( backend.state(), HotkeyBackend::State::Unavailable );
+  QCOMPARE( backend.handleForId( QStringLiteral( "main-window" ) ), 0 );
+  QVERIFY( !backend.explanation().isEmpty() );
+
+  backend.unbind();
+#else
+  QSKIP( "this build has no X11 capability, so there is no X11 backend to bind" );
+#endif
+}
+
+void TstHotkeys::recorderBackendRetiresItsBindings()
+{
+#ifdef HAVE_X11
+  QVERIFY2( xcbSession(), "this case binds real X11 combinations and needs the xcb gate" );
+
+  Display * const display = PlatformWindow::x11Display();
+  QVERIFY( display != nullptr );
+
+  X11RecordBackend backend;
+  QSignalSpy activations( &backend, &HotkeyBackend::activated );
+
+  backend.bind( { { QStringLiteral( "main-window" ), QStringLiteral( "Main window" ),
+                    QStringLiteral( "CTRL+ALT+g" ) } } );
+  int const firstHandle = backend.handleForId( QStringLiteral( "main-window" ) );
+  QVERIFY( firstHandle > 0 );
+
+  quint32 const control = XKeysymToKeycode( display, XK_Control_L );
+  quint32 const alt = XKeysymToKeycode( display, XK_Alt_L );
+  quint32 const g = backend.keyCodeForKey( int( Qt::Key_G ) );
+  QVERIFY( g != 0 );
+  QVERIFY( !anotherClientCanGrab( g, RecorderControlMask | RecorderAltMask ) );
+
+  // Binding again retires the previous registration: the ID gets a fresh handle and
+  // no stale mapping survives.
+  backend.bind( { { QStringLiteral( "main-window" ), QStringLiteral( "Main window" ),
+                    QStringLiteral( "CTRL+ALT+g" ) } } );
+  int const secondHandle = backend.handleForId( QStringLiteral( "main-window" ) );
+  QVERIFY( secondHandle > 0 );
+  QVERIFY( secondHandle != firstHandle );
+
+  backend.recordedKey( true, control );
+  backend.recordedKey( true, alt );
+  backend.recordedKey( true, g );
+  QCOMPARE( activations.count(), 1 );
+  QCOMPARE( activations.at( 0 ).at( 0 ).toString(), QStringLiteral( "main-window" ) );
+  backend.recordedKey( false, g );
+  backend.recordedKey( false, alt );
+  backend.recordedKey( false, control );
+
+  backend.unbind();
+
+  QCOMPARE( backend.state(), HotkeyBackend::State::Closed );
+  QCOMPARE( backend.handleForId( QStringLiteral( "main-window" ) ), 0 );
+
+  // The grab is released with the registration, so other clients may take it again.
+  QVERIFY2( anotherClientCanGrab( g, RecorderControlMask | RecorderAltMask ),
+            "the retired registration kept the combination grabbed" );
+
+  // Nothing can fire after the registration was retired.
+  backend.recordedKey( true, control );
+  backend.recordedKey( true, alt );
+  backend.recordedKey( true, g );
+  QCOMPARE( activations.count(), 1 );
+#else
+  QSKIP( "this build has no X11 capability, so there is no X11 backend to retire" );
+#endif
+}
+
+void TstHotkeys::xcbRecorderDeliversTheCombinationThroughRecord()
+{
+#ifdef HAVE_X11
+  QVERIFY2( xcbSession(), "the live RECORD proof needs the xcb gate" );
+
+  Display * const display = PlatformWindow::x11Display();
+  QVERIFY( display != nullptr );
+
+  X11RecordBackend backend;
+  QSignalSpy activations( &backend, &HotkeyBackend::activated );
+
+  backend.bind( { { QStringLiteral( "main-window" ), QStringLiteral( "Main window" ),
+                    QStringLiteral( "CTRL+ALT+g" ) } } );
+  QCOMPARE( backend.state(), HotkeyBackend::State::Bound );
+
+  // The keys are pressed by the server's own input generator, so the activation can
+  // only come through the real RECORD context, the recording thread and the
+  // matcher: nothing here calls into the backend.
+  //
+  // The combination is repeated a few times because the recording thread has to be
+  // inside its blocking enable call before the server delivers anything, and that
+  // moment is not observable from here. Every attempt is a complete press and
+  // release, so a delivered attempt reports exactly one activation.
+  bool synthesized = true;
+
+  for( int attempt = 0; attempt < 20 && activations.isEmpty(); ++attempt )
+  {
+    synthesized = fakeKey( display, XK_Control_L, true )
+                  && fakeKey( display, XK_Alt_L, true )
+                  && fakeKey( display, XK_g, true )
+                  && fakeKey( display, XK_g, false )
+                  && fakeKey( display, XK_Alt_L, false )
+                  && fakeKey( display, XK_Control_L, false );
+    XSync( display, False );
+    QTest::qWait( 50 );
+  }
+
+  QVERIFY2( synthesized, "the gate's X server must provide XTEST" );
+  QCOMPARE( activations.count(), 1 );
+  QCOMPARE( activations.at( 0 ).at( 0 ).toString(), QStringLiteral( "main-window" ) );
+  QCOMPARE( activations.at( 0 ).at( 1 ).toString(), QString() );
+
+  backend.unbind();
+#else
+  QSKIP( "this build has no X11 capability, so there is no RECORD context to prove" );
+#endif
+}
+
+void TstHotkeys::brokenXRecordCheckToleratesASessionWithoutDisplay()
+{
+  // No session may ask a null display: a Wayland or offscreen session has no X
+  // RECORD extension to be broken, and the gate's own X server reports an X.Org
+  // release outside the broken RECORD range.
+  QCOMPARE( isRECORDBroken(), false );
+}
+
+void TstHotkeys::keyboardStateNeverClaimsAModifierWithoutADisplay()
+{
+  KeyboardState state;
+
+  // An empty request is trivially satisfied, as it always was.
+  QVERIFY( state.checkModifiersPressed( 0 ) );
+
+  // Nothing is claimed about a modifier state this session cannot read: no key is
+  // held on the gate's bare X server, and a session without an X11 display must not
+  // claim either instead of dereferencing a null one.
+  QVERIFY( !state.checkModifiersPressed( KeyboardState::Alt ) );
+  QVERIFY( !state.checkModifiersPressed( KeyboardState::Ctrl | KeyboardState::Shift ) );
 }
 
 QTEST_MAIN( TstHotkeys )

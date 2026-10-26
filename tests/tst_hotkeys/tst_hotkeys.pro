@@ -16,13 +16,25 @@
 # variant: the audio cases branch on the feature the binary was compiled with and
 # assert the other half of §4.13 (verbatim stored backend text, no internal
 # player, external playback retained).
+#
+# The recorder cases (§2.10) link the production hotkeywrapper.cc as well: the real
+# matcher, the real RecorderCore and the real X11RecordBackend. The recording rules
+# are driven through a fixture RecorderSession, so they need no RECORD server, and
+# the X11 paths are only taken when the chosen QPA is an actual xcb session:
+#
+#   QT_QPA_PLATFORM=xcb xvfb-run -a timeout 60 tests/tst_hotkeys/tst_hotkeys
+#   QT_QPA_PLATFORM=offscreen timeout 60 tests/tst_hotkeys/tst_hotkeys nonXcbCapability
+#
+# The offscreen run is required: it is the case that proves a non-X11 session
+# reports itself unsupported and never reaches an Xlib call.
 
 TARGET = tst_hotkeys
 include(../testsupport.pri)
 
 QT += core gui widgets xml
 
-INCLUDEPATH += $$GD_REPO_ROOT
+INCLUDEPATH += $$GD_REPO_ROOT \
+               $$GD_REPO_ROOT/qtsingleapplication/src
 
 SOURCES += $$GD_REPO_ROOT/atomic_rename.cc \
            $$GD_REPO_ROOT/audioplayerfactory.cc \
@@ -31,13 +43,25 @@ SOURCES += $$GD_REPO_ROOT/atomic_rename.cc \
            $$GD_REPO_ROOT/externalviewer.cc \
            $$GD_REPO_ROOT/folding.cc \
            $$GD_REPO_ROOT/gddebug.cc \
+           $$GD_REPO_ROOT/hotkeywrapper.cc \
            $$GD_REPO_ROOT/hotkeysyntax.cc \
            $$GD_REPO_ROOT/parsecmdline.cc \
+           $$GD_REPO_ROOT/platformwindow.cc \
+           $$GD_REPO_ROOT/qtsingleapplication/src/qtsingleapplication.cpp \
+           $$GD_REPO_ROOT/qtsingleapplication/src/qtlocalpeer.cpp \
+           $$GD_REPO_ROOT/broken_xrecord.cc \
+           $$GD_REPO_ROOT/keyboardstate.cc \
            $$GD_REPO_ROOT/wildcard.cc \
            $$GD_REPO_ROOT/wstring_qt.cc \
            tst_hotkeys.cc
 
 HEADERS += $$GD_REPO_ROOT/audioplayerfactory.hh \
+           $$GD_REPO_ROOT/broken_xrecord.hh \
+           $$GD_REPO_ROOT/hotkeywrapper.hh \
+           $$GD_REPO_ROOT/keyboardstate.hh \
+           $$GD_REPO_ROOT/platformwindow.hh \
+           $$GD_REPO_ROOT/qtsingleapplication/src/qtsingleapplication.h \
+           $$GD_REPO_ROOT/qtsingleapplication/src/qtlocalpeer.h \
            $$GD_REPO_ROOT/audioplayerinterface.hh \
            $$GD_REPO_ROOT/externalaudioplayer.hh \
            $$GD_REPO_ROOT/externalviewer.hh \
@@ -46,6 +70,12 @@ HEADERS += $$GD_REPO_ROOT/audioplayerfactory.hh \
            $$GD_REPO_ROOT/hotkeybackend.hh \
            $$GD_REPO_ROOT/hotkeysyntax.hh \
            $$GD_REPO_ROOT/config.hh
+
+unix:!mac {
+    # The recorder borrows Qt's display and grabs combinations on its root window;
+    # the live proof drives the server's own input generator (XTEST).
+    LIBS += -lX11 -lXtst
+}
 
 # The internal player's real decoder/service, only in a build that has it.
 !CONFIG( no_ffmpeg_player ) {
