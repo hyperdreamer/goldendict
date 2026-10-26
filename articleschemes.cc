@@ -6,14 +6,18 @@
 #include "articleurls.hh"
 
 #include <QBuffer>
+#include <QDebug>
 #include <QHash>
+#include <QHostAddress>
 #include <QPointer>
 #include <QRegularExpression>
 #include <QThread>
+#include <QWebEngineUrlRequestInfo>
 #include <QWebEngineUrlRequestJob>
 #include <QWebEngineUrlScheme>
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <exception>
 #include <mutex>
@@ -124,7 +128,122 @@ std::optional< Range > parseRange( QByteArray const & header )
   return result;
 }
 
+QString canonicalHost( QString host )
+{
+  host = host.toLower();
+  if( host.endsWith( '.' ) ) host.chop( 1 );
+  QHostAddress address;
+  if( address.setAddress( host ) ) return address.toString();
+  return QString::fromLatin1( QUrl::toAce( host ) );
+}
+
+// Retain the historical short-final-label heuristic. This intentionally is not
+// a public-suffix-list implementation; IP addresses never reach it.
+QString getHostBase( QString const & host )
+{
+  QStringList const domains = host.split( '.' );
+  int left = domains.size();
+  if( left && domains[ left - 1 ].size() <= 3 ) --left;
+  if( left && domains[ left - 1 ].size() <= 3 ) --left;
+  return left > 1 ? host.mid( domains[ 0 ].size() + 1 ) : host;
+}
+
+bool hostBelongsTo( QString const & host, QString const & parent )
+{
+  if( host.isEmpty() || parent.isEmpty() ) return false;
+  QHostAddress a, b;
+  bool const aIsIp = a.setAddress( host ), bIsIp = b.setAddress( parent );
+  if( aIsIp || bIsIp ) return aIsIp && bIsIp && a == b;
+  return host == parent || host.endsWith( '.' + parent );
+}
+
+bool sameSite( QString const & a, QString const & b )
+{
+  if( a.isEmpty() || b.isEmpty() ) return false;
+  QHostAddress ipA, ipB;
+  if( ipA.setAddress( a ) || ipB.setAddress( b ) )
+    return hostBelongsTo( a, b );
+  return hostBelongsTo( a, b ) || hostBelongsTo( b, a ) || getHostBase( a ) == getHostBase( b );
+}
+
+bool internalScheme( QString const & scheme )
+{
+  return scheme == QLatin1String( "gdlookup" ) || scheme == QLatin1String( "gdpicture" )
+      || scheme == QLatin1String( "bres" ) || scheme == QLatin1String( "gdau" )
+      || scheme == QLatin1String( "gdvideo" ) || scheme == QLatin1String( "gico" )
+      || scheme == QLatin1String( "qrcx" );
+}
+
 } // namespace
+
+ArticleRequestInterceptor::ArticleRequestInterceptor( QObject * parent ):
+  QWebEngineUrlRequestInterceptor( parent ), policy( std::make_shared< ArticleRequestPolicy const >() ) {}
+
+void ArticleRequestInterceptor::setPolicy( std::shared_ptr< ArticleRequestPolicy const > replacement )
+{
+  if( !replacement ) replacement = std::make_shared< ArticleRequestPolicy const >();
+  std::atomic_store( &policy, std::move( replacement ) );
+}
+
+void ArticleRequestInterceptor::interceptRequest( QWebEngineUrlRequestInfo & info )
+{
+  auto const snapshot = std::atomic_load( &policy );
+  QUrl const url = info.requestUrl();
+  QString const scheme = url.scheme();
+  bool deny = !url.isValid() || scheme.isEmpty();
+  if( !deny && internalScheme( scheme ) )
+  {
+    auto const kind = ArticleUrls::parse( url, ArticleUrls::Use::DocumentLoad ).kind;
+    deny = kind == ArticleUrls::Kind::Invalid || kind == ArticleUrls::Kind::ExternalAction;
+    if( !deny ) return;
+  }
+  else if( !deny && scheme == QLatin1String( "file" ) )
+  {
+    auto const fixed = snapshot->localFileRedirects.constFind( url.toString( QUrl::FullyEncoded ) );
+    if( fixed != snapshot->localFileRedirects.cend() && fixed->isValid() && fixed->isLocalFile()
+        && *fixed != url )
+      info.redirect( *fixed );
+    return;
+  }
+  else if( !deny && ( scheme == QLatin1String( "data" ) || scheme == QLatin1String( "about" )
+                      || scheme == QLatin1String( "blob" ) ) ) return;
+  else if( !deny && !snapshot->blockExternal ) return;
+  else if( !deny && ( scheme == QLatin1String( "http" ) || scheme == QLatin1String( "https" ) ) )
+  {
+    QString const requestHost = canonicalHost( url.host() );
+    QString const firstPartyHost = canonicalHost( info.firstPartyUrl().host() );
+    QUrl const initiator = info.initiator();
+    QString const initiatorScheme = initiator.scheme();
+    bool const concrete = initiatorScheme == QLatin1String( "http" )
+                       || initiatorScheme == QLatin1String( "https" );
+    if( sameSite( requestHost, firstPartyHost )
+        || ( concrete && sameSite( requestHost, canonicalHost( initiator.host() ) ) ) ) return;
+    bool const application = initiatorScheme == QLatin1String( "gdlookup" )
+                         || initiatorScheme == QLatin1String( "bres" )
+                         || initiatorScheme == QLatin1String( "gico" );
+    if( application )
+      for( auto const & host : snapshot->dictionaryHosts )
+        if( hostBelongsTo( requestHost, canonicalHost( host ) ) ) return;
+    deny = true;
+  }
+  else deny = true;
+
+  if( deny )
+  {
+    info.block( true );
+    std::lock_guard< std::mutex > lock( diagnosticMutex );
+    if( diagnosticPolicy.lock() != snapshot )
+    {
+      diagnosticPolicy = snapshot;
+      deniedUrls.clear();
+    }
+    if( !deniedUrls.contains( url ) )
+    {
+      deniedUrls.insert( url );
+      qWarning() << "ArticlePolicy: blocked external request" << url.adjusted( QUrl::RemoveUserInfo );
+    }
+  }
+}
 
 void registerArticleSchemes()
 {
