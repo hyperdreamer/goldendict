@@ -1,6 +1,7 @@
 /* This file is (c) 2008-2012 Konstantin Isakov <ikm@goldendict.org>
  * Part of GoldenDict. Licensed under GPLv3 or later, see the LICENSE file */
 
+#include "wildcard.hh"
 #include "hunspell.hh"
 #include "utf8.hh"
 #include "htmlescape.hh"
@@ -13,7 +14,6 @@
 #include <QRunnable>
 #include <QThreadPool>
 #include <QSemaphore>
-#include <QRegExp>
 #include <QDir>
 #include <QCoreApplication>
 #include <QFileInfo>
@@ -22,7 +22,6 @@
 #include <hunspell/hunspell.hxx>
 #include "gddebug.hh"
 #include "fsencoding.hh"
-#include "qt4x5.hh"
 
 namespace HunspellMorpho {
 
@@ -239,7 +238,7 @@ void HunspellArticleRequestRunnable::run()
 
 void HunspellArticleRequest::run()
 {
-  if ( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+  if ( isCancelled.loadAcquire() )
   {
     finish();
     return;
@@ -440,7 +439,7 @@ void HunspellHeadwordsRequestRunnable::run()
 
 void HunspellHeadwordsRequest::run()
 {
-  if ( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+  if ( isCancelled.loadAcquire() )
   {
     finish();
     return;
@@ -513,7 +512,8 @@ QVector< wstring > suggest( wstring & word, Mutex & hunspellMutex, Hunspell & hu
 
       wstring lowercasedWord = Folding::applySimpleCaseOnly( word );
 
-      static QRegExp cutStem( "^\\s*st:(((\\s+(?!\\w{2}:)(?!-)(?!\\+))|\\S+)+)" );
+      static QRegularExpression const cutStem = Regex::validated( "^\\s*st:(((\\s+(?!\\w{2}:)(?!-)(?!\\+))|\\S+)+)",
+                                               QRegularExpression::UseUnicodePropertiesOption );
 
 #ifdef OLD_HUNSPELL_INTERFACE
       for( int x = 0; x < suggestionsCount; ++x )
@@ -532,9 +532,10 @@ QVector< wstring > suggest( wstring & word, Mutex & hunspellMutex, Hunspell & hu
 
         GD_DPRINTF( ">>>Sugg: %s\n", suggestion.toLocal8Bit().data() );
 
-        if ( cutStem.indexIn( suggestion.trimmed() ) != -1 )
+        QRegularExpressionMatch const match = cutStem.match( suggestion.trimmed() );
+        if ( match.hasMatch() )
         {
-          wstring alt = gd::toWString( cutStem.cap( 1 ) );
+          wstring alt = gd::toWString( match.captured( 1 ) );
 
           if ( Folding::applySimpleCaseOnly( alt ) != lowercasedWord ) // No point in providing same word
           {
@@ -641,7 +642,7 @@ void HunspellPrefixMatchRequestRunnable::run()
 
 void HunspellPrefixMatchRequest::run()
 {
-  if ( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+  if ( isCancelled.loadAcquire() )
   {
     finish();
     return;

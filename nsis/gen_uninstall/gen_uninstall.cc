@@ -10,10 +10,20 @@ int main( int argc, char *argv[] )
 
   QTextStream stream( stdin );
 
-  QRegExp setOutPath( "^SetOutPath: \"(.*)\"$" );
-  QRegExp createDirectory( "^CreateDirectory: \"(.*)\"$" );
-  QRegExp file( "^File: \"([^\"]*)\"(->\"([^\"]*)\")?.*$" );
-  QRegExp createShortCut( "^CreateShortCut: \"([^\"]*)\"(->\"([^\"]*)\")?.*$" );
+  auto const exact = []( QString const & pattern ) {
+    return QRegularExpression( QRegularExpression::anchoredPattern( pattern ),
+                               QRegularExpression::DotMatchesEverythingOption );
+  };
+  QRegularExpression const setOutPath = exact( "^SetOutPath: \"(.*)\"$" );
+  QRegularExpression const createDirectory = exact( "^CreateDirectory: \"(.*)\"$" );
+  QRegularExpression const file = exact( "^File: \"([^\"]*)\"(->\"([^\"]*)\")?.*$" );
+  QRegularExpression const createShortCut = exact( "^CreateShortCut: \"([^\"]*)\"(->\"([^\"]*)\")?.*$" );
+  for( QRegularExpression const * expression : { &setOutPath, &createDirectory, &file, &createShortCut } )
+    if( !expression->isValid() )
+    {
+      qCritical( "Invalid uninstall pattern: %s", qPrintable( expression->errorString() ) );
+      return 1;
+    }
 
   QStringList log;
 
@@ -21,48 +31,49 @@ int main( int argc, char *argv[] )
 
   for( QString line; !( line = stream.readLine() ).isNull(); )
   {
-    if ( setOutPath.exactMatch( line ) )
+    QRegularExpressionMatch match;
+    if ( ( match = setOutPath.match( line ) ).hasMatch() )
     {
-      qDebug( "Setting out path to %s", qPrintable( setOutPath.cap( 1 ) ) );
+      qDebug( "Setting out path to %s", qPrintable( match.captured( 1 ) ) );
 
-      currentOutPath = setOutPath.cap( 1 );
+      currentOutPath = match.captured( 1 );
     }
     else
-    if ( createDirectory.exactMatch( line ) )
+    if ( ( match = createDirectory.match( line ) ).hasMatch() )
     {
-      qDebug( "Creating directory %s", qPrintable( createDirectory.cap( 1 ) ) );
+      qDebug( "Creating directory %s", qPrintable( match.captured( 1 ) ) );
 
-      log.append( "RMDir \"" + createDirectory.cap( 1 ) + "\"" );
+      log.append( "RMDir \"" + match.captured( 1 ) + "\"" );
     }
     else
-    if ( file.exactMatch( line ) )
+    if ( ( match = file.match( line ) ).hasMatch() )
     {
       QString command( "Delete \"" );
 
-      if ( file.cap( 3 ).isEmpty() )
+      if ( match.captured( 3 ).isEmpty() )
       {
         // Using the current out path
-        command += currentOutPath + "\\" + file.cap( 1 );
+        command += currentOutPath + "\\" + match.captured( 1 );
       }
       else
       {
         // Use the complete path available
-        command += file.cap( 3 );
+        command += match.captured( 3 );
       }
 
       command += "\"";
 
       log.append( command );
 
-      qDebug( "Writing file %s (%s)", qPrintable( file.cap( 1 ) ),
-             qPrintable( file.cap( 3 ) ) );
+      qDebug( "Writing file %s (%s)", qPrintable( match.captured( 1 ) ),
+             qPrintable( match.captured( 3 ) ) );
     }
     else
-    if ( createShortCut.exactMatch( line ) )
+    if ( ( match = createShortCut.match( line ) ).hasMatch() )
     {
-      qDebug( "Creating shortcut %s", qPrintable( createShortCut.cap( 1 ) ) );
+      qDebug( "Creating shortcut %s", qPrintable( match.captured( 1 ) ) );
 
-      log.append( "Delete \"" + createShortCut.cap( 1 ) + "\"" );
+      log.append( "Delete \"" + match.captured( 1 ) + "\"" );
     }
   }
 

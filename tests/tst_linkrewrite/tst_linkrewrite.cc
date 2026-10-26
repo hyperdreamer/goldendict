@@ -34,13 +34,25 @@
 #include <QUrl>
 #include <QUrlQuery>
 
+#include <functional>
 #include <optional>
 #include <string>
 
 #include "audiolink.hh"
 #include "linkrewrite.hh"
 #include "website.hh"
+#include "mdictparser.hh"
 #include "support/fixtures.hh"
+
+// These entry points live in their owning engines and are called by the real
+// article paths. Section GC keeps unrelated dictionary I/O out of this suite.
+namespace Stardict { QString normalizeArticleLinks( QString, QString const & ); }
+namespace DictdFiles { QString normalizeArticleText( QString ); }
+namespace DictServer { QString normalizeArticleText( QString, bool ); }
+namespace Zim {
+QString normalizeArticleLinks( QString, QString const &, int &,
+                               std::function< bool( QString const & ) > const & );
+}
 
 namespace
 {
@@ -277,6 +289,9 @@ class TstLinkRewrite : public QObject
     Q_OBJECT
 
   private slots:
+    void mdictStylesPreserveUnicodeAndAbsentIds();
+    void productionEngineNormalization();
+    void zimTitleAndSlashDecisions();
     void websiteRewritesRetainedBaselineBehaviour();
     void initTestCase();
     void cleanupTestCase();
@@ -310,6 +325,85 @@ class TstLinkRewrite : public QObject
     void audioSourceTextCannotBecomeScript();
     void audioSourceCannotTerminateTheWrapperScript();
 };
+
+void TstLinkRewrite::mdictStylesPreserveUnicodeAndAbsentIds()
+{
+    Mdict::MdictParser::StyleSheets const styles = {
+        { 1, { QStringLiteral( "<b>" ), QStringLiteral( "</b>" ) } },
+        { 2, { QStringLiteral( "<i>" ), QStringLiteral( "</i>" ) } }
+    };
+    QString article = QStringLiteral( "head `1`bold `2`italic `999`tail" );
+    QCOMPARE( Mdict::MdictParser::substituteStylesheet( article, styles ),
+              QStringLiteral( "head <b>bold </b><i>italic </i>tail" ) );
+    article = QStringLiteral( "`١`bold" );
+    // The regex recognizes Unicode digits; QString::toInt retains the old
+    // conversion rule (the non-ASCII number is not a style-map key).
+    QCOMPARE( Mdict::MdictParser::substituteStylesheet( article, styles ), QStringLiteral( "bold" ) );
+    article = QStringLiteral( "plain" );
+    QCOMPARE( Mdict::MdictParser::substituteStylesheet( article, styles ), QStringLiteral( "plain" ) );
+}
+
+void TstLinkRewrite::productionEngineNormalization()
+{
+    QCOMPARE( Stardict::normalizeArticleLinks(
+        QStringLiteral( "<a href=\"bword://cat\">cat</a><a href=\"cat#part\">cat</a><a href=\"#part\">part</a>" ),
+        QStringLiteral( "d" ) ),
+        QStringLiteral( "<a href=\"bword:cat\">cat</a><a href=\"gdlookup://localhost/cat?gdanchor=part\">cat</a><a href=\"#part\">part</a>" ) );
+    QCOMPARE( Stardict::normalizeArticleLinks(
+        QStringLiteral( "<img src=\"images/cat.png\"><link href=\"style.css\">" ), QStringLiteral( "d" ) ),
+        QStringLiteral( "<img src=\"bres://d/images/cat.png\"><link href=\"bres://d/style.css\">" ) );
+    QCOMPARE( DictdFiles::normalizeArticleText( QStringLiteral( "{red fox} \\fə\\" ) ),
+        QStringLiteral( "<a href=\"gdlookup://localhost/red%20fox\">red fox</a> <span class=\"dictd_phonetic\">fə</span>" ) );
+    QCOMPARE( DictServer::normalizeArticleText(
+        QStringLiteral( "<div>\\fə</div><div>nɛ\\ {red fox}</div>" ), true ),
+        QStringLiteral( "<div><span class=\"dictd_phonetic\">fə</span></div><div><span class=\"dictd_phonetic\">nɛ</span> <a href=\"gdlookup://localhost/red%20fox\">red fox</a></div>" ) );
+    QCOMPARE( DictServer::normalizeArticleText(
+        QStringLiteral( "<a href=\"gdlookup://localhost/cat?dict=Known%20Name&gdanchor=part#frag\">{cat}</a>" ), false ),
+        QStringLiteral( "<a href=\"gdlookup://localhost/cat?dict=Known%20Name&gdanchor=part#frag\">{cat}</a>" ) );
+    QString const audio = Stardict::normalizeArticleLinks(
+        QStringLiteral( "<audio src=\"a.wav\">one\nline</audio><audio src=\"b.wav\">two\nlines</audio>" ),
+        QStringLiteral( "d" ) );
+    QCOMPARE( audio.count( QStringLiteral( "class=\"sdict_h_wav\"" ) ), 2 );
+    QVERIFY( audio.contains( QStringLiteral( "href=\"gdau://d/a.wav\">one\nline" ) ) );
+    QVERIFY( audio.contains( QStringLiteral( "href=\"gdau://d/b.wav\">two\nlines" ) ) );
+}
+
+void TstLinkRewrite::zimTitleAndSlashDecisions()
+{
+    int mode = 0; // UNKNOWN, SLASH, NO_SLASH are the unchanged engine values.
+    QStringList lookups;
+    auto const slash = [&lookups]( QString const & word ) {
+        lookups.append( word );
+        return word == QStringLiteral( "Precambrian/Chaotian" );
+    };
+    QCOMPARE( Zim::normalizeArticleLinks(
+        QStringLiteral( "<a href=\"Precambrian_Chaotian.html\" title=\"Precambrian/Chaotian\">x</a>" ),
+        QStringLiteral( "d" ), mode, slash ),
+        QStringLiteral( "<a href=\"gdlookup://localhost/Precambrian%2FChaotian\" title=\"Precambrian/Chaotian\">x</a><br style=\"clear:both;\" />" ) );
+    QCOMPARE( mode, 1 );
+    QCOMPARE( lookups, QStringList{ QStringLiteral( "Precambrian/Chaotian" ) } );
+    mode = 0;
+    lookups.clear();
+    auto const basename = [&lookups]( QString const & word ) {
+        lookups.append( word );
+        return word == QStringLiteral( "red fox" );
+    };
+    // Shipped Qt5 behaviour: the vertical-text loop consumed the rxLink iterator
+    // while taking matches from rxBR, so this article keeps its escaped breaks.
+    // The quirk is preserved rather than corrected here; see the migration ledger.
+    QCOMPARE( Zim::normalizeArticleLinks(
+        QStringLiteral( "<a href=\"gdlookup://localhost/Neoptera\">N&lt;br/&gt;e</a>" ),
+        QStringLiteral( "d" ),
+        mode,
+        []( QString const & ) { return false; } ),
+        QStringLiteral( "<a href=\"gdlookup://localhost/Neoptera\">N&lt;br/&gt;e</a><br style=\"clear:both;\" />" ) );
+    QCOMPARE( mode, 0 );
+    QCOMPARE( Zim::normalizeArticleLinks(
+        QStringLiteral( "<a href=\"red_fox.html\">x</a>" ), QStringLiteral( "d" ), mode,
+        []( QString const & ) { return false; } ),
+        QStringLiteral( "<a href=\"gdlookup://localhost/red%20fox\" >x</a><br style=\"clear:both;\" />" ) );
+    QCOMPARE( mode, 0 );
+}
 
 void TstLinkRewrite::initTestCase()
 {

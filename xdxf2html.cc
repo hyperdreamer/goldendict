@@ -12,13 +12,11 @@
 #include "file.hh"
 #include "filetype.hh"
 #include "htmlescape.hh"
-#include "qt4x5.hh"
+#include <QUrl>
 #include <QDebug>
 #include "xdxf.hh"
 
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-#include <QRegularExpression>
-#endif
+#include "wildcard.hh"
 
 namespace Xdxf2Html {
 
@@ -27,7 +25,10 @@ static void fixLink( QDomElement & el, string const & dictId, const char *attrNa
   QUrl url;
   url.setScheme( "bres" );
   url.setHost( QString::fromStdString(dictId) );
-  url.setPath( Qt4x5::Url::ensureLeadingSlash( el.attribute(attrName) ) );
+  QString path = el.attribute( attrName );
+  if( !path.startsWith( '/' ) )
+    path.prepend( '/' );
+  url.setPath( path, QUrl::DecodedMode );
 
   el.setAttribute( attrName, url.toEncoded().data() );
 }
@@ -629,7 +630,10 @@ string convert( string const & in, DICT_TYPE type, map < string, string > const 
           QUrl url;
           url.setScheme( "bres" );
           url.setHost( QString::fromUtf8( dictPtr->getId().c_str() ) );
-          url.setPath( Qt4x5::Url::ensureLeadingSlash( QString::fromUtf8( filename.c_str() ) ) );
+          QString path = QString::fromUtf8( filename.c_str() );
+          if( !path.startsWith( '/' ) )
+            path.prepend( '/' );
+          url.setPath( path, QUrl::DecodedMode );
 
           QDomElement newEl = dd.createElement( "img" );
           newEl.setAttribute( "src", url.toEncoded().data() );
@@ -677,7 +681,10 @@ string convert( string const & in, DICT_TYPE type, map < string, string > const 
             QUrl url;
             url.setScheme( "gdau" );
             url.setHost( QString::fromUtf8( search ? "search" : dictPtr->getId().c_str() ) );
-            url.setPath( Qt4x5::Url::ensureLeadingSlash( QString::fromUtf8( filename.c_str() ) ) );
+            QString path = QString::fromUtf8( filename.c_str() );
+            if( !path.startsWith( '/' ) )
+              path.prepend( '/' );
+            url.setPath( path, QUrl::DecodedMode );
 
             el_script.setAttribute( "type", "text/javascript" );
             parent.replaceChild( el_script, el );
@@ -715,11 +722,7 @@ string convert( string const & in, DICT_TYPE type, map < string, string > const 
 
 //  GD_DPRINTF( "Result>>>>>>>>>>: %s\n\n\n", dd.toByteArray( 0 ).data() );
 
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-  return dd.toString( 1 ).remove('\n').remove( QRegularExpression( "<(b|blockquote|i)/>" ) ).toUtf8().data();
-#else
-  return dd.toString( 1 ).remove('\n').remove( QRegExp( "<(b|blockquote|i)/>" ) ).toUtf8().data();
-#endif
+  return dd.toString( 1 ).remove('\n').remove( Regex::validated( "<(b|blockquote|i)/>" ) ).toUtf8().data();
 }
 
 }

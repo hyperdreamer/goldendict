@@ -8,15 +8,29 @@
 # No display, dictionary or network resource is needed; fixtures/linkrewrite/
 # cases.json holds every fixed expected value.
 
+CONFIG += zim_support
 TARGET = tst_linkrewrite
 include(../testsupport.pri)
 
-QT += core
+QT += core widgets xml svg
+LIBS += -lz
+FORMS += $$GD_REPO_ROOT/fulltextsearch.ui
+
+unix {
+    QMAKE_CXXFLAGS += -ffunction-sections -fdata-sections
+    QMAKE_LFLAGS += -Wl,--gc-sections
+}
 
 SOURCES += $$GD_REPO_ROOT/linkrewrite.cc \
            $$GD_REPO_ROOT/encoding.cc \
            $$GD_REPO_ROOT/gddebug.cc \
            $$GD_REPO_ROOT/audiolink.cc \
+           $$GD_REPO_ROOT/mdictparser.cc \
+           $$GD_REPO_ROOT/stardict.cc \
+           $$GD_REPO_ROOT/dictdfiles.cc \
+           $$GD_REPO_ROOT/dictserver.cc \
+           $$GD_REPO_ROOT/zim.cc \
+           $$GD_REPO_ROOT/htmlescape.cc \
            tst_linkrewrite.cc
 
 HEADERS += $$GD_REPO_ROOT/linkrewrite.hh \
