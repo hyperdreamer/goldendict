@@ -13,6 +13,24 @@
 #include <QUuid>
 #include <QVector>
 
+namespace PortalWire {
+QDBusArgument &operator<<( QDBusArgument & out, Shortcut const & value )
+{
+    out.beginStructure();
+    out << value.id << value.properties;
+    out.endStructure();
+    return out;
+}
+
+QDBusArgument const &operator>>( QDBusArgument const & in, Shortcut & value )
+{
+    in.beginStructure();
+    in >> value.id >> value.properties;
+    in.endStructure();
+    return in;
+}
+} // namespace PortalWire
+
 namespace {
 const QString Service = QStringLiteral( "org.freedesktop.portal.Desktop" );
 const QString RequestInterface = QStringLiteral( "org.freedesktop.portal.Request" );
@@ -407,4 +425,93 @@ void PortalRequest::cancel() noexcept
         d->cancel();
 }
 
+
+struct PortalBackend::Private
+{
+};
+
+PortalBackend::PortalBackend( QDBusConnection const &, QObject * parent ):
+    HotkeyBackend( parent ), d( std::make_unique< Private >() )
+{
+    qDBusRegisterMetaType< PortalWire::Shortcut >();
+    qDBusRegisterMetaType< PortalWire::Shortcuts >();
+}
+
+PortalBackend::~PortalBackend() = default;
+
+bool PortalBackend::isSupported() const noexcept
+{
+    return false;
+}
+
+HotkeyBackend::State PortalBackend::state() const noexcept
+{
+    return HotkeyBackend::State::Unsupported;
+}
+
+void PortalBackend::bind( QVector< HotkeyBinding > const & )
+{
+}
+
+void PortalBackend::unbind()
+{
+}
+
+void PortalBackend::configure( QString const & )
+{
+}
+
+void PortalBackend::receivePortalSignal( QDBusMessage const & )
+{
+}
+
+void PortalBackend::setState( HotkeyBackend::State, QString const & )
+{
+}
+
+void PortalBackend::beginGeneration( QVector< HotkeyBinding > const & )
+{
+}
+
+void PortalBackend::readVersion( quint64 )
+{
+}
+
+void PortalBackend::createSession( quint64 )
+{
+}
+
+void PortalBackend::startList( quint64 )
+{
+}
+
+void PortalBackend::startBind( quint64 )
+{
+}
+
+void PortalBackend::handleCreateResponse( quint64, uint, QVariantMap const & )
+{
+}
+
+void PortalBackend::handleListResponse( quint64, quint64, uint, QVariantMap const & )
+{
+}
+
+void PortalBackend::handleBindResponse( quint64, uint, QVariantMap const & )
+{
+}
+
+void PortalBackend::failGeneration( QString const &, bool )
+{
+}
+
+void PortalBackend::cancelRequests() noexcept
+{
+}
+
+void PortalBackend::closeSession() noexcept
+{
+}
+
 #include "portalhotkeys.moc"
+

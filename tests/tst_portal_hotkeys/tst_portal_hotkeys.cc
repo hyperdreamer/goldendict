@@ -1,6 +1,7 @@
 /* This file is part of GoldenDict. Licensed under GPLv3 or later, see LICENSE. */
 #include <QtTest>
 #include <QDBusConnectionInterface>
+#include <QDBusMetaType>
 #include <QDBusObjectPath>
 #include <QDBusPendingCallWatcher>
 #include <QDBusVirtualObject>
@@ -145,6 +146,7 @@ private slots:
     void startAndCancelAreIdempotent();
     void missingServiceFailsWithinDeadline();
     void responseHandlerMayDestroyRequest();
+    void portalWireTypeSignature();
     void wireBarrier( uint marker ) { seenMarker = marker; }
 
 private:
@@ -709,6 +711,17 @@ void TstPortalHotkeys::responseHandlerMayDestroyRequest()
     QVERIFY( flushWire( bus->fixtureConnection() ) );
     QCOMPARE( completions, 1 );
 }
+
+void TstPortalHotkeys::portalWireTypeSignature()
+{
+    qDBusRegisterMetaType< PortalWire::Shortcut >();
+    qDBusRegisterMetaType< PortalWire::Shortcuts >();
+    QCOMPARE( QByteArray( QDBusMetaType::typeToSignature(
+                  QMetaType::fromType< PortalWire::Shortcut >() ) ), QByteArray( "(sa{sv})" ) );
+    QCOMPARE( QByteArray( QDBusMetaType::typeToSignature(
+                  QMetaType::fromType< PortalWire::Shortcuts >() ) ), QByteArray( "a(sa{sv})" ) );
+}
+
 
 QTEST_GUILESS_MAIN( TstPortalHotkeys )
 #include "tst_portal_hotkeys.moc"

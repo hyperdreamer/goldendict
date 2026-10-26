@@ -2,13 +2,39 @@
 #ifndef GOLDENDICT_PORTALHOTKEYS_HH_INCLUDED
 #define GOLDENDICT_PORTALHOTKEYS_HH_INCLUDED
 
+#include <QDBusArgument>
 #include <QDBusConnection>
 #include <QDBusMessage>
+#include <QList>
 #include <QObject>
 #include <QPointer>
 #include <QVariantMap>
 
+#include <memory>
+
+#include "hotkeybackend.hh"
+
+namespace PortalWire {
+
+/// One GlobalShortcuts wire entry, encoded as `(sa{sv})`.
+struct Shortcut
+{
+    QString id;
+    QVariantMap properties;
+};
+
+using Shortcuts = QList< Shortcut >;
+
+QDBusArgument &operator<<( QDBusArgument & out, Shortcut const & value );
+QDBusArgument const &operator>>( QDBusArgument const & in, Shortcut & value );
+
+} // namespace PortalWire
+
+Q_DECLARE_METATYPE( PortalWire::Shortcut )
+Q_DECLARE_METATYPE( PortalWire::Shortcuts )
+
 class PortalRequestState;
+class QDBusServiceWatcher;
 
 /// One asynchronous portal exchange, including responses sent before its reply.
 class PortalRequest : public QObject
@@ -29,4 +55,42 @@ private:
     QPointer< PortalRequestState > d;
 };
 
-#endif
+class PortalBackend final : public HotkeyBackend
+{
+  Q_OBJECT
+public:
+  explicit PortalBackend( QDBusConnection const & bus, QObject * parent = nullptr );
+  ~PortalBackend() override;
+
+  bool isSupported() const noexcept override;
+  HotkeyBackend::State state() const noexcept override;
+  void bind( QVector< HotkeyBinding > const & bindings ) override;
+  void unbind() override;
+  void configure( QString const & activationToken ) override;
+
+private slots:
+  void receivePortalSignal( QDBusMessage const & message );
+
+private:
+  struct Private;
+
+  void setState( HotkeyBackend::State state, QString const & explanation );
+  void beginGeneration( QVector< HotkeyBinding > const & bindings );
+  void readVersion( quint64 generation );
+  void createSession( quint64 generation );
+  void startList( quint64 generation );
+  void startBind( quint64 generation );
+  void handleCreateResponse( quint64 generation, uint code, QVariantMap const & results );
+  void handleListResponse( quint64 generation, quint64 revision, uint code,
+                           QVariantMap const & results );
+  void handleBindResponse( quint64 generation, uint code, QVariantMap const & results );
+  void failGeneration( QString const & explanation, bool supported = true );
+  void cancelRequests() noexcept;
+  void closeSession() noexcept;
+  void ownerChanged( QString const & oldOwner, QString const & newOwner );
+
+  std::unique_ptr< Private > d;
+  QDBusServiceWatcher * serviceWatcher = nullptr;
+};
+
+#endif // GOLDENDICT_PORTALHOTKEYS_HH_INCLUDED
