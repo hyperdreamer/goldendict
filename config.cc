@@ -3,6 +3,7 @@
 
 #include "config.hh"
 #include "folding.hh"
+#include "hotkeysyntax.hh"
 #include "wstring_qt.hh"
 #include <QDir>
 #include <QFile>
@@ -101,28 +102,32 @@ HotKey::HotKey(): modifiers(), key1( 0 ), key2( 0 )
 {
 }
 
-// Does anyone know how to separate modifiers from the keycode? We'll
-// use our own mask.
-
-uint32_t const keyMask = 0x01FFFFFF;
-
 HotKey::HotKey( QKeySequence const & seq ):
-  modifiers( seq[ 0 ] & ~keyMask ),
-  key1( seq[ 0 ] & keyMask ),
-  key2( seq[ 1 ] & keyMask )
+  modifiers( seq.count() > 0 ? seq[ 0 ].keyboardModifiers() : Qt::KeyboardModifiers() ),
+  key1( seq.count() > 0 ? int( seq[ 0 ].key() ) : 0 ),
+  // Only the first combination carries modifiers in the stored format. The
+  // Qt6 QKeyCombination accessors replace the old bitmask on the Qt5 indexed
+  // int, which no longer exists.
+  key2( seq.count() > 1 ? int( seq[ 1 ].key() ) : 0 )
 {
 }
 
 QKeySequence HotKey::toKeySequence() const
 {
-  int v2 = key2 ? ( key2 | modifiers ): 0;
+  if( key1 == 0 )
+    return QKeySequence();
 
-  return QKeySequence( key1 | modifiers, v2 );
+  QKeyCombination const first( modifiers, Qt::Key( key1 ) );
+
+  if( key2 == 0 )
+    return QKeySequence( first );
+
+  return QKeySequence( first, QKeyCombination( modifiers, Qt::Key( key2 ) ) );
 }
 
 bool InternalPlayerBackend::anyAvailable()
 {
-#if defined( MAKE_FFMPEG_PLAYER ) || defined( MAKE_QTMULTIMEDIA_PLAYER )
+#ifdef MAKE_FFMPEG_PLAYER
   return true;
 #else
   return false;
@@ -131,25 +136,11 @@ bool InternalPlayerBackend::anyAvailable()
 
 InternalPlayerBackend InternalPlayerBackend::defaultBackend()
 {
-#if defined( MAKE_FFMPEG_PLAYER )
+#ifdef MAKE_FFMPEG_PLAYER
   return ffmpeg();
-#elif defined( MAKE_QTMULTIMEDIA_PLAYER )
-  return qtmultimedia();
 #else
   return InternalPlayerBackend( QString() );
 #endif
-}
-
-QStringList InternalPlayerBackend::nameList()
-{
-  QStringList result;
-#ifdef MAKE_FFMPEG_PLAYER
-  result.push_back( ffmpeg().uiName() );
-#endif
-#ifdef MAKE_QTMULTIMEDIA_PLAYER
-  result.push_back( qtmultimedia().uiName() );
-#endif
-  return result;
 }
 
 bool InternalPlayerBackend::isFfmpeg() const
@@ -161,14 +152,114 @@ bool InternalPlayerBackend::isFfmpeg() const
 #endif
 }
 
-bool InternalPlayerBackend::isQtmultimedia() const
+namespace {
+
+/// Loads one stored hotkey. The verbatim text is kept next to the parsed
+/// combination so an untouched value is written back byte-for-byte (SD-15); an
+/// unsupported or multi-key sequence is never replaced merely because a portal
+/// cannot bind it. Only a value produced by the recorder starts without the
+/// marker and is therefore serialized from its combination.
+HotKey loadHotKey( QString const & storedText )
 {
-#ifdef MAKE_QTMULTIMEDIA_PLAYER
-  return *this == qtmultimedia();
+  HotKey key;
+  QString error;
+
+  if( !HotkeySyntax::parse( storedText, &key, &error ) )
+  {
+    // Not representable as a Config::HotKey at all: keep the text only.
+    key = HotKey();
+  }
+
+  key.rawText = storedText;
+  return key;
+}
+
+/// The text a save must write for a hotkey: the original text while the value is
+/// untouched, PortableText once the recorder produced a new value.
+QString hotKeyStorageText( HotKey const & key )
+{
+  return key.rawText.isEmpty() ? HotkeySyntax::serialize( key ) : key.rawText;
+}
+
+/// Stable application action IDs that a platform backend may bind and that the
+/// configuration may persist. Anything else is a historical/foreign display
+/// record: ignored on load, never bound and never an activation source.
+bool isKnownPortalBindingId( QString const & id )
+{
+  return id == QLatin1String( "main-window" ) || id == QLatin1String( "clipboard-lookup" );
+}
+
+/// Loads <hotkeys>/<portalBindings>. A missing section is an empty record set.
+/// Unknown IDs are ignored; duplicate known IDs are last-wins for display (never
+/// for the bind wire validation, which lives in the portal backend). Stored
+/// descriptions are escaped XML attributes decoded by QDom and are display-only.
+QVector< PortalBindingDisplay > loadPortalBindings( QDomElement const & portalBindings )
+{
+  QVector< PortalBindingDisplay > result;
+  QDomNodeList const nodes = portalBindings.elementsByTagName( "binding" );
+
+  for( int x = 0; x < nodes.length(); ++x )
+  {
+    QDomElement const binding = nodes.item( x ).toElement();
+    QString const id = binding.attribute( "id" );
+
+    if( !isKnownPortalBindingId( id ) )
+      continue;
+
+    PortalBindingDisplay display;
+    display.id = id;
+    display.triggerDescription = binding.attribute( "triggerDescription" );
+
+    bool replaced = false;
+    for( PortalBindingDisplay & existing : result )
+    {
+      if( existing.id == id )
+      {
+        existing = display;
+        replaced = true;
+        break;
+      }
+    }
+
+    if( !replaced )
+      result.push_back( display );
+  }
+
+  return result;
+}
+
+/// In-memory audio backend migration (§4.13). An ffmpeg build normalizes every
+/// stored non-ffmpeg backend name -- the removed "Qt Multimedia" and any unknown
+/// name -- to the public default backend. Already-ffmpeg settings stay. A
+/// no_ffmpeg_player build keeps the stored text verbatim so a later build can use
+/// it; that build reports the internal player as unavailable at runtime instead.
+InternalPlayerBackend loadInternalPlayerBackend( QString const & storedName )
+{
+#ifdef MAKE_FFMPEG_PLAYER
+  InternalPlayerBackend const defaultBackend = InternalPlayerBackend::defaultBackend();
+
+  if( storedName.isEmpty() )
+    return defaultBackend;
+
+  InternalPlayerBackend stored = defaultBackend;
+  stored.setUiName( storedName );
+
+  if( stored != defaultBackend )
+  {
+    gdWarning( "Unsupported internal player backend \"%s\" in the configuration; using \"%s\".\n",
+               storedName.toUtf8().constData(), defaultBackend.uiName().toUtf8().constData() );
+    return defaultBackend;
+  }
+
+  return stored;
 #else
-  return false;
+  InternalPlayerBackend stored = InternalPlayerBackend::defaultBackend();
+  stored.setUiName( storedName );
+  return stored;
 #endif
 }
+
+} // namespace
 
 ScanPopupWindowFlags spwfFromInt( int id )
 {
@@ -188,8 +279,8 @@ InputPhrase Preferences::sanitizeInputPhrase( QString const & inputPhrase ) cons
 
   if( limitInputPhraseLength && inputPhrase.size() > inputPhraseLengthLimit )
   {
-    gdDebug( "Ignoring an input phrase %d symbols long. The configured maximum input phrase length is %d symbols.",
-             inputPhrase.size(), inputPhraseLengthLimit );
+    gdDebug( "Ignoring an input phrase %lld symbols long. The configured maximum input phrase length is %d symbols.",
+             static_cast< long long >( inputPhrase.size() ), inputPhraseLengthLimit );
     return result;
   }
 
@@ -885,10 +976,10 @@ Class load() THROW_SPEC( exError )
 
     applyBoolOption( c.preferences.enableMainWindowHotkey, preferences.namedItem( "enableMainWindowHotkey" ) );
     if ( !preferences.namedItem( "mainWindowHotkey" ).isNull() )
-      c.preferences.mainWindowHotkey = QKeySequence::fromString( preferences.namedItem( "mainWindowHotkey" ).toElement().text() );
+      c.preferences.mainWindowHotkey = loadHotKey( preferences.namedItem( "mainWindowHotkey" ).toElement().text() );
     applyBoolOption( c.preferences.enableClipboardHotkey, preferences.namedItem( "enableClipboardHotkey" ) );
     if ( !preferences.namedItem( "clipboardHotkey" ).isNull() )
-      c.preferences.clipboardHotkey = QKeySequence::fromString( preferences.namedItem( "clipboardHotkey" ).toElement().text() );
+      c.preferences.clipboardHotkey = loadHotKey( preferences.namedItem( "clipboardHotkey" ).toElement().text() );
 
     c.preferences.enableScanPopup = ( preferences.namedItem( "enableScanPopup" ).toElement().text() == "1" );
     c.preferences.startWithScanPopupOn = ( preferences.namedItem( "startWithScanPopupOn" ).toElement().text() == "1" );
@@ -921,7 +1012,8 @@ Class load() THROW_SPEC( exError )
       c.preferences.useInternalPlayer = false;
 
     if ( !preferences.namedItem( "internalPlayerBackend" ).isNull() )
-      c.preferences.internalPlayerBackend.setUiName( preferences.namedItem( "internalPlayerBackend" ).toElement().text() );
+      c.preferences.internalPlayerBackend =
+        loadInternalPlayerBackend( preferences.namedItem( "internalPlayerBackend" ).toElement().text() );
 
     if ( !preferences.namedItem( "audioPlaybackProgram" ).isNull() )
       c.preferences.audioPlaybackProgram = preferences.namedItem( "audioPlaybackProgram" ).toElement().text();
@@ -1195,6 +1287,18 @@ Class load() THROW_SPEC( exError )
 
     if ( !headwordsDialog.namedItem( "headwordsDialogGeometry" ).isNull() )
       c.headwordsDialog.headwordsDialogGeometry = QByteArray::fromBase64( headwordsDialog.namedItem( "headwordsDialogGeometry" ).toElement().text().toLatin1() );
+  }
+
+  // Additive hotkey display records. A configuration written by an older
+  // version has no <hotkeys> node at all, which simply loads as no records.
+  QDomNode hotkeys = root.namedItem( "hotkeys" );
+
+  if ( !hotkeys.isNull() )
+  {
+    QDomNode portalBindings = hotkeys.namedItem( "portalBindings" );
+
+    if ( !portalBindings.isNull() )
+      c.hotkeys.portalBindings = loadPortalBindings( portalBindings.toElement() );
   }
 
   return c;
@@ -1762,7 +1866,7 @@ void save( Class const & c ) THROW_SPEC( exError )
     preferences.appendChild( opt );
 
     opt = dd.createElement( "mainWindowHotkey" );
-    opt.appendChild( dd.createTextNode( c.preferences.mainWindowHotkey.toKeySequence().toString() ) );
+    opt.appendChild( dd.createTextNode( hotKeyStorageText( c.preferences.mainWindowHotkey ) ) );
     preferences.appendChild( opt );
 
     opt = dd.createElement( "enableClipboardHotkey" );
@@ -1770,7 +1874,7 @@ void save( Class const & c ) THROW_SPEC( exError )
     preferences.appendChild( opt );
 
     opt = dd.createElement( "clipboardHotkey" );
-    opt.appendChild( dd.createTextNode( c.preferences.clipboardHotkey.toKeySequence().toString() ) );
+    opt.appendChild( dd.createTextNode( hotKeyStorageText( c.preferences.clipboardHotkey ) ) );
     preferences.appendChild( opt );
 
     opt = dd.createElement( "enableScanPopup" );
@@ -2217,6 +2321,28 @@ void save( Class const & c ) THROW_SPEC( exError )
     opt = dd.createElement( "headwordsDialogGeometry" );
     opt.appendChild( dd.createTextNode( QString::fromLatin1( c.headwordsDialog.headwordsDialogGeometry.toBase64() ) ) );
     hd.appendChild( opt );
+  }
+
+  {
+    // Additive hotkey display records; only what a platform backend reported is
+    // stored, at this existing save point. Unknown IDs are never persisted and a
+    // stored description stays inert escaped XML text.
+    QDomElement hotkeys = dd.createElement( "hotkeys" );
+    root.appendChild( hotkeys );
+
+    QDomElement portalBindings = dd.createElement( "portalBindings" );
+    hotkeys.appendChild( portalBindings );
+
+    for( PortalBindingDisplay const & display : c.hotkeys.portalBindings )
+    {
+      if( !isKnownPortalBindingId( display.id ) )
+        continue;
+
+      QDomElement binding = dd.createElement( "binding" );
+      binding.setAttribute( "id", display.id );
+      binding.setAttribute( "triggerDescription", display.triggerDescription );
+      portalBindings.appendChild( binding );
+    }
   }
 
   QByteArray result( dd.toByteArray() );

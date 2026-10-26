@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  A configuration file that already carries the additive keys this migration
+  introduced, next to the values an older version wrote. It pins the additive
+  rules:
+
+    * every pre-existing value still loads and survives a save/load round trip;
+      the new keys are additions, never replacements;
+    * only known binding IDs are accepted (unknown and future IDs are ignored for
+      display and never persisted), a duplicate known ID is last-wins for display,
+      and an escaped XML attribute is decoded to plain text, not markup;
+    * the unknown <futureOption>/<futureSection> extension elements below only
+      prove that unfamiliar nodes do not break loading; the writer rebuilds the
+      document from known settings (as it did before this migration) and does
+      not carry them over, which the suite asserts explicitly;
+    * an untouched hotkey string is kept byte-for-byte, including one that is not
+      a representable shortcut at all, and one that is representable but not
+      bindable as a portal trigger;
+    * a stored backend name that no longer exists is migrated to the default
+      backend in memory only.
+-->
+<config>
+  <paths>
+    <path recursive="0">/srv/dictionaries</path>
+  </paths>
+  <preferences>
+    <interfaceLanguage>de_DE</interfaceLanguage>
+    <zoomFactor>1.25</zoomFactor>
+    <enableMainWindowHotkey>1</enableMainWindowHotkey>
+    <mainWindowHotkey>ctrl+shift+g</mainWindowHotkey>
+    <enableClipboardHotkey>1</enableClipboardHotkey>
+    <clipboardHotkey>Ctrl+F11,F11,F11</clipboardHotkey>
+    <enableScanPopup>0</enableScanPopup>
+    <startWithScanPopupOn>0</startWithScanPopupOn>
+    <useInternalPlayer>1</useInternalPlayer>
+    <internalPlayerBackend>Some Future Backend</internalPlayerBackend>
+    <audioPlaybackProgram>aplay</audioPlaybackProgram>
+    <proxyserver enabled="0" useSystemProxy="1">
+      <type>1</type>
+      <host></host>
+      <port>3128</port>
+      <user></user>
+      <password></password>
+      <systemProxyUser></systemProxyUser>
+      <systemProxyPassword></systemProxyPassword>
+    </proxyserver>
+    <maxNetworkCacheSize>100</maxNetworkCacheSize>
+    <clearNetworkCacheOnExit>1</clearNetworkCacheOnExit>
+    <maxStringsInHistory>500</maxStringsInHistory>
+    <storeHistory>1</storeHistory>
+  </preferences>
+  <maxPictureWidth>1200</maxPictureWidth>
+  <maxHeadwordSize>256</maxHeadwordSize>
+  <maxHeadwordsToExpand>0</maxHeadwordsToExpand>
+  <hotkeys>
+    <portalBindings>
+      <binding id="main-window" triggerDescription="Ctrl+Alt+G"/>
+      <binding id="future-action" triggerDescription="Ctrl+Alt+F"/>
+      <binding id="clipboard-lookup" triggerDescription="Ctrl+&lt;Alt&gt;+&amp; &quot;C&quot;"/>
+      <binding id="main-window" triggerDescription="Ctrl+Shift+G"/>
+      <futureOption value="1"/>
+    </portalBindings>
+    <futureSection enabled="1"/>
+  </hotkeys>
+  <headwordsDialog>
+    <searchMode>0</searchMode>
+    <matchCase>0</matchCase>
+    <autoApply>0</autoApply>
+    <headwordsExportPath></headwordsExportPath>
+    <headwordsDialogGeometry></headwordsDialogGeometry>
+  </headwordsDialog>
+</config>
