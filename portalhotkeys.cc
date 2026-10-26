@@ -270,7 +270,10 @@ private:
             dispose();
             return;
         }
-        if ( reply.service() != owner )
+        // Qt may omit sender metadata from a pending-call reply. The call was
+        // addressed to the captured unique owner and Qt correlates its serial;
+        // enforce sender identity additionally when that metadata is present.
+        if ( !reply.service().isEmpty() && reply.service() != owner )
             return;
         if ( reply.type() != QDBusMessage::ReplyMessage || reply.signature() != QLatin1String( "o" )
              || reply.arguments().size() != 1
