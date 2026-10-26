@@ -141,10 +141,14 @@ inline QString rewriteWebsiteLinks( QString html, QUrl const & pageUrl, QString 
   }
 
   // The baseline counted these with QRegExp, whose classes are Qt's own, not
-  // PCRE's: \s is QChar::isSpace() and \b splits on QChar::isLetterOrNumber()
-  // or underscore. Emulating that with QRegularExpression options does not hold
-  // for every Unicode input, so the counting is done directly with those classes.
-  auto isWordChar = []( QChar c ) { return c.isLetterOrNumber() || c == QLatin1Char( '_' ); };
+  // PCRE's: \s is QChar::isSpace(), and \b splits on QRegExp's word characters,
+  // which are letters, numbers, marks (accents and combining characters) and
+  // underscore. Emulating that with QRegularExpression options does not hold for
+  // every Unicode input, so the counting uses those classes directly.
+  auto isWordChar = []( QChar c )
+  {
+    return c.isLetterOrNumber() || c.isMark() || c == QLatin1Char( '_' );
+  };
   auto countOpen = [&]( QChar const * name, int length ) {
     int count = 0;
     for ( qsizetype i = 0; i + length < html.size(); ++i )

@@ -525,11 +525,20 @@ void TstLinkRewrite::websiteRewritesRetainedBaselineBehaviour()
     QCOMPARE( WebSite::detail::rewriteWebsiteLinks( QStringLiteral( "<span>t</span\u2003>" ), page,
                                                     QStringLiteral( "dict" ) ),
               QStringLiteral( "<span>t</span\u2003>" ) );
-    // A combining mark is not a letter or number, so it is a word boundary there
-    // and the tag counts as open, exactly as QRegExp classified it.
+    // A combining mark is a QRegExp word character, so there is no boundary after
+    // the tag name and the tag does not count as open -- the baseline output here
+    // is the input unchanged.
     QCOMPARE( WebSite::detail::rewriteWebsiteLinks( QStringLiteral( "<span\u0301>t" ), page,
                                                     QStringLiteral( "dict" ) ),
-              QStringLiteral( "<span\u0301>t</span>" ) );
+              QStringLiteral( "<span\u0301>t" ) );
+    // A hyphen is not a word character, so it is a boundary and counts.
+    QCOMPARE( WebSite::detail::rewriteWebsiteLinks( QStringLiteral( "<span->t" ), page,
+                                                    QStringLiteral( "dict" ) ),
+              QStringLiteral( "<span->t</span>" ) );
+    // Underscore is a word character, so no boundary and no appended closer.
+    QCOMPARE( WebSite::detail::rewriteWebsiteLinks( QStringLiteral( "<span_>t" ), page,
+                                                    QStringLiteral( "dict" ) ),
+              QStringLiteral( "<span_>t" ) );
 
     // Unclosed span/div wrappers are still closed.
     QCOMPARE( WebSite::detail::rewriteWebsiteLinks( QStringLiteral( "<span><div>t" ), page,
