@@ -63,6 +63,14 @@ equals(GD_CLOSURE_MODE, true) {
     UI_DIR      = $$GD_CLOSURE_BUILD_ROOT/ui
     RCC_DIR     = $$GD_CLOSURE_BUILD_ROOT/rcc
 
+    # An in-source closure build has no directory to put its outputs in, and qmake
+    # does not create these for a staticlib: create them here so the documented
+    # command works on a clean tree instead of failing on a missing directory.
+    !exists($$OBJECTS_DIR): system(mkdir -p $$OBJECTS_DIR)
+    !exists($$MOC_DIR):     system(mkdir -p $$MOC_DIR)
+    !exists($$UI_DIR):      system(mkdir -p $$UI_DIR)
+    !exists($$RCC_DIR):     system(mkdir -p $$RCC_DIR)
+
     # The archive is compiled against the same Qt feature set as the final
     # application so a production header cannot silently compile differently in
     # the test closure.
