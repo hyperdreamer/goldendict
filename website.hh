@@ -140,17 +140,55 @@ inline QString rewriteWebsiteLinks( QString html, QUrl const & pageUrl, QString 
     html = articleNewString;
   }
 
-  // QRegExp classified \s and \b with Unicode property tables; QRegularExpression
-  // only does so with this option, and the baseline counting depends on it
-  // (for example "<spané>" and "<span>text</span\u00a0>" must not be miscounted).
-  QRegularExpression::PatternOptions const balanceOptions =
-      QRegularExpression::CaseInsensitiveOption | QRegularExpression::UseUnicodePropertiesOption;
-  int openTags = html.count( QRegularExpression( QStringLiteral( "<\\s*span\\b" ), balanceOptions ) );
-  int closedTags = html.count( QRegularExpression( QStringLiteral( "<\\s*/span\\s*>" ), balanceOptions ) );
+  // The baseline counted these with QRegExp, whose classes are Qt's own, not
+  // PCRE's: \s is QChar::isSpace() and \b splits on QChar::isLetterOrNumber()
+  // or underscore. Emulating that with QRegularExpression options does not hold
+  // for every Unicode input, so the counting is done directly with those classes.
+  auto isWordChar = []( QChar c ) { return c.isLetterOrNumber() || c == QLatin1Char( '_' ); };
+  auto countOpen = [&]( QChar const * name, int length ) {
+    int count = 0;
+    for ( qsizetype i = 0; i + length < html.size(); ++i )
+    {
+      if ( html[i] != QLatin1Char( '<' ) ) continue;
+      qsizetype j = i + 1;
+      while ( j < html.size() && html[j].isSpace() ) ++j;
+      qsizetype k = 0;
+      while ( k < length && j + k < html.size()
+              && html[j + k].toLower() == name[k].toLower() ) ++k;
+      if ( k != length ) continue;
+      qsizetype const after = j + length;
+      if ( after >= html.size() || !isWordChar( html[after] ) ) ++count;
+    }
+    return count;
+  };
+  auto countClose = [&]( QChar const * name, int length ) {
+    int count = 0;
+    for ( qsizetype i = 0; i + length < html.size(); ++i )
+    {
+      if ( html[i] != QLatin1Char( '<' ) ) continue;
+      qsizetype j = i + 1;
+      while ( j < html.size() && html[j].isSpace() ) ++j;
+      if ( j >= html.size() || html[j] != QLatin1Char( '/' ) ) continue;
+      ++j;
+      qsizetype k = 0;
+      while ( k < length && j + k < html.size()
+              && html[j + k].toLower() == name[k].toLower() ) ++k;
+      if ( k != length ) continue;
+      j += length;
+      while ( j < html.size() && html[j].isSpace() ) ++j;
+      if ( j < html.size() && html[j] == QLatin1Char( '>' ) ) ++count;
+    }
+    return count;
+  };
+
+  QString const spanName = QStringLiteral( "span" );
+  QString const divName = QStringLiteral( "div" );
+  int openTags = countOpen( spanName.constData(), 4 );
+  int closedTags = countClose( spanName.constData(), 4 );
   while( openTags > closedTags ) { html += QStringLiteral( "</span>" ); closedTags += 1; }
 
-  openTags = html.count( QRegularExpression( QStringLiteral( "<\\s*div\\b" ), balanceOptions ) );
-  closedTags = html.count( QRegularExpression( QStringLiteral( "<\\s*/div\\s*>" ), balanceOptions ) );
+  openTags = countOpen( divName.constData(), 3 );
+  closedTags = countClose( divName.constData(), 3 );
   while( openTags > closedTags ) { html += QStringLiteral( "</div>" ); closedTags += 1; }
 
   return html;

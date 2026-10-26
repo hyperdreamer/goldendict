@@ -520,6 +520,17 @@ void TstLinkRewrite::websiteRewritesRetainedBaselineBehaviour()
                                                     QStringLiteral( "dict" ) ),
               QStringLiteral( "<span>text</span\u00a0>" ) );
 
+    // Unicode whitespace inside the retained \s* positions counts like the
+    // QRegExp baseline (QChar::isSpace): an em-space closer balances a span.
+    QCOMPARE( WebSite::detail::rewriteWebsiteLinks( QStringLiteral( "<span>t</span\u2003>" ), page,
+                                                    QStringLiteral( "dict" ) ),
+              QStringLiteral( "<span>t</span\u2003>" ) );
+    // A combining mark is not a letter or number, so it is a word boundary there
+    // and the tag counts as open, exactly as QRegExp classified it.
+    QCOMPARE( WebSite::detail::rewriteWebsiteLinks( QStringLiteral( "<span\u0301>t" ), page,
+                                                    QStringLiteral( "dict" ) ),
+              QStringLiteral( "<span\u0301>t</span>" ) );
+
     // Unclosed span/div wrappers are still closed.
     QCOMPARE( WebSite::detail::rewriteWebsiteLinks( QStringLiteral( "<span><div>t" ), page,
                                                     QStringLiteral( "dict" ) ),
