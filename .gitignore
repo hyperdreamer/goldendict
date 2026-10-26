@@ -41,9 +41,21 @@ GoldenDict.xcodeproj/
 *.suo
 *.vcxproj.user
 
-# Test build outputs (the suites compile in place)
+# Test build outputs (the suites compile in place). Only the BUILT binaries are
+# ignored: `tests/tst_*/tst_[a-z_]*` also matched tracked sources such as
+# tst_hotkeys.cc and tst_platformwindow.pro, which silently kept new suites out
+# of commits unless they were force-added.
 tests/**/.qmake.stash
 tests/**/target_wrapper.sh
-tests/tst_*/tst_[a-z_]*
+tests/tst_*/tst_article_schemes
+tests/tst_*/tst_encoding
+tests/tst_*/tst_htmlescape
+tests/tst_*/tst_hotkeys
+tests/tst_*/tst_langcoder
+tests/tst_*/tst_linkrewrite
+tests/tst_*/tst_platformwindow
+tests/tst_*/tst_regex
+tests/tst_*/tst_utf8_wstring
 tests/Makefile*
 tests/libgdtestclosure.a
+tests/build/
