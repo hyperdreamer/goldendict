@@ -109,7 +109,7 @@ public:
 private:
 
   virtual void requestFinished( QNetworkReply * );
-  static Encoding codecForHtml( QByteArray const & ba );
+  static Encoding codecForHtml( QByteArray const & ba, QByteArray const & contentType = QByteArray() );
 };
 
 void WebSiteArticleRequest::cancel()
@@ -136,11 +136,11 @@ WebSiteArticleRequest::WebSiteArticleRequest( QString const & url_,
 #endif
 }
 
-Encoding WebSiteArticleRequest::codecForHtml( QByteArray const & ba )
+Encoding WebSiteArticleRequest::codecForHtml( QByteArray const & ba, QByteArray const & contentType )
 {
   // Detection precedence (BOM before HTML metadata, then meta/http-equiv) lives
   // in Encoding::forHtml; the old Qt-codec lookup is gone.
-  return Encoding::forHtml( ba, QByteArray() );
+  return Encoding::forHtml( ba, contentType );
 }
 
 void WebSiteArticleRequest::requestFinished( QNetworkReply * r )
@@ -176,110 +176,13 @@ void WebSiteArticleRequest::requestFinished( QNetworkReply * r )
     // Handle reply data
 
     QByteArray replyData = netReply->readAll();
-    QString articleString;
+    Encoding const codec = WebSiteArticleRequest::codecForHtml(
+        replyData, netReply->rawHeader( "Content-Type" ) );
+    QString articleString = codec.isValid() ? codec.decode( replyData )
+                                            : QString::fromUtf8( replyData );
 
-  
 
-    // Change links from relative to absolute
-
-    QString root = netReply->url().scheme() + "://" + netReply->url().host();
-    QString base = root + netReply->url().path();
-    while( !base.isEmpty() && !base.endsWith( "/" ) )
-      base.chop( 1 );
-
-    QRegularExpression tags( "<\\s*(a|link|img|script)\\s+[^>]*(src|href)\\s*=\\s*['\"][^>]+>",
-                             QRegularExpression::CaseInsensitiveOption );
-    QRegularExpression links( "\\b(src|href)\\s*=\\s*(['\"])([^'\"]+['\"])",
-                              QRegularExpression::CaseInsensitiveOption );
-    int pos = 0;
-    QString articleNewString;
-    QRegularExpressionMatchIterator it = tags.globalMatch( articleString );
-    while( it.hasNext() )
-    {
-      QRegularExpressionMatch match = it.next();
-      articleNewString += articleString.mid( pos, match.capturedStart() - pos );
-      pos = match.capturedEnd();
-
-      QString tag = match.captured();
-
-      QRegularExpressionMatch match_links = links.match( tag );
-      if( !match_links.hasMatch() )
-      {
-        articleNewString += tag;
-        continue;
-      }
-
-      QString url = match_links.captured( 3 );
-
-      if( url.indexOf( ":/" ) >= 0 || url.indexOf( "data:" ) >= 0
-          || url.indexOf( "mailto:" ) >= 0 || url.startsWith( "#" )
-          || url.startsWith( "javascript:" ) )
-      {
-        // External link, anchor or base64-encoded data
-        articleNewString += tag;
-        continue;
-      }
-
-      QString newUrl = match_links.captured( 1 ) + "=" + match_links.captured( 2 );
-      if( url.startsWith( "//" ) )
-        newUrl += netReply->url().scheme() + ":";
-      else
-      if( url.startsWith( "/" ) )
-        newUrl += root;
-      else
-        newUrl += base;
-      newUrl += match_links.captured( 3 );
-
-      tag.replace( match_links.capturedStart(), match_links.capturedLength(), newUrl );
-      articleNewString += tag;
-    }
-    if( pos )
-    {
-      articleNewString += articleString.mid( pos );
-      articleString = articleNewString;
-      articleNewString.clear();
-    }
-
-    // Redirect CSS links to own handler
-
-    QString prefix = QString( "bres://" ) + dictPtr->getId().c_str() + "/";
-    QRegularExpression linkTags( "(<\\s*link\\s[^>]*rel\\s*=\\s*['\"]stylesheet['\"]\\s+[^>]*href\\s*=\\s*['\"])([^'\"]+)://([^'\"]+['\"][^>]+>)",
-                                 QRegularExpression::CaseInsensitiveOption );
-    pos = 0;
-    it = linkTags.globalMatch( articleString );
-    while( it.hasNext() )
-    {
-      QRegularExpressionMatch match = it.next();
-      articleNewString += articleString.mid( pos, match.capturedStart() - pos );
-      pos = match.capturedEnd();
-
-      QString newTag = match.captured( 1 ) + prefix + match.captured( 2 )
-                       + "/" + match.captured( 3 );
-      articleNewString += newTag;
-    }
-    if( pos )
-    {
-      articleNewString += articleString.mid( pos );
-      articleString = articleNewString;
-      articleNewString.clear();
-    }
-    // Check for unclosed <span> and <div>
-
-    int openTags = articleString.count( QRegularExpression( "<\\s*span\\b", QRegularExpression::CaseInsensitiveOption ) );
-    int closedTags = articleString.count( QRegularExpression( "<\\s*/span\\s*>", QRegularExpression::CaseInsensitiveOption ) );
-    while( openTags > closedTags )
-    {
-      articleString += "</span>";
-      closedTags += 1;
-    }
-
-    openTags = articleString.count( QRegularExpression( "<\\s*div\\b", QRegularExpression::CaseInsensitiveOption ) );
-    closedTags = articleString.count( QRegularExpression( "<\\s*/div\\s*>", QRegularExpression::CaseInsensitiveOption ) );
-    while( openTags > closedTags )
-    {
-      articleString += "</div>";
-      closedTags += 1;
-    }
+    articleString = detail::rewriteWebsiteLinks( articleString, netReply->url(), dictPtr->getId().c_str() );
 
     // See Issue #271: A mechanism to clean-up invalid HTML cards.
     articleString += "</font>""</font>""</font>""</font>""</font>""</font>"
@@ -355,16 +258,7 @@ sptr< DataRequest > WebSiteDictionary::getArticle( wstring const & str,
 
     sptr< DataRequestInstant > dr = new DataRequestInstant( true );
 
-    string result = "<div class=\"website_padding\"></div>";
-
-    result += string( "<iframe id=\"gdexpandframe-" ) + getId() +
-                      "\" src=\"" + urlString.data() +
-                      "\" onmouseover=\"processIframeMouseOver('gdexpandframe-" + getId() + "');\" "
-                      "onmouseout=\"processIframeMouseOut();\" "
-                      "scrolling=\"no\" marginwidth=\"0\" marginheight=\"0\" "
-                      "frameborder=\"0\" vspace=\"0\" hspace=\"0\" "
-                      "style=\"overflow:visible; width:100%; display:none;\">"
-                      "</iframe>";
+    string result = detail::websiteIframeMarkup( QString::fromStdString( getId() ), QString::fromUtf8( urlString.data() ) ).toStdString();
 
     dr->getData().resize( result.size() );
 

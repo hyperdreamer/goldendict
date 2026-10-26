@@ -60,6 +60,114 @@ inline QByteArray substituteUrlPlaceholders( QByteArray const & urlTemplate, QSt
   return result;
 }
 
+
+/// Baseline website rewriting, extracted so the retained behaviour stays testable:
+/// relative link targets become absolute against the response URL, absolute
+/// stylesheet links are remapped to the dictionary resource scheme, and unclosed
+/// span/div wrappers are closed. This is the shipped behaviour, not a browser
+/// URL parser: no base-tag handling and no character-reference decoding.
+inline QString rewriteWebsiteLinks( QString html, QUrl const & pageUrl, QString const & dictId )
+{
+  QString root = pageUrl.scheme() + QStringLiteral( "://" ) + pageUrl.host();
+  QString base = root + pageUrl.path();
+  while( !base.isEmpty() && !base.endsWith( QLatin1Char( '/' ) ) )
+    base.chop( 1 );
+
+  QRegularExpression tags( QStringLiteral( "<\\s*(a|link|img|script)\\s+[^>]*(src|href)\\s*=\\s*['\"][^>]+>" ),
+                           QRegularExpression::CaseInsensitiveOption );
+  QRegularExpression links( QStringLiteral( "\\b(src|href)\\s*=\\s*(['\"])([^'\"]+['\"])" ),
+                            QRegularExpression::CaseInsensitiveOption );
+  int pos = 0;
+  QString articleNewString;
+  QRegularExpressionMatchIterator it = tags.globalMatch( html );
+  while( it.hasNext() )
+  {
+    QRegularExpressionMatch match = it.next();
+    articleNewString += html.mid( pos, match.capturedStart() - pos );
+    pos = match.capturedEnd();
+
+    QString tag = match.captured();
+    QRegularExpressionMatch matchLinks = links.match( tag );
+    if( !matchLinks.hasMatch() )
+    {
+      articleNewString += tag;
+      continue;
+    }
+
+    QString url = matchLinks.captured( 3 );
+    if( url.indexOf( QStringLiteral( ":/" ) ) >= 0 || url.indexOf( QStringLiteral( "data:" ) ) >= 0
+        || url.indexOf( QStringLiteral( "mailto:" ) ) >= 0 || url.startsWith( QLatin1Char( '#' ) )
+        || url.startsWith( QStringLiteral( "javascript:" ) ) )
+    {
+      articleNewString += tag;
+      continue;
+    }
+
+    QString newUrl = matchLinks.captured( 1 ) + QStringLiteral( "=" ) + matchLinks.captured( 2 );
+    if( url.startsWith( QStringLiteral( "//" ) ) )
+      newUrl += pageUrl.scheme() + QLatin1Char( ':' );
+    else if( url.startsWith( QLatin1Char( '/' ) ) )
+      newUrl += root;
+    else
+      newUrl += base;
+    newUrl += matchLinks.captured( 3 );
+
+    tag.replace( matchLinks.capturedStart(), matchLinks.capturedLength(), newUrl );
+    articleNewString += tag;
+  }
+  if( pos )
+  {
+    articleNewString += html.mid( pos );
+    html = articleNewString;
+    articleNewString.clear();
+  }
+
+  QString const prefix = QStringLiteral( "bres://" ) + dictId + QLatin1Char( '/' );
+  QRegularExpression linkTags( QStringLiteral( "(<\\s*link\\s[^>]*rel\\s*=\\s*['\"]stylesheet['\"]\\s+[^>]*href\\s*=\\s*['\"])([^'\"]+)://([^'\"]+['\"][^>]+>)" ),
+                               QRegularExpression::CaseInsensitiveOption );
+  pos = 0;
+  it = linkTags.globalMatch( html );
+  while( it.hasNext() )
+  {
+    QRegularExpressionMatch match = it.next();
+    articleNewString += html.mid( pos, match.capturedStart() - pos );
+    pos = match.capturedEnd();
+    articleNewString += match.captured( 1 ) + prefix + match.captured( 2 ) + QLatin1Char( '/' ) + match.captured( 3 );
+  }
+  if( pos )
+  {
+    articleNewString += html.mid( pos );
+    html = articleNewString;
+  }
+
+  int openTags = html.count( QRegularExpression( QStringLiteral( "<\\s*span\\b" ), QRegularExpression::CaseInsensitiveOption ) );
+  int closedTags = html.count( QRegularExpression( QStringLiteral( "<\\s*/span\\s*>" ), QRegularExpression::CaseInsensitiveOption ) );
+  while( openTags > closedTags ) { html += QStringLiteral( "</span>" ); closedTags += 1; }
+
+  openTags = html.count( QRegularExpression( QStringLiteral( "<\\s*div\\b" ), QRegularExpression::CaseInsensitiveOption ) );
+  closedTags = html.count( QRegularExpression( QStringLiteral( "<\\s*/div\\s*>" ), QRegularExpression::CaseInsensitiveOption ) );
+  while( openTags > closedTags ) { html += QStringLiteral( "</div>" ); closedTags += 1; }
+
+  return html;
+}
+
+/// The inline frame GoldenDict inserts for a website dictionary. Both id and name
+/// carry the frame identity because the article view locates the frame by name.
+inline QString websiteIframeMarkup( QString const & dictId, QString const & url )
+{
+  QString const frame = QStringLiteral( "gdexpandframe-" ) + dictId;
+  return QStringLiteral( "<div class=\"website_padding\"></div>" )
+       + QStringLiteral( "<iframe id=\"" ) + frame
+       + QStringLiteral( "\" name=\"" ) + frame
+       + QStringLiteral( "\" src=\"" ) + url
+       + QStringLiteral( "\" onmouseover=\"processIframeMouseOver('" ) + frame
+       + QStringLiteral( "');\" onmouseout=\"processIframeMouseOut();\" "
+                         "scrolling=\"no\" marginwidth=\"0\" marginheight=\"0\" "
+                         "frameborder=\"0\" vspace=\"0\" hspace=\"0\" "
+                         "style=\"overflow:visible; width:100%; display:none;\">"
+                         "</iframe>" );
+}
+
 } // namespace detail
 
 

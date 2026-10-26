@@ -39,6 +39,7 @@
 
 #include "audiolink.hh"
 #include "linkrewrite.hh"
+#include "website.hh"
 #include "support/fixtures.hh"
 
 namespace
@@ -276,6 +277,7 @@ class TstLinkRewrite : public QObject
     Q_OBJECT
 
   private slots:
+    void websiteRewritesRetainedBaselineBehaviour();
     void initTestCase();
     void cleanupTestCase();
 
@@ -469,6 +471,54 @@ void TstLinkRewrite::fixtureRowsMatchProduction()
 
 
 
+
+
+void TstLinkRewrite::websiteRewritesRetainedBaselineBehaviour()
+{
+    const QUrl page( QStringLiteral( "http://127.0.0.1:43127/dir/page?q=1" ) );
+
+    // Relative, root-relative and protocol-relative targets become absolute by
+    // string concatenation, which is the retained baseline behaviour: the port is
+    // not carried and ".." is not resolved. The body text itself is preserved.
+    QCOMPARE( WebSite::detail::rewriteWebsiteLinks(
+                  QStringLiteral( "<p>body text</p><a href='../x.html'>x</a>"
+                                  "<img src='/img/a.png'><script src='//cdn.example.test/s.js'>" ),
+                  page, QStringLiteral( "dict" ) ),
+              QStringLiteral( "<p>body text</p><a href='http://127.0.0.1/dir/../x.html'>x</a>"
+                              "<img src='http://127.0.0.1/img/a.png'>"
+                              "<script src='http://cdn.example.test/s.js'>" ) );
+
+    // Absolute, data:, mailto:, javascript: and fragment targets are left alone.
+    QCOMPARE( WebSite::detail::rewriteWebsiteLinks(
+                  QStringLiteral( "<a href='https://other.test/z'>z</a><img src='data:image/png;base64,AA'>"
+                                  "<a href='mailto:a@b.c'>m</a><a href='javascript:void(0)'>j</a>"
+                                  "<a href='#frag'>f</a>" ),
+                  page, QStringLiteral( "dict" ) ),
+              QStringLiteral( "<a href='https://other.test/z'>z</a><img src='data:image/png;base64,AA'>"
+                              "<a href='mailto:a@b.c'>m</a><a href='javascript:void(0)'>j</a>"
+                              "<a href='#frag'>f</a>" ) );
+
+    // Absolute stylesheet links are remapped to the dictionary resource scheme.
+    // The retained pattern needs an attribute after the closing quote, and it
+    // rewrites scheme and host into one path segment: both quirks are shipped
+    // behaviour, so the fixture pins them rather than correcting them.
+    QCOMPARE( WebSite::detail::rewriteWebsiteLinks(
+                  QStringLiteral( "<link rel='stylesheet' href='https://cdn.test/site.css' type='text/css'>" ),
+                  page, QStringLiteral( "dict" ) ),
+              QStringLiteral( "<link rel='stylesheet' href='bres://dict/https/cdn.test/site.css' type='text/css'>" ) );
+
+    // Unclosed span/div wrappers are still closed.
+    QCOMPARE( WebSite::detail::rewriteWebsiteLinks( QStringLiteral( "<span><div>t" ), page,
+                                                    QStringLiteral( "dict" ) ),
+              QStringLiteral( "<span><div>t</span></div>" ) );
+
+    // The inline frame carries the identity in both id and name.
+    const QString frame = WebSite::detail::websiteIframeMarkup(
+        QStringLiteral( "dict-id" ), QStringLiteral( "https://example.test/page" ) );
+    QVERIFY( frame.contains( QStringLiteral( "id=\"gdexpandframe-dict-id\"" ) ) );
+    QVERIFY( frame.contains( QStringLiteral( "name=\"gdexpandframe-dict-id\"" ) ) );
+    QVERIFY( frame.contains( QStringLiteral( "src=\"https://example.test/page\"" ) ) );
+}
 
 void TstLinkRewrite::gdLookupPreservesStructureAndIsIdempotent()
 {
