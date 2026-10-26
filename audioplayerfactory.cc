@@ -5,7 +5,6 @@
 #include <QObject>
 #include "audioplayerfactory.hh"
 #include "ffmpegaudioplayer.hh"
-#include "multimediaaudioplayer.hh"
 #include "externalaudioplayer.hh"
 #include "gddebug.hh"
 
@@ -47,28 +46,18 @@ void AudioPlayerFactory::setPreferences( Config::Preferences const & p )
 
 void AudioPlayerFactory::reset()
 {
+  // The internal player has one implementation left: ffmpeg. A build without it
+  // (no_ffmpeg_player) has no internal player at all; load() has already cleared
+  // the runtime useInternalPlayer flag for that build, and if a caller still asks
+  // for the internal player it falls through to the external one, as before.
   if( useInternalPlayer )
   {
-    // qobject_cast checks below account for the case when an unsupported backend
-    // is stored in config. After this backend is replaced with the default one
-    // upon preferences saving, the code below does not reset playerPtr with
-    // another object of the same type.
-
 #ifdef MAKE_FFMPEG_PLAYER
     Q_ASSERT( Config::InternalPlayerBackend::defaultBackend().isFfmpeg()
               && "Adjust the code below after changing the default backend." );
 
-    if( !internalPlayerBackend.isQtmultimedia() )
-    {
-      if( !playerPtr || !qobject_cast< Ffmpeg::AudioPlayer * >( playerPtr.data() ) )
-        playerPtr.reset( new Ffmpeg::AudioPlayer );
-      return;
-    }
-#endif
-
-#ifdef MAKE_QTMULTIMEDIA_PLAYER
-    if( !playerPtr || !qobject_cast< MultimediaAudioPlayer * >( playerPtr.data() ) )
-      playerPtr.reset( new MultimediaAudioPlayer );
+    if( !playerPtr || !qobject_cast< Ffmpeg::AudioPlayer * >( playerPtr.data() ) )
+      playerPtr.reset( new Ffmpeg::AudioPlayer );
     return;
 #endif
   }
