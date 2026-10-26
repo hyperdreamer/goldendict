@@ -535,6 +535,11 @@ void TstLinkRewrite::websiteRewritesRetainedBaselineBehaviour()
     QCOMPARE( WebSite::detail::rewriteWebsiteLinks( QStringLiteral( "<span->t" ), page,
                                                     QStringLiteral( "dict" ) ),
               QStringLiteral( "<span->t</span>" ) );
+    // Whitespace between '/' and the name is not part of the baseline pattern, so
+    // "</ span>" does not close anything.
+    QCOMPARE( WebSite::detail::rewriteWebsiteLinks( QStringLiteral( "<span>t</ span>" ), page,
+                                                    QStringLiteral( "dict" ) ),
+              QStringLiteral( "<span>t</ span></span>" ) );
     // Underscore is a word character, so no boundary and no appended closer.
     QCOMPARE( WebSite::detail::rewriteWebsiteLinks( QStringLiteral( "<span_>t" ), page,
                                                     QStringLiteral( "dict" ) ),

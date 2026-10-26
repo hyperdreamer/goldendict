@@ -173,7 +173,7 @@ inline QString rewriteWebsiteLinks( QString html, QUrl const & pageUrl, QString 
       qsizetype j = i + 1;
       while ( j < html.size() && html[j].isSpace() ) ++j;
       if ( j >= html.size() || html[j] != QLatin1Char( '/' ) ) continue;
-      ++j;
+      ++j; // no whitespace allowed between '/' and the name, as in the baseline
       qsizetype k = 0;
       while ( k < length && j + k < html.size()
               && html[j + k].toLower() == name[k].toLower() ) ++k;
