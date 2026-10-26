@@ -6,6 +6,7 @@
 
 #include <QObject>
 #include <QMap>
+#include <QUrl>
 #include <set>
 #include <list>
 #include "config.hh"
@@ -76,6 +77,11 @@ public:
   /// Return true if path successfully adjusted
   static bool adjustFilePath( QString & fileName );
 
+  /// Return the local URLs emitted in one immutable HTML snapshot. Later GUI
+  /// policy publication may resolve missing paths without changing the HTML or
+  /// introducing global permissions shared by unrelated pages.
+  static QList< QUrl > emittedFileUrls( QByteArray const & html );
+
   /// Set collapse articles parameters
   void setCollapseParameters( bool autoCollapse, int articleSize );
 
@@ -138,6 +144,10 @@ public:
                   bool ignoreDiacritics = false );
 
   virtual void cancel();
+
+  /// Copy this request's current HTML under its data lock, then report local
+  /// URLs outside the lock for the owning document's generation snapshot.
+  QList< QUrl > emittedFileUrls();
 //  { finish(); } // Add our own requests cancellation here
 
 private slots:

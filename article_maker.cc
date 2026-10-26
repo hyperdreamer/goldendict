@@ -9,11 +9,12 @@
 #include <limits.h>
 #include <QFile>
 #include <QUrl>
+#include <QRegularExpression>
 #include <QTextDocumentFragment>
 #include "folding.hh"
 #include "langcoder.hh"
 #include "gddebug.hh"
-#include "qt4x5.hh"
+#include <cstring>
 
 using std::vector;
 using std::string;
@@ -237,8 +238,8 @@ std::string ArticleMaker::makeNotFoundBody( QString const & word,
   QString str( word );
   if( str.isRightToLeft() )
   {
-    str.insert( 0, (ushort)0x202E ); // RLE, Right-to-Left Embedding
-    str.append( (ushort)0x202C ); // PDF, POP DIRECTIONAL FORMATTING
+    str.insert( 0, QChar( char16_t( 0x202E ) ) ); // RLE, Right-to-Left Embedding
+    str.append( QChar( char16_t( 0x202C ) ) ); // PDF, POP DIRECTIONAL FORMATTING
   }
 
   if ( word.size() )
@@ -462,6 +463,26 @@ bool ArticleMaker::adjustFilePath( QString & fileName )
     }
   }
   return false;
+}
+
+QList< QUrl > ArticleMaker::emittedFileUrls( QByteArray const & html )
+{
+  // This is a conservative inventory of known literal URLs, not an HTML/CSS
+  // rewriter. Attribute values and CSS url() literals are snapshot-local; an
+  // embedded file: substring in an external URL must not grant file access.
+  static QRegularExpression const expression(
+    QStringLiteral( "(?:^|[\\s\"'(=<>])(file:[^\\s\"'<>)]*)" ),
+    QRegularExpression::CaseInsensitiveOption );
+  QList< QUrl > result;
+  auto matches = expression.globalMatch( QString::fromUtf8( html ) );
+  while( matches.hasNext() )
+  {
+    auto const match = matches.next();
+    QUrl const url( Html::unescape( match.captured( 1 ) ) );
+    if( url.isValid() && url.isLocalFile() && !result.contains( url ) )
+      result.append( url );
+  }
+  return result;
 }
 
 //////// ArticleRequest
@@ -1112,7 +1133,7 @@ string ArticleRequest::linkWord( QString const & str )
 
   url.setScheme( "gdlookup" );
   url.setHost( "localhost" );
-  url.setPath( Qt4x5::Url::ensureLeadingSlash( str ) );
+  url.setPath( str.startsWith( QLatin1Char( '/' ) ) ? str : QStringLiteral( "/" ) + str );
 
   string escapedResult = Html::escape( str.toUtf8().data() );
   return string( "<a href=\"" ) + url.toEncoded().data() + "\">" + escapedResult +"</a>";
@@ -1125,6 +1146,17 @@ std::string ArticleRequest::escapeSpacing( QString const & str )
   spacing.replace( "\n", "<br>" );
 
   return spacing.data();
+}
+
+QList< QUrl > ArticleRequest::emittedFileUrls()
+{
+  QByteArray snapshot;
+  {
+    Mutex::Lock lock( dataMutex );
+    if( !data.empty() )
+      snapshot = QByteArray( data.data(), qsizetype( data.size() ) );
+  }
+  return ArticleMaker::emittedFileUrls( snapshot );
 }
 
 void ArticleRequest::cancel()

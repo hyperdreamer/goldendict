@@ -5,18 +5,17 @@
  * declarations of the scheme handler, its streaming device and the request
  * interceptor.
  *
- * This header intentionally carries declarations only at this point of the
- * migration: the handler/device/interceptor QObject declarations arrive
- * together with their implementations, so the meta-object compiler never
- * generates a vtable for an unfinished virtual method. Only the scheme
- * registration entry point, the data-request reader and the reader factory are
- * complete contracts here.
+ * The reader contract and buffered scheme coordinator are complete here.
+ * ArticleStreamDevice and the request interceptor remain forward declarations
+ * until the tasks that implement them.
  */
 
 #ifndef GOLDENDICT_ARTICLESCHEMES_HH_INCLUDED
 #define GOLDENDICT_ARTICLESCHEMES_HH_INCLUDED
 
 #include <QByteArray>
+#include <QUrl>
+#include <QWebEngineUrlSchemeHandler>
 #include <QtGlobal>
 
 #include <cstddef>
@@ -80,5 +79,25 @@ std::shared_ptr< DataRequestReader const > makeDataRequestReader();
 /// terminal failure of that job.
 using DataRequestReaderFactory = std::function< std::shared_ptr< DataRequestReader const >(
   sptr< Dictionary::DataRequest > const & ) >;
+
+/// GUI-owned coordinator. The resource manager must outlive this handler;
+/// reply devices belong to their jobs and are never deleted by the handler.
+class ArticleSchemeHandler : public QWebEngineUrlSchemeHandler
+{
+  Q_OBJECT
+public:
+  ArticleSchemeHandler( ArticleNetworkAccessManager & resources, QObject * parent = nullptr );
+  ArticleSchemeHandler( ArticleNetworkAccessManager & resources,
+                        DataRequestReaderFactory readerFactory, QObject * parent = nullptr );
+  ~ArticleSchemeHandler() override;
+  void requestStarted( QWebEngineUrlRequestJob * job ) override;
+
+signals:
+  void producerFailed( QUrl const & url, QString const & message );
+
+private:
+  struct State;
+  std::unique_ptr< State > state;
+};
 
 #endif
