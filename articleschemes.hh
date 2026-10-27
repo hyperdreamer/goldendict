@@ -14,13 +14,17 @@
 
 #include <QByteArray>
 #include <QIODevice>
+#include <QMap>
+#include <QSet>
 #include <QUrl>
+#include <QWebEngineUrlRequestInterceptor>
 #include <QWebEngineUrlSchemeHandler>
 #include <QtGlobal>
 
 #include <cstddef>
 #include <functional>
 #include <memory>
+#include <mutex>
 
 #include "sptr.hh"
 
@@ -32,8 +36,29 @@ class DataRequest;
 class ArticleNetworkAccessManager;
 class ArticleSchemeHandler;
 class ArticleStreamDevice;
-struct ArticleRequestPolicy;
-class ArticleRequestInterceptor;
+struct ArticleRequestPolicy
+{
+  bool blockExternal = false;
+  QSet< QString > dictionaryHosts;
+  QMap< QString, QUrl > localFileRedirects;
+};
+
+/// The page owns this interceptor. The IO callback sees only one immutable
+/// snapshot; publishing and preference refresh never borrow GUI state on IO.
+class ArticleRequestInterceptor : public QWebEngineUrlRequestInterceptor
+{
+public:
+  explicit ArticleRequestInterceptor( QObject * parent = nullptr );
+  void setPolicy( std::shared_ptr< ArticleRequestPolicy const > policy );
+  void interceptRequest( QWebEngineUrlRequestInfo & info ) override;
+
+private:
+  friend class ArticleProfileController;
+  std::shared_ptr< ArticleRequestPolicy const > policy;
+  std::mutex diagnosticMutex;
+  std::weak_ptr< ArticleRequestPolicy const > diagnosticPolicy;
+  QSet< QUrl > deniedUrls;
+};
 
 /// Registers every application URL scheme on the engine's global registry.
 ///
