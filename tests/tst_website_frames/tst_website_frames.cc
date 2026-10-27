@@ -288,6 +288,12 @@ private slots:
             "{bubbles:true,clientX:%1,clientY:%2}))").arg(context.x()).arg(context.y()), deadline);
         WAIT_FOR(text.size() == 4);
         QCOMPARE(text.last()[1].toString(), QStringLiteral("contextword"));
+        auto stalledPoint = contentOrigin(b.page.mainFrame(), "iframe", deadline) + glyph(frame, "#word-target", deadline);
+        auto stalledWordCalls = std::make_shared<int>(0);
+        hold = "/*gd-frame-word*/";
+        b.frames.wordAtPoint(stalledPoint, [stalledWordCalls](QString const &) { ++*stalledWordCalls; });
+        WAIT_FOR(held.size() == 1);
+        hold.clear();
         QElapsedTimer recovery; recovery.start();
         evaluate(b.page.mainFrame(), "(()=>{const f=document.querySelector('iframe');f.name=f.id='gdexpandframe-dict-b';"
             "document.getElementById('gdfrom-dict-b').appendChild(f);f.src=" + quote(other.url("/dir/first.html").toString()) + "})()", deadline);
@@ -297,6 +303,12 @@ private slots:
         QVERIFY(third.value("docId") != secondReady.value("docId"));
         WAIT_FOR(eventCount(events, "measure", third.value("docId").toString()) >= 3);
         QVERIFY2(recovery.elapsed() < 1500, "third-document reinstrumentation must use frame retirement, not the timeout backstop");
+        QCOMPARE(*stalledWordCalls, 1);
+        QCOMPARE(held.size(), 1);
+        auto delayed = held.takeFirst();
+        delayed.callback(delayed.value);
+        QCOMPARE(*stalledWordCalls, 1);
+        barrier(b.bridge, deadline);
         frame = remote(b.page, "/dir/first.html", deadline);
         QCOMPARE(frame.url().host(), QStringLiteral("127.0.0.3"));
         QCOMPARE(wordAt(b.frames, contentOrigin(b.page.mainFrame(), "iframe", deadline) + glyph(frame, "#word-target", deadline), deadline), QStringLiteral("wordword"));
