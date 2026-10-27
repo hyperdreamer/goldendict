@@ -288,6 +288,7 @@ private slots:
             "{bubbles:true,clientX:%1,clientY:%2}))").arg(context.x()).arg(context.y()), deadline);
         WAIT_FOR(text.size() == 4);
         QCOMPARE(text.last()[1].toString(), QStringLiteral("contextword"));
+        QElapsedTimer recovery; recovery.start();
         evaluate(b.page.mainFrame(), "(()=>{const f=document.querySelector('iframe');f.name=f.id='gdexpandframe-dict-b';"
             "document.getElementById('gdfrom-dict-b').appendChild(f);f.src=" + quote(other.url("/dir/first.html").toString()) + "})()", deadline);
         WAIT_FOR(!readyAt(events, 2).isEmpty());
@@ -295,6 +296,7 @@ private slots:
         QCOMPARE(third.value("name").toString(), QStringLiteral("gdexpandframe-dict-b"));
         QVERIFY(third.value("docId") != secondReady.value("docId"));
         WAIT_FOR(eventCount(events, "measure", third.value("docId").toString()) >= 3);
+        QVERIFY2(recovery.elapsed() < 1500, "third-document reinstrumentation must use frame retirement, not the timeout backstop");
         frame = remote(b.page, "/dir/first.html", deadline);
         QCOMPARE(frame.url().host(), QStringLiteral("127.0.0.3"));
         QCOMPARE(wordAt(b.frames, contentOrigin(b.page.mainFrame(), "iframe", deadline) + glyph(frame, "#word-target", deadline), deadline), QStringLiteral("wordword"));
@@ -455,6 +457,39 @@ private slots:
         probes = discoveries; WAIT_FOR(discoveries >= probes + 12);
         QCOMPARE(text.size(), 1);
         QCOMPARE(eventCount(events, "measure", first.value("docId").toString()), oldMeasures);
+    }
+
+    void frameOperationTimeoutReleasesQueue()
+    {
+        QDeadlineTimer deadline(14000);
+        TestSupport::HttpFixture origin;
+        QVERIFY2(origin.start(QHostAddress("127.0.0.2")), qPrintable(origin.errorString()));
+        Browser b;
+        QSignalSpy events(&b.bridge, &ArticleBridge::frameEvent);
+        b.load(origin.url("/dir/first.html"));
+        WAIT_FOR(!readyAt(events, 0).isEmpty()); WAIT_FOR(b.visible(deadline));
+        auto frame = remote(b.page, "/dir/first.html", deadline);
+        auto point = contentOrigin(b.page.mainFrame(), "iframe", deadline) + glyph(frame, "#word-target", deadline);
+        hold = "/*gd-frame-word*/";
+        struct Lookup { int callbacks = 0; };
+        auto lookup = std::make_shared<Lookup>();
+        b.frames.wordAtPoint(point, [lookup](QString const &) { ++lookup->callbacks; });
+        WAIT_FOR(held.size() == 1);
+        WAIT_FOR(lookup->callbacks == 1);
+
+        bool barrierDone = false;
+        QElapsedTimer elapsed; elapsed.start();
+        b.bridge.run("/*test-timeout-barrier*/true", [&barrierDone](QVariant const &) { barrierDone = true; });
+        QVERIFY2(QTest::qWaitFor([&] { return barrierDone; }, 5000),
+                 "a lost frame completion must retire before the queue deadline");
+        QVERIFY(elapsed.elapsed() < 4000);
+        QCOMPARE(held.size(), 1);
+
+        auto delayed = held.takeFirst();
+        hold.clear();
+        delayed.callback(delayed.value);
+        barrier(b.bridge, deadline);
+        QCOMPARE(lookup->callbacks, 1);
     }
 
     void boundedLookupAndRetirement()
