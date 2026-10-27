@@ -8,10 +8,12 @@
 #include <QWebEngineScript>
 #include <QWebEngineScriptCollection>
 #include <QWebEngineSettings>
+#include <QTimer>
 #include <cmath>
 #include <limits>
 
 namespace {
+constexpr int FrameOperationDeadlineMs = 2000;
 QString resource( char const * name )
 {
   QFile file( QString::fromLatin1( name ) );
@@ -78,6 +80,11 @@ void ArticleBridge::retire()
 {
   state = State::Closed;
   queue.clear();
+  if( inFlight )
+  {
+    inFlight->completed = true;
+    inFlight->callback = {};
+  }
   inFlight.reset();
   pendingActive.clear();
 }
@@ -105,6 +112,11 @@ void ArticleBridge::reset()
   }
   state = State::Installing;
   queue.clear();
+  if( inFlight )
+  {
+    inFlight->completed = true;
+    inFlight->callback = {};
+  }
   inFlight.reset();
   pendingActive.clear();
   articles.clear();
@@ -223,6 +235,12 @@ void ArticleBridge::runInFrame( QWebEngineFrame const & frame, QString const & s
   enqueue( frame, script, std::move( callback ) );
 }
 
+void ArticleBridge::retireInFlightFrame()
+{
+  auto operation = inFlight;
+  if( operation && operation->frame ) retireOperation( operation );
+}
+
 void ArticleBridge::enqueue( std::optional<QWebEngineFrame> frame, QString const & script, Result callback )
 {
   if( state == State::Closed || !page ) return;
@@ -258,6 +276,9 @@ void ArticleBridge::dispatch()
       return false;
     };
     if( !operation->frame->isValid() || !belongs( page->mainFrame() ) ) { done( {} ); return; }
+    QTimer::singleShot( FrameOperationDeadlineMs, this, [guard, operation] {
+      if( guard ) guard->retireOperation( operation );
+    } );
     operation->frame->runJavaScript( operation->script, QWebEngineScript::MainWorld, done );
   }
   else page->runJavaScript( operation->script, QWebEngineScript::MainWorld, done );
@@ -270,7 +291,22 @@ void ArticleBridge::complete( std::shared_ptr<Operation> const & operation, QVar
   operation->completed = true;
   QPointer<ArticleBridge> guard( this );
   auto const target = page;
-  if( operation->callback ) operation->callback( value ); // Invalid QVariant is a completed result too.
+  auto callback = std::move( operation->callback );
+  if( callback ) callback( value ); // Invalid QVariant is a completed result too.
+  if( !guard || !target || page != target || !accepts( operation->generation ) || inFlight != operation ) return;
+  inFlight.reset();
+  dispatch();
+}
+
+void ArticleBridge::retireOperation( std::shared_ptr<Operation> const & operation )
+{
+  if( state != State::Ready || !page || !operation || operation->generation != currentGeneration ||
+      !inFlight || inFlight->number != operation->number || inFlight != operation || operation->completed ) return;
+  operation->completed = true;
+  QPointer<ArticleBridge> guard( this );
+  auto const target = page;
+  auto callback = std::move( operation->callback );
+  if( callback ) callback( {} );
   if( !guard || !target || page != target || !accepts( operation->generation ) || inFlight != operation ) return;
   inFlight.reset();
   dispatch();

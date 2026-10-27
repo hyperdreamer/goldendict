@@ -28,6 +28,7 @@ public:
   void reset();
   void run( QString const & script, Result callback = {} );
   void runInFrame( QWebEngineFrame const & frame, QString const & script, Result callback = {} );
+  void retireInFlightFrame();
 public slots:
   void onJsActiveArticleChanged( QString id, int generation );
   void onJsReadingState( QVariantMap state, int generation );
@@ -68,6 +69,7 @@ private:
   void enqueue( std::optional<QWebEngineFrame> frame, QString const & script, Result callback );
   void dispatch();
   void complete( std::shared_ptr<Operation> const & operation, QVariant const & value );
+  void retireOperation( std::shared_ptr<Operation> const & operation );
   bool accepts( int generation ) const noexcept;
   void setActive( QString const & id );
 };

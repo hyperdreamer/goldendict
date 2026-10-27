@@ -179,7 +179,14 @@ struct WebsiteFrames::State
     if( now - entry->started >= 10000 || !current( epoch ) || entries.value( entry->key.docId ) != entry )
       { stop( entry ); return; }
     if( entry->pending ) return;
-    if( !unchanged( entry->chain ) ) { stop( entry ); owner->discover(); return; }
+    if( !unchanged( entry->chain ) )
+    {
+      stop( entry );
+      QPointer<WebsiteFrames> guard( owner );
+      bridge->retireInFlightFrame();
+      if( guard ) owner->discover();
+      return;
+    }
     entry->pending = true;
     auto nonce = json( entry->key.docId );
     QString script = QStringLiteral(
@@ -437,7 +444,8 @@ void WebsiteFrames::reset( int generation )
   d->generation = generation;
   QPointer<WebsiteFrames> guard( this );
   d->cancelWords();
-  // A cancellation callback can destroy the owner or start a newer reset.
+  if( !guard || !d->page || d->epoch != stamp ) return;
+  d->bridge->retireInFlightFrame();
   if( !guard || !d->page || d->epoch != stamp ) return;
   if( !d->installedScript.isEmpty() )
     for( auto const & script : d->page->scripts().find( d->installedScript ) ) d->page->scripts().remove( script );
@@ -515,12 +523,22 @@ void WebsiteFrames::receive( QVariantMap const & message )
   if( route.first().toMap().value( "name" ) != message.value( "name" ) ) return;
   if( kind == QLatin1String( "ready" ) )
   {
+    QPointer<WebsiteFrames> guard( this );
+    if( !d->topDoc.isEmpty() || !d->entries.isEmpty() ) d->bridge->retireInFlightFrame();
+    if( !guard || !d->current( d->epoch ) ) return;
     if( d->ready.size() < 1024 ) d->ready.insert( nonce, message );
     discover();
     return;
   }
   auto entry = d->entries.value( nonce );
-  if( !entry || entry->key.generation != d->generation || entry->route != route || !d->unchanged( entry->chain ) ) return;
+  if( !entry || entry->key.generation != d->generation || entry->route != route ) return;
+  if( !d->unchanged( entry->chain ) )
+  {
+    QPointer<WebsiteFrames> guard( this );
+    d->bridge->retireInFlightFrame();
+    if( guard ) discover();
+    return;
+  }
   bool const text = kind == QLatin1String( "click" ) || kind == QLatin1String( "context" );
   if( text ? message.value( "text" ).metaType().id() != QMetaType::QString :
       ( !measurement( message.value( "height" ) ) || !measurement( message.value( "width" ) ) ) ) return;
