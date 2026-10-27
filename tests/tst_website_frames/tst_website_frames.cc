@@ -10,6 +10,7 @@
 #include <QWebEngineProfile>
 #include <QWebEngineScript>
 #include <QWebEngineScriptCollection>
+#include <QWebEngineSettings>
 #include <QWebEngineView>
 #include <algorithm>
 #include <limits>
@@ -139,8 +140,16 @@ struct Browser
     QObject owner;
     ArticleBridge bridge{&page, &owner};
     WebsiteFrames frames{&page, &bridge};
-    Browser() { view.resize(1300, 1100); view.setPage(&page); view.show(); }
-    void load(QUrl const &url, QString const &extra = {}) { page.setHtml(document(url, extra)); }
+    Browser()
+    {
+        // Match the article profile's local-content policy and stable origin.
+        page.settings()->setAttribute(QWebEngineSettings::LocalContentCanAccessRemoteUrls, true);
+        view.resize(1300, 1100); view.setPage(&page); view.show();
+    }
+    void load(QUrl const &url, QString const &extra = {})
+    {
+        page.setHtml(document(url, extra), QUrl("gdlookup://localhost/"));
+    }
     bool visible(QDeadlineTimer const &deadline)
     {
         return evaluate(page.mainFrame(), "(()=>{const e=document.querySelector('iframe');return e&&"
@@ -461,15 +470,16 @@ private slots:
         auto point = contentOrigin(b.page.mainFrame(), "iframe", deadline) + glyph(frame, "#word-target", deadline);
         QCOMPARE(wordAt(b.frames, point, deadline), QStringLiteral("wordword"));
         hold = "/*gd-frame-word*/";
-        int callbacks = 0; QString answer;
+        struct Lookup { int callbacks = 0; QString answer; };
+        auto lookup = std::make_shared<Lookup>();
         QElapsedTimer elapsed; elapsed.start();
-        b.frames.wordAtPoint(point, [&](QString const &word) { answer = word; ++callbacks; });
+        b.frames.wordAtPoint(point, [lookup](QString const &word) { lookup->answer = word; ++lookup->callbacks; });
         WAIT_FOR(held.size() == 1);
-        WAIT_FOR(callbacks == 1);
+        WAIT_FOR(lookup->callbacks == 1);
         QVERIFY(elapsed.elapsed() < 1000);
-        QCOMPARE(answer, QString());
+        QCOMPARE(lookup->answer, QString());
         auto delayed = held.takeFirst(); hold.clear(); delayed.callback(delayed.value);
-        barrier(b.bridge, deadline); QCOMPARE(callbacks, 1);
+        barrier(b.bridge, deadline); QCOMPARE(lookup->callbacks, 1);
         // Hold a real frame-local result and remove its frame before delivery.
         hold = "/*gd-frame-event-identity*/";
         evaluate(frame, "const a=document.createElement('a');a.textContent='retired';document.body.append(a);a.click()", deadline);
@@ -490,6 +500,41 @@ private slots:
         QCOMPARE(fresh.value("generation").toInt(), 2);
         frame = remote(b.page, "/dir/second.html", deadline);
         QCOMPARE(wordAt(b.frames, contentOrigin(b.page.mainFrame(), "iframe", deadline) + glyph(frame, "#word-target", deadline), deadline), QStringLiteral("wordword"));
+    }
+
+    void resetDuringCompletionKeepsNewestGeneration()
+    {
+        QDeadlineTimer deadline(10000);
+        TestSupport::HttpFixture origin;
+        QVERIFY2(origin.start(QHostAddress("127.0.0.2")), qPrintable(origin.errorString()));
+        Browser b;
+        QSignalSpy events(&b.bridge, &ArticleBridge::frameEvent);
+        b.load(origin.url("/dir/first.html"));
+        WAIT_FOR(!readyAt(events, 0).isEmpty()); WAIT_FOR(b.visible(deadline));
+        auto frame = remote(b.page, "/dir/first.html", deadline);
+        auto point = contentOrigin(b.page.mainFrame(), "iframe", deadline) + glyph(frame, "#word-target", deadline);
+        QCOMPARE(wordAt(b.frames, point, deadline), QStringLiteral("wordword"));
+        hold = "/*gd-frame-word*/";
+        struct Lookup { int callbacks = 0; QString answer; };
+        auto lookup = std::make_shared<Lookup>();
+        QPointer<ArticleBridge> bridge(&b.bridge);
+        b.frames.wordAtPoint(point, [bridge, lookup](QString const &word) {
+            lookup->answer = word; ++lookup->callbacks;
+            if (bridge) bridge->reset();
+        });
+        WAIT_FOR(held.size() == 1);
+        b.bridge.reset();
+        QCOMPARE(lookup->callbacks, 1);
+        QCOMPARE(lookup->answer, QString());
+        QCOMPARE(b.bridge.generation(), 3);
+        QCOMPARE(b.page.scripts().find("gd-frames-2").size(), 0);
+        QCOMPARE(b.page.scripts().find("gd-frames-3").size(), 1);
+        QCOMPARE(b.page.scripts().count(), 3);
+        auto delayed = held.takeFirst(); hold.clear(); delayed.callback(delayed.value);
+        b.load(origin.url("/dir/second.html"));
+        WAIT_FOR(!readyAt(events, 1).isEmpty()); WAIT_FOR(b.visible(deadline));
+        QCOMPARE(readyAt(events, 1).value("generation").toInt(), 3);
+        QCOMPARE(lookup->callbacks, 1);
     }
 
     void framingDenial_data()

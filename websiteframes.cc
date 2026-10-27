@@ -427,9 +427,9 @@ WebsiteFrames::~WebsiteFrames()
 }
 void WebsiteFrames::reset( int generation )
 {
-  if( !d->bridge || generation != d->bridge->generation() || generation < 1 ) return;
+  if( d->closing || !d->bridge || generation != d->bridge->generation() || generation < 1 ) return;
   d->active = false;
-  ++d->epoch;
+  auto const stamp = ++d->epoch;
   d->tick.stop();
   d->scanning = false;
   for( auto const & entry : d->entries ) d->stop( entry );
@@ -437,7 +437,8 @@ void WebsiteFrames::reset( int generation )
   d->generation = generation;
   QPointer<WebsiteFrames> guard( this );
   d->cancelWords();
-  if( !guard || !d->page ) return;
+  // A cancellation callback can destroy the owner or start a newer reset.
+  if( !guard || !d->page || d->epoch != stamp ) return;
   if( !d->installedScript.isEmpty() )
     for( auto const & script : d->page->scripts().find( d->installedScript ) ) d->page->scripts().remove( script );
   auto frames = readScript( ":/scripts/website-frame.js" );
