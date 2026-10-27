@@ -630,7 +630,7 @@ PortalBackend::~PortalBackend()
 
 bool PortalBackend::isSupported() const noexcept
 {
-    return d && d->supported && d->bus.isConnected();
+    return d && d->versionKnown && d->supported && d->bus.isConnected();
 }
 
 HotkeyBackend::State PortalBackend::state() const noexcept
@@ -651,6 +651,11 @@ void PortalBackend::unbind()
     const quint64 generation = ++d->generation;
     cancelRequests();
     closeSession();
+    // The probe belongs to a generation: once a new one starts, no version is known
+    // until a fresh probe answers. `supported` records what the platform was found
+    // to be, so it survives; `isSupported()` requires both.
+    d->versionKnown = false;
+    d->version = 0;
     d->desired.clear();
     d->requestedIds.clear();
     d->activeIds.clear();
@@ -740,6 +745,9 @@ void PortalBackend::beginGeneration( QVector< HotkeyBinding > const & bindings )
     d->activeIds.clear();
     d->bindAttempted = false;
     d->bindCompleted = false;
+    d->versionKnown = false;
+    d->version = 0;
+    d->supported = false;
     ++d->displayRevision;
 
     QSet< QString > ids;
@@ -776,9 +784,8 @@ void PortalBackend::beginGeneration( QVector< HotkeyBinding > const & bindings )
         return;
     }
 
-    d->versionKnown = false;
-    d->version = 0;
-
+    // The capability was reset before validation, so no caller can observe the
+    // previous generation as supported while this probe is pending.
     // A stateChanged handler may start the next binding edit synchronously, which
     // bumps d->generation before this invocation resumes. The generation of *this*
     // attempt is therefore captured before the notification is emitted; the
@@ -799,6 +806,8 @@ void PortalBackend::readVersion( quint64 generation )
         QStringLiteral( "org.freedesktop.DBus" ), QStringLiteral( "/org/freedesktop/DBus" ),
         QStringLiteral( "org.freedesktop.DBus" ), QStringLiteral( "GetNameOwner" ) );
     message << Service;
+    // Capability discovery must never auto-start the portal it is checking.
+    message.setAutoStartService( false );
     auto watcher = new QDBusPendingCallWatcher( d->bus.asyncCall( message, DeadlineMs ), this );
     connect( watcher, &QDBusPendingCallWatcher::finished, this,
              [ this, generation ]( QDBusPendingCallWatcher * finished ) {
@@ -1254,6 +1263,8 @@ void PortalBackend::failGeneration( QString const & explanation, bool supported 
         d->sessionPath.clear();
         d->owner.clear();
     }
+    // A session-level failure leaves the portal itself usable, so the probed
+    // capability survives: only an owner loss (below) makes it unsupported.
     d->supported = supported;
     d->activeIds.clear();
     d->bindCompleted = false;

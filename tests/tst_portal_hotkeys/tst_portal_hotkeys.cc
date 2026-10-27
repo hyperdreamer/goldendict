@@ -200,6 +200,10 @@ private slots:
     void invalidTokensAreReplacedWithValidUniqueTokens();
     void startAndCancelAreIdempotent();
     void missingServiceFailsWithinDeadline();
+    void capabilityIsUnknownUntilProbeCompletes();
+    void capabilityDoesNotOutliveItsGeneration();
+    void unusablePortalIsUnsupportedAndUnavailable();
+    void absentPortalIsUnsupportedAndDoesNoPortalWork();
     void responseHandlerMayDestroyRequest();
     void portalVersionAndCreateFailures_data();
     void portalVersionAndCreateFailures();
@@ -788,6 +792,88 @@ void TstPortalHotkeys::missingServiceFailsWithinDeadline()
     QCOMPARE( outcome.sequence, QStringList{ QStringLiteral( "failed" ) } );
     QCOMPARE( outcome.failures.first().at( 1 ).toString(), QStringLiteral( "Portal service is unavailable" ) );
     QCOMPARE( portal->receivedCallCount(), 0 );
+}
+
+void TstPortalHotkeys::capabilityIsUnknownUntilProbeCompletes()
+{
+    PortalBackend backend( bus->connection() );
+    backend.bind( mainBindingOnly() );
+    QVERIFY( waitForState( backend, HotkeyBackend::State::Bound ) );
+    QVERIFY( backend.isSupported() );
+
+    // A new edit starts a new capability generation. The old successful probe
+    // must not make the still-pending generation appear supported.
+    portal->setScenario( QStringLiteral( "no-version" ) );
+    backend.bind( mainBindingOnly() );
+    QCOMPARE( backend.state(), HotkeyBackend::State::Creating );
+    QVERIFY( !backend.isSupported() );
+    QVERIFY( QTest::qWaitFor( [ &backend ]() {
+        return backend.state() == HotkeyBackend::State::Unavailable;
+    }, 1500 ) );
+    QVERIFY( !backend.isSupported() );
+}
+
+void TstPortalHotkeys::capabilityDoesNotOutliveItsGeneration()
+{
+    // F-2: a successful generation describes that generation only. unbind() starts a
+    // new one, so nothing may report support again until a fresh probe answers.
+    PortalBackend backend( bus->connection() );
+    backend.bind( mainBindingOnly() );
+    QVERIFY( waitForState( backend, HotkeyBackend::State::Bound, 3000 ) );
+    QVERIFY( backend.isSupported() );
+    const int probes = portal->count( QStringLiteral( "Properties.Get" ) );
+
+    backend.unbind();
+    QVERIFY( waitForState( backend, HotkeyBackend::State::Closed, 2000 ) );
+    QVERIFY2( !backend.isSupported(), "a closed session must not present the previous generation's probe" );
+    QCOMPARE( portal->count( QStringLiteral( "Properties.Get" ) ), probes );
+
+    // A fresh bind re-probes and may report support again.
+    backend.bind( mainBindingOnly() );
+    QVERIFY( waitForState( backend, HotkeyBackend::State::Bound, 3000 ) );
+    QVERIFY( backend.isSupported() );
+    QCOMPARE( portal->count( QStringLiteral( "Properties.Get" ) ), probes + 1 );
+}
+
+void TstPortalHotkeys::unusablePortalIsUnsupportedAndUnavailable()
+{
+    // The capability contract the factory rows cannot state on a bus shared with a
+    // nested compositor: a portal that answers the version probe with an error is not
+    // usable, and nothing may claim support for that generation.
+    portal->setScenario( QStringLiteral( "no-version" ) );
+    PortalBackend backend( bus->connection() );
+    QVERIFY( !backend.isSupported() );
+    backend.bind( mainBindingOnly() );
+    QVERIFY( waitForState( backend, HotkeyBackend::State::Unavailable, 3000 ) );
+    QVERIFY2( !backend.isSupported(), "an unusable portal must not report support" );
+    QCOMPARE( portal->count( QStringLiteral( "Properties.Get" ) ), 1 );
+    QCOMPARE( portal->count( QStringLiteral( "CreateSession" ) ), 0 );
+}
+
+void TstPortalHotkeys::absentPortalIsUnsupportedAndDoesNoPortalWork()
+{
+    // F-1: a connected bus with no portal owner takes readVersion()'s
+    // GetNameOwner/NameHasNoOwner path. This bus belongs to the test and the compositor
+    // is not on it, so nothing can auto-activate the name behind our back.
+    portal->loseService();
+    QVERIFY2( QTest::qWaitFor( [ this ]() {
+                 return bus->fixtureConnection().interface()
+                          ->serviceOwner( TestSupport::FakePortal::serviceName() )
+                          .value()
+                          .isEmpty();
+             }, 2000 ), "the portal name did not withdraw" );
+
+    PortalBackend backend( bus->connection() );
+    QVERIFY( !backend.isSupported() );
+    backend.bind( mainBindingOnly() );
+    QVERIFY( waitForState( backend, HotkeyBackend::State::Unavailable, 3000 ) );
+    QVERIFY2( !backend.isSupported(), "an absent portal must not report support" );
+
+    // No portal work may follow the failed probe.
+    QCOMPARE( portal->count( QStringLiteral( "CreateSession" ) ), 0 );
+    QCOMPARE( portal->count( QStringLiteral( "ListShortcuts" ) ), 0 );
+    QCOMPARE( portal->count( QStringLiteral( "BindShortcuts" ) ), 0 );
+    QCOMPARE( portal->count( QStringLiteral( "ConfigureShortcuts" ) ), 0 );
 }
 
 void TstPortalHotkeys::responseHandlerMayDestroyRequest()

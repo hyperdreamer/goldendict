@@ -41,6 +41,7 @@
 #include <QProcessEnvironment>
 #include <QStandardPaths>
 #include <QDBusConnection>
+#include <QDBusConnectionInterface>
 #include <QScopedPointer>
 #include <QSet>
 #include <QSignalSpy>
@@ -1077,7 +1078,11 @@ void TstHotkeys::factorySelection_data()
   QTest::newRow( "xcb" ) << QStringLiteral( "xcb" ) << QStringLiteral( "present" );
   QTest::newRow( "other" ) << QStringLiteral( "offscreen" ) << QStringLiteral( "present" );
   QTest::newRow( "wayland" ) << QStringLiteral( "wayland" ) << QStringLiteral( "present" );
-  QTest::newRow( "wayland-absent-portal" ) << QStringLiteral( "wayland" ) << QStringLiteral( "absent" );
+  // Capability-when-the-portal-cannot-answer is pinned in tst_portal_hotkeys instead:
+  // there the private bus belongs to the test alone, whereas these rows share it with a
+  // nested compositor whose own portal integration can auto-activate a withdrawn or
+  // misbehaving service and make the outcome depend on scheduling.
+
   QTest::newRow( "wayland-no-bus" ) << QStringLiteral( "wayland" ) << QStringLiteral( "no-bus" );
 }
 
@@ -1116,7 +1121,15 @@ void TstHotkeys::factorySelection()
     environment.insert( QStringLiteral( "WAYLAND_DISPLAY" ), QStringLiteral( "gd-t32" ) );
   }
   if ( availability == QLatin1String( "absent" ) )
+  {
     portal.loseService();
+    QVERIFY2( QTest::qWaitFor( [ & ]() {
+      return privateBus.fixtureConnection().interface()
+                 ->serviceOwner( TestSupport::FakePortal::serviceName() )
+                 .value()
+          .isEmpty();
+    }, 1000 ), "fake portal service did not withdraw" );
+  }
   if ( availability == QLatin1String( "no-bus" ) )
     environment.insert( QStringLiteral( "DBUS_SESSION_BUS_ADDRESS" ),
                         QStringLiteral( "unix:path=" ) + runtime.filePath( QStringLiteral( "missing-bus" ) ) );
@@ -1153,10 +1166,18 @@ void TstHotkeys::factorySelectionProbe()
   if ( platform.startsWith( QLatin1String( "wayland" ) ) )
   {
     QVERIFY( dynamic_cast< PortalBackend * >( backend.get() ) );
-    QVERIFY( QTest::qWaitFor( [ & ]() {
-      return backend->state() == HotkeyBackend::State::Ready
-             || backend->state() == HotkeyBackend::State::Unavailable;
-    }, 5500 ) );
+    QCOMPARE( backend->state(), HotkeyBackend::State::Creating );
+    QVERIFY( !backend->isSupported() );
+    bool capabilityTransitioned = false;
+    connect( backend.get(), &HotkeyBackend::stateChanged, backend.get(),
+             [ &capabilityTransitioned ]( HotkeyBackend::State state, QString const & ) {
+               if ( state == HotkeyBackend::State::Ready
+                    || state == HotkeyBackend::State::Unavailable )
+                   capabilityTransitioned = true;
+             } );
+    QVERIFY2( QTest::qWaitFor( [ &capabilityTransitioned ]() {
+      return capabilityTransitioned;
+    }, 5500 ), "portal capability probe did not reach a terminal state" );
     QCOMPARE( backend->isSupported(), availability == QLatin1String( "present" ) );
     QCOMPARE( backend->state(), availability == QLatin1String( "present" )
       ? HotkeyBackend::State::Ready : HotkeyBackend::State::Unavailable );
