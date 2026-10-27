@@ -23,6 +23,18 @@ struct WebsiteFrameKey
 
 /// Borrows the page and bridge. Native frame values are used only after checking
 /// their complete child path and the current document's independently read nonce.
+/// The sampling policy, exposed so a test can pin the configured cadence and cutoff
+/// without inferring them from wall-clock observations of a live event loop.
+struct WebsiteFramesPolicy
+{
+  static constexpr int samplingIntervalMs = 250;
+  /// The discovery pulse runs on its own timer; it shares the sampling cadence by
+  /// intent, so it uses the same constant rather than a second literal.
+  static constexpr int discoveryIntervalMs = samplingIntervalMs;
+  static constexpr int measurementCutoffMs = 10000;
+  static constexpr int requiredEqualMeasurements = 3;
+};
+
 class WebsiteFrames : public QObject
 {
   Q_OBJECT

@@ -152,7 +152,7 @@ struct WebsiteFrames::State
     {
       entry->timer = std::make_unique<QTimer>();
       entry->timer->setTimerType( Qt::PreciseTimer );
-      entry->timer->setInterval( 250 );
+      entry->timer->setInterval( WebsiteFramesPolicy::samplingIntervalMs );
       QPointer<WebsiteFrames> guard( owner );
       std::weak_ptr<Entry> weak = entry;
       QObject::connect( entry->timer.get(), &QTimer::timeout, owner, [guard, weak] {
@@ -176,7 +176,7 @@ struct WebsiteFrames::State
   {
     auto now = clock.elapsed();
     if( !entry->sampling ) return;
-    if( now - entry->started >= 10000 || !current( epoch ) || entries.value( entry->key.docId ) != entry )
+    if( now - entry->started >= WebsiteFramesPolicy::measurementCutoffMs || !current( epoch ) || entries.value( entry->key.docId ) != entry )
       { stop( entry ); return; }
     if( entry->pending ) return;
     if( !unchanged( entry->chain ) )
@@ -303,7 +303,7 @@ struct WebsiteFrames::State
     for( auto const & name : names )
     {
       auto & root = roots[name];
-      if( root.measured || root.reported || clock.elapsed() - root.started < 10000 ) continue;
+      if( root.measured || root.reported || clock.elapsed() - root.started < WebsiteFramesPolicy::measurementCutoffMs ) continue;
       root.reported = true;
       auto route = root.route;
       auto script = QStringLiteral( "/*gd-frame-unavailable*/window.gdFrameUnavailable&&gdFrameUnavailable(%1,%2)" )
@@ -366,10 +366,10 @@ struct WebsiteFrames::State
       if( height != entry->height && !entry->sampling ) arm( entry );
       return;
     }
-    if( !entry->sampling || clock.elapsed() - entry->started >= 10000 ) return;
+    if( !entry->sampling || clock.elapsed() - entry->started >= WebsiteFramesPolicy::measurementCutoffMs ) return;
     entry->equal = height == entry->height ? entry->equal + 1 : 1;
     entry->height = height;
-    if( entry->equal >= 3 ) stop( entry );
+    if( entry->equal >= WebsiteFramesPolicy::requiredEqualMeasurements ) stop( entry );
     apply( entry, height, width );
   }
   void wordStep( std::shared_ptr<Word> const & word, Node const & node, QPointF point, int depth )
@@ -411,7 +411,7 @@ WebsiteFrames::WebsiteFrames( QWebEnginePage * page, ArticleBridge * bridge, QOb
   connect( bridge, &ArticleBridge::bridgeReady, this, [this]( int generation ) {
     if( generation != d->generation ) return;
     d->active = true;
-    d->tick.start( 250 );
+    d->tick.start( WebsiteFramesPolicy::discoveryIntervalMs );
     discover();
   } );
   connect( &d->tick, &QTimer::timeout, this, [this] { d->pulse(); } );
