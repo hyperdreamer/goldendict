@@ -1,181 +1,281 @@
-/* This file is (c) 2008-2012 Konstantin Isakov <ikm@goldendict.org>
- * Part of GoldenDict. Licensed under GPLv3 or later, see the LICENSE file */
-
+/* Part of GoldenDict. Licensed under GPLv3 or later, see LICENSE. */
 #include "articlewebview.hh"
-#include <QMouseEvent>
-#include <QWebFrame>
+#include "articlebridge.hh"
+#include "articleprofile.hh"
 #include <QApplication>
-#include "articleinspector.hh"
-#include "qt4x5.hh"
+#include <QChildEvent>
+#include <QContextMenuEvent>
+#include <QFocusEvent>
+#include <QMouseEvent>
+#include <QTimer>
+#include <QWebEngineContextMenuRequest>
+#include <QWebEngineProfile>
+#include <QWebEngineSettings>
+#include <QWheelEvent>
 
-#ifdef Q_OS_WIN32
-#include <qt_windows.h>
-#endif
-
-ArticleWebView::ArticleWebView( QWidget *parent ):
-  QWebView( parent ),
-#if QT_VERSION >= 0x040600
-  inspector( NULL ),
-#endif
-  midButtonPressed( false ),
-  selectionBySingleClick( false ),
-  showInspectorDirectly( true )
+namespace {
+bool attach( QWebEnginePage * page )
 {
+  auto controller = qobject_cast<ArticleProfileController *>( page->profile()->parent() );
+  if( !controller )
+  {
+    qWarning( "ArticleWebView: shared profile has no ArticleProfileController" );
+    return false;
+  }
+  controller->attachPage( page );
+  return true;
+}
+
+// A popup page only observes the first target; it never commits a document.
+class LinkCapturePage final : public QWebEnginePage
+{
+  QPointer<ArticleWebPage> source;
+  bool captured = false;
+public:
+  explicit LinkCapturePage( ArticleWebPage * owner ):
+    QWebEnginePage( owner->profile(), owner ), source( owner )
+  {
+    settings()->setAttribute( QWebEngineSettings::BackForwardCacheEnabled, false );
+    attach( this );
+  }
+protected:
+  bool acceptNavigationRequest( QUrl const & url, NavigationType, bool ) override
+  {
+    if( !captured )
+    {
+      captured = true;
+      QPointer<ArticleWebPage> guard = source;
+      QTimer::singleShot( 0, source, [guard, url] { if( guard ) emit guard->userLink( url, true ); } );
+      deleteLater();
+    }
+    return false;
+  }
+};
+}
+
+ArticleWebPage::ArticleWebPage( QWebEngineProfile * profile, QObject * parent ):
+  QWebEnginePage( profile, parent )
+{
+  settings()->setAttribute( QWebEngineSettings::BackForwardCacheEnabled, false );
+}
+ArticleWebPage::~ArticleWebPage() = default;
+
+bool ArticleWebPage::acceptNavigationRequest( QUrl const & url, NavigationType type, bool mainFrame )
+{
+  if( !mainFrame ) return true; // Website frames retain their real origins/forms.
+  if( type == NavigationTypeRedirect && controlledNavigation ) return true;
+  if( type != NavigationTypeLinkClicked && navigationPermit )
+  {
+    navigationPermit = false;
+    controlledNavigation = true;
+    return true;
+  }
+  if( type == NavigationTypeLinkClicked )
+  {
+    auto view = qobject_cast<ArticleWebView *>( QWebEngineView::forPage( this ) );
+    bool const newTab = ( view && view->isMidButtonPressed() ) ||
+        QApplication::keyboardModifiers().testFlag( Qt::ControlModifier ) ||
+        QApplication::keyboardModifiers().testFlag( Qt::ShiftModifier );
+    QTimer::singleShot( 0, this, [this, url, newTab] { emit userLink( url, newTab ); } );
+  }
+  else
+  {
+    auto kind = type == NavigationTypeReload ? NavigationKind::Reload :
+                type == NavigationTypeBackForward ? NavigationKind::Back :
+                type == NavigationTypeRedirect ? NavigationKind::Redirect : NavigationKind::NewLookup;
+    QTimer::singleShot( 0, this, [this, url, kind] { emit navigationRequested( url, kind ); } );
+  }
+  return false;
+}
+
+QWebEnginePage * ArticleWebPage::createWindow( WebWindowType ) { return new LinkCapturePage( this ); }
+
+ArticleWebView::ArticleWebView( QWidget * parent ): QWebEngineView( parent )
+{
+  watchChildren( this );
 }
 
 ArticleWebView::~ArticleWebView()
 {
-#if QT_VERSION >= 0x040600
-  if ( inspector )
-    inspector->deleteLater();
-#endif
+  if( inspector && config ) config->inspectorGeometry = inspector->saveGeometry();
+  delete inspector.data();
+  if( bridge ) bridge->retire();
+  // WebEngine can run final JS callbacks here. The bridge is still present,
+  // Closed, and only deleted once those callbacks can no longer reach the page.
+  delete ownedPage.data();
+  delete bridge.data();
 }
 
-void ArticleWebView::setUp( Config::Class * cfg )
+void ArticleWebView::configure( QWebEngineProfile * profile, Config::Class * cfg )
 {
-  this->cfg = cfg;
-}
-
-void ArticleWebView::triggerPageAction( QWebPage::WebAction action, bool checked )
-{
-#if QT_VERSION >= 0x040600
-  if ( action == QWebPage::InspectElement )
+  if( ownedPage || !profile ) { qWarning( "ArticleWebView: configure requires one shared profile, once" ); return; }
+  if( !qobject_cast<ArticleProfileController *>( profile->parent() ) )
   {
-    // Get or create inspector instance for current view.
-    if ( !inspector )
-    {
-      inspector = new ArticleInspector( cfg );
-      inspector->setPage( page() );
-      connect( this, SIGNAL( destroyed() ), inspector, SLOT( beforeClosed() ) );
-    }
-
-    if ( showInspectorDirectly )
-    {
-      showInspectorDirectly = false;
-      // Bring up the inspector window and set focus
-      inspector->show();
-      inspector->activateWindow();
-      inspector->raise();
-      return;
-    }
+    qWarning( "ArticleWebView: configure requires the owning profile controller" );
+    return;
   }
-#endif
+  config = cfg;
+  installPage( profile );
+}
 
-  QWebView::triggerPageAction( action, checked );
+void ArticleWebView::installPage( QWebEngineProfile * profile )
+{
+  auto replacement = new ArticleWebPage( profile, this );
+  attach( replacement ); // Auth/settings/policy are attached before any load.
+  auto replacementBridge = new ArticleBridge( replacement, this );
+  replacementBridge->setObjectName( QStringLiteral( "gdArticleBridge" ) );
+  connect( replacement, &ArticleWebPage::userLink, this, &ArticleWebView::userLink );
+  connect( replacement, &ArticleWebPage::navigationRequested, this, &ArticleWebView::navigationRequested );
+  QPointer<ArticleWebPage> previous = ownedPage;
+  ownedPage = replacement;
+  bridge = replacementBridge;
+  setPage( replacement );
+  if( previous ) delete previous.data();
+  watchChildren( this );
+}
+
+void ArticleWebView::recreatePage( ArticleBridge * exhausted )
+{
+  if( bridge != exhausted || !ownedPage ) return;
+  auto profile = ownedPage->profile();
+  delete inspector.data();
+  installPage( profile );
+  navigated = false;
+  exhausted->deleteLater(); // reset() may still be returning on its stack.
+}
+
+bool ArticleWebView::prepareNavigation()
+{
+  if( !ownedPage || !bridge ) { qWarning( "ArticleWebView: configure before loading" ); return false; }
+  QPointer<ArticleWebView> guard( this );
+  QPointer<ArticleBridge> previous = bridge;
+  int const previousGeneration = bridge->generation();
+  bool const resetting = navigated;
+  if( resetting ) bridge->reset();
+  // reset emits application signals: the owner may die or a newer navigation
+  // may already have superseded this one before we return to Chromium.
+  if( !guard || !bridge || bridge->state == ArticleBridge::State::Closed ) return false;
+  if( resetting && bridge == previous &&
+      quint64( bridge->generation() ) != quint64( previousGeneration ) + 1 ) return false;
+  ownedPage->navigationPermit = true;
+  navigated = true;
+  return true;
+}
+void ArticleWebView::load( QUrl const & url ) { if( prepareNavigation() ) ownedPage->load( url ); }
+void ArticleWebView::setHtml( QString const & html, QUrl const & base )
+{
+  if( prepareNavigation() ) ownedPage->setHtml( html, base );
+}
+void ArticleWebView::setSelectionBySingleClick( bool enabled ) { selectionBySingleClick = enabled; }
+bool ArticleWebView::isMidButtonPressed() const noexcept { return midButtonPressed; }
+
+void ArticleWebView::triggerPageAction( QWebEnginePage::WebAction action, bool checked )
+{
+  if( !ownedPage ) return;
+  if( action == QWebEnginePage::InspectElement )
+  {
+    if( !inspector )
+    {
+      // Keep the Qt6 DevTools page on this controller's shared profile. The
+      // legacy ArticleInspector widget is migrated with the ArticleView consumer.
+      inspector = new QWebEngineView( this );
+      inspector->setWindowFlag( Qt::Window );
+      inspector->setAttribute( Qt::WA_DeleteOnClose );
+      auto toolsPage = new QWebEnginePage( ownedPage->profile(), inspector );
+      attach( toolsPage );
+      inspector->setPage( toolsPage );
+      ownedPage->setDevToolsPage( toolsPage );
+      if( config ) inspector->restoreGeometry( config->inspectorGeometry );
+    }
+    inspector->show(); inspector->raise(); inspector->activateWindow();
+  }
+  QWebEngineView::triggerPageAction( action, checked );
+}
+
+void ArticleWebView::watchChildren( QObject * object )
+{
+  object->installEventFilter( this );
+  for( auto child : object->children() )
+    if( qobject_cast<QWidget *>( child ) ) watchChildren( child );
 }
 
 bool ArticleWebView::event( QEvent * event )
 {
-  switch ( event->type() )
+  if( event->type() == QEvent::ChildAdded )
   {
-  case QEvent::MouseButtonRelease:
-  case QEvent::MouseButtonDblClick:
-    showInspectorDirectly = true;
-    break;
-
-  case QEvent::ContextMenu:
-    showInspectorDirectly = false;
-    break;
-
-  default:
-    break;
+    auto child = static_cast<QChildEvent *>( event )->child();
+    QPointer<QObject> guard( child );
+    QTimer::singleShot( 0, this, [this, guard] { if( guard ) watchChildren( guard ); } );
   }
-
-  return QWebView::event( event );
+  return QWebEngineView::event( event );
 }
 
-void ArticleWebView::mousePressEvent( QMouseEvent * event )
+bool ArticleWebView::eventFilter( QObject * watched, QEvent * event )
 {
-  if ( event->buttons() & Qt4x5::middleButton() )
-    midButtonPressed = true;
-
-  QWebView::mousePressEvent( event );
-
-  if ( selectionBySingleClick && ( event->buttons() & Qt::LeftButton ) )
+  if( event->type() == QEvent::ChildAdded && watched != this )
   {
-    findText(""); // clear the selection first, if any
-    QMouseEvent ev( QEvent::MouseButtonDblClick, event->pos(), Qt::LeftButton, Qt::LeftButton, event->modifiers() );
-    QApplication::sendEvent( page(), &ev );
+    QPointer<QObject> child( static_cast<QChildEvent *>( event )->child() );
+    QTimer::singleShot( 0, this, [this, child] { if( child ) watchChildren( child ); } );
   }
-}
-
-void ArticleWebView::mouseReleaseEvent( QMouseEvent * event )
-{
-  bool noMidButton = !( event->buttons() & Qt4x5::middleButton() );
-
-  QWebView::mouseReleaseEvent( event );
-
-  if ( midButtonPressed & noMidButton )
-    midButtonPressed = false;
-}
-
-void ArticleWebView::mouseDoubleClickEvent( QMouseEvent * event )
-{
-  QWebView::mouseDoubleClickEvent( event );
-#if QT_VERSION >= 0x040600
-  int scrollBarWidth = page()->mainFrame()->scrollBarGeometry( Qt::Vertical ).width();
-  int scrollBarHeight = page()->mainFrame()->scrollBarGeometry( Qt::Horizontal ).height();
-#else
-  int scrollBarWidth = 0;
-  int scrollBarHeight = 0;
-#endif
-
-  // emit the signal only if we are not double-clicking on scrollbars
-  if ( ( event->x() < width() - scrollBarWidth ) &&
-       ( event->y() < height() - scrollBarHeight ) )
+  auto widget = qobject_cast<QWidget *>( watched );
+  if( !widget || ( widget != this && !isAncestorOf( widget ) ) ) return false;
+  if( event->type() == QEvent::MouseButtonPress )
   {
-    emit doubleClicked( event->pos() );
+    auto mouse = static_cast<QMouseEvent *>( event );
+    if( mouse->button() == Qt::MiddleButton ) midButtonPressed = true;
+    if( selectionBySingleClick && !syntheticClick && mouse->button() == Qt::LeftButton )
+    {
+      QPointer<QWidget> child( widget );
+      QPointF const local = mouse->position(), global = mouse->globalPosition();
+      auto modifiers = mouse->modifiers();
+      QTimer::singleShot( 0, this, [this, child, local, global, modifiers] {
+        if( !child ) return;
+        syntheticClick = true;
+        QMouseEvent click( QEvent::MouseButtonDblClick, local, global,
+                           Qt::LeftButton, Qt::LeftButton, modifiers );
+        QApplication::sendEvent( child, &click );
+        syntheticClick = false;
+      } );
+    }
   }
-
+  else if( event->type() == QEvent::MouseButtonRelease )
+  {
+    auto mouse = static_cast<QMouseEvent *>( event );
+    // Chromium consumes the event after this filter. Keep the modifier through
+    // its navigation callback, then retire the pressed state on the event queue.
+    if( mouse->button() == Qt::MiddleButton ) QTimer::singleShot( 0, this, [this] { midButtonPressed = false; } );
+  }
+  else if( event->type() == QEvent::MouseButtonDblClick )
+  {
+    QPoint const position = widget->mapTo( this, static_cast<QMouseEvent *>( event )->position().toPoint() );
+    QTimer::singleShot( 0, this, [this, position] { emit doubleClicked( position ); } );
+  }
+  else if( event->type() == QEvent::Wheel && static_cast<QWheelEvent *>( event )->modifiers().testFlag( Qt::ControlModifier ) )
+  {
+    event->ignore();
+    return true;
+  }
+  return false;
 }
 
 void ArticleWebView::focusInEvent( QFocusEvent * event )
 {
-  QWebView::focusInEvent( event );
-
-  switch( event->reason() )
-  {
-    case Qt::MouseFocusReason:
-    case Qt::TabFocusReason:
-    case Qt::BacktabFocusReason:
-      page()->mainFrame()->evaluateJavaScript("top.focus();");
-      break;
-
-    default:
-      break;
-  }
+  QWebEngineView::focusInEvent( event );
+  if( bridge && ( event->reason() == Qt::MouseFocusReason || event->reason() == Qt::TabFocusReason ||
+                 event->reason() == Qt::BacktabFocusReason ) ) bridge->run( QStringLiteral( "window.focus()" ) );
 }
-
-void ArticleWebView::wheelEvent( QWheelEvent *ev )
+void ArticleWebView::wheelEvent( QWheelEvent * event )
 {
-#ifdef Q_OS_WIN32
-
-  // Avoid wrong mouse wheel handling in QWebView
-  // if system preferences is set to "scroll by page"
-
-  if( ev->modifiers() == Qt::NoModifier )
+  if( event->modifiers().testFlag( Qt::ControlModifier ) ) event->ignore();
+  else QWebEngineView::wheelEvent( event );
+}
+void ArticleWebView::contextMenuEvent( QContextMenuEvent * event )
+{
+  if( auto request = lastContextMenuRequest() )
   {
-    unsigned nLines;
-    SystemParametersInfo( SPI_GETWHEELSCROLLLINES, 0, &nLines, 0 );
-    if( nLines == WHEEL_PAGESCROLL )
-    {
-      QKeyEvent kev( QEvent::KeyPress, ev->delta() > 0 ? Qt::Key_PageUp : Qt::Key_PageDown,
-                     Qt::NoModifier );
-      QApplication::sendEvent( this, &kev );
-
-      ev->accept();
-      return;
-    }
+    // The request is ephemeral; retain only plain values copied in this event.
+    context = {request->position(), request->selectedText(), request->linkText(),
+               request->linkUrl(), request->mediaUrl(), bridge ? bridge->generation() : 0};
   }
-#endif
-
-  if ( ev->modifiers().testFlag( Qt::ControlModifier ) )
-  {
-     ev->ignore();
-  }
-  else
-  {
-     QWebView::wheelEvent( ev );
-  }
-
+  QWebEngineView::contextMenuEvent( event );
 }
