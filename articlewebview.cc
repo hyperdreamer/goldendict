@@ -63,7 +63,21 @@ ArticleWebPage::~ArticleWebPage() = default;
 
 bool ArticleWebPage::acceptNavigationRequest( QUrl const & url, NavigationType type, bool mainFrame )
 {
-  if( !mainFrame ) return true; // Website frames retain their real origins/forms.
+  // One classification decides every branch. An application URL is an action the
+  // retained ArticleView handler dispatches; everything else is a navigation
+  // Chromium owns.
+  bool const action =
+    ArticleUrls::parse( url, ArticleUrls::Use::UserAction ).kind != ArticleUrls::Kind::ExternalAction;
+
+  if( !mainFrame )
+  {
+    // A website frame keeps its real origin: ordinary navigation, forms and
+    // redirects stay native. An application URL is not a website navigation, so
+    // it never becomes a frame document.
+    if( !action ) return true;
+    if( type != NavigationTypeLinkClicked ) return false;
+  }
+
   if( type == NavigationTypeRedirect && controlledNavigation ) return true;
   if( type != NavigationTypeLinkClicked && navigationPermit )
   {
@@ -74,18 +88,21 @@ bool ArticleWebPage::acceptNavigationRequest( QUrl const & url, NavigationType t
   if( type == NavigationTypeLinkClicked )
   {
     auto view = qobject_cast<ArticleWebView *>( QWebEngineView::forPage( this ) );
+    // The navigation callback carries no modifier state of its own; the press that
+    // produced this link click is what the application's keyboard state reports.
+    Qt::KeyboardModifiers const modifiers = QApplication::keyboardModifiers();
+    // Baseline: Alt locks the jump on a link. The engine does not navigate and no
+    // action is dispatched.
+    if( modifiers.testFlag( Qt::AltModifier ) ) return false;
     bool const newTab = ( view && view->isMidButtonPressed() ) ||
-        QApplication::keyboardModifiers().testFlag( Qt::ControlModifier ) ||
-        QApplication::keyboardModifiers().testFlag( Qt::ShiftModifier );
+        modifiers.testFlag( Qt::ControlModifier ) || modifiers.testFlag( Qt::ShiftModifier );
     QTimer::singleShot( 0, this, [this, url, newTab] { emit userLink( url, newTab ); } );
+    return false;
   }
-  else
-  {
-    auto kind = type == NavigationTypeReload ? NavigationKind::Reload :
-                type == NavigationTypeBackForward ? NavigationKind::Back :
-                type == NavigationTypeRedirect ? NavigationKind::Redirect : NavigationKind::NewLookup;
-    QTimer::singleShot( 0, this, [this, url, kind] { emit navigationRequested( url, kind ); } );
-  }
+  auto kind = type == NavigationTypeReload ? NavigationKind::Reload :
+              type == NavigationTypeBackForward ? NavigationKind::Back :
+              type == NavigationTypeRedirect ? NavigationKind::Redirect : NavigationKind::NewLookup;
+  QTimer::singleShot( 0, this, [this, url, kind] { emit navigationRequested( url, kind ); } );
   return false;
 }
 
