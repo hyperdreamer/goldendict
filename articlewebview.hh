@@ -40,9 +40,6 @@ public:
   void configure( QWebEngineProfile * profile, Config::Class * config );
   void setSelectionBySingleClick( bool enabled );
   bool isMidButtonPressed() const noexcept;
-  /// Modifiers of the latest mouse press: Chromium's navigation callback reports
-  /// no modifier state, so the click itself is the authority for Alt/Ctrl/Shift.
-  Qt::KeyboardModifiers pressedModifiers() const noexcept;
   void triggerPageAction( QWebEnginePage::WebAction action, bool checked = false );
   // Controlled entry points install the next generation before asking Chromium
   // to navigate. The ArticleView history coordinator can capture state first.
@@ -68,7 +65,6 @@ private:
   Config::Class * config = nullptr;
   bool midButtonPressed = false, selectionBySingleClick = false, navigated = false;
   bool syntheticClick = false;
-  Qt::KeyboardModifiers pressModifiers;
   struct Context
   {
     QPoint position;

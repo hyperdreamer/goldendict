@@ -739,7 +739,7 @@ private slots:
         int const diagnosedIndex = web->history()->currentItemIndex();
         int const diagnosedGeneration = view->findChild<ArticleBridge*>()->generation();
         view->openLink(QUrl("gdlookup://localhost/cat?contexts=broken"), web->url());
-        WAIT_FOR(!errors.isEmpty());
+        WAIT_FOR(!reported(errors).isEmpty());
         QCOMPARE(pages.size(), count);
         QCOMPARE(web->history()->currentItemIndex(), diagnosedIndex);
         QCOMPARE(view->findChild<ArticleBridge*>()->generation(), diagnosedGeneration);

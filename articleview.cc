@@ -640,7 +640,8 @@ void ArticleView::tryMangleWebsiteClickedUrl( QUrl & url, Contexts & contexts )
 }
 bool ArticleView::isExternalLink( QUrl const & url ) const
 { return ArticleUrls::parse( url, ArticleUrls::Use::UserAction ).kind == ArticleUrls::Kind::ExternalAction; }
-void ArticleView::linkClicked( QUrl const & url ) { openLink( url, d->page->url(), getCurrentArticle() ); }
+void ArticleView::linkClicked( QUrl const & url )
+{ openLink( url, d->page ? d->page->url() : QUrl(), getCurrentArticle() ); }
 void ArticleView::openLink( QUrl const & url, QUrl const & ref, QString const & scrollTo, Contexts const & contexts )
 {
   // A URL fragment is page navigation, not a lookup: the retained anchor path wins

@@ -88,11 +88,9 @@ bool ArticleWebPage::acceptNavigationRequest( QUrl const & url, NavigationType t
   if( type == NavigationTypeLinkClicked )
   {
     auto view = qobject_cast<ArticleWebView *>( QWebEngineView::forPage( this ) );
-    // Chromium reports a user click and a script-initiated location change with
-    // the same type and carries no modifier state, so the press is the authority
-    // and the live keyboard state remains the fallback.
-    Qt::KeyboardModifiers const modifiers =
-      ( view ? view->pressedModifiers() : Qt::KeyboardModifiers() ) | QApplication::keyboardModifiers();
+    // Chromium's navigation callback carries no modifier state, so the click's
+    // press is what the application's keyboard state reports.
+    Qt::KeyboardModifiers const modifiers = QApplication::keyboardModifiers();
     // Baseline: Alt locks the jump on a link. The engine does not navigate and no
     // action is dispatched.
     if( modifiers.testFlag( Qt::AltModifier ) ) return false;
@@ -199,7 +197,6 @@ void ArticleWebView::setHtml( QString const & html, QUrl const & base )
 }
 void ArticleWebView::setSelectionBySingleClick( bool enabled ) { selectionBySingleClick = enabled; }
 bool ArticleWebView::isMidButtonPressed() const noexcept { return midButtonPressed; }
-Qt::KeyboardModifiers ArticleWebView::pressedModifiers() const noexcept { return pressModifiers; }
 
 void ArticleWebView::triggerPageAction( QWebEnginePage::WebAction action, bool checked )
 {
@@ -254,7 +251,6 @@ bool ArticleWebView::eventFilter( QObject * watched, QEvent * event )
   if( event->type() == QEvent::MouseButtonPress )
   {
     auto mouse = static_cast<QMouseEvent *>( event );
-    pressModifiers = mouse->modifiers();
     if( mouse->button() == Qt::MiddleButton ) midButtonPressed = true;
     if( selectionBySingleClick && !syntheticClick && mouse->button() == Qt::LeftButton )
     {
@@ -277,7 +273,6 @@ bool ArticleWebView::eventFilter( QObject * watched, QEvent * event )
     // Chromium consumes the event after this filter. Keep the modifier through
     // its navigation callback, then retire the pressed state on the event queue.
     if( mouse->button() == Qt::MiddleButton ) QTimer::singleShot( 0, this, [this] { midButtonPressed = false; } );
-    QTimer::singleShot( 0, this, [this] { pressModifiers = Qt::NoModifier; } );
   }
   else if( event->type() == QEvent::MouseButtonDblClick )
   {
