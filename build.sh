@@ -11,9 +11,9 @@ REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PRO_FILE="$REPO_ROOT/goldendict.pro"
 
 NCORES="$(nproc)"
-RESERVE="${RESERVE:-4}"               # logical CPUs to keep free for other work
+RESERVE="${RESERVE:-${MAKE_RESERVE:-4}}"   # logical CPUs to keep free for other work
 BUILD_DIR="${BUILD_DIR:-$REPO_ROOT/build}"
-JOBS="${JOBS:-}"
+JOBS="${JOBS:-${MAKE_JOBS:-}}"             # MAKE_JOBS is the shared shell policy knob
 QMAKE="${QMAKE:-qmake}"
 LOAD_MAX="${LOAD_MAX:-}"              # optional `make -l` load ceiling
 NICE="${NICE:-}"                      # optional `nice -n` level
@@ -38,7 +38,8 @@ Options:
 
 Environment:
   JOBS         same as -j
-  RESERVE      cores to leave idle (default 4)
+  MAKE_JOBS    shared job count, also exported by ~/.config/make-jobs.sh
+  RESERVE      cores to leave idle (default 4, or MAKE_RESERVE)
   BUILD_DIR    build directory
   QMAKE        qmake binary
   LOAD_MAX     pass `make --max-load=LOAD_MAX`
