@@ -7,7 +7,6 @@
 #include "websiteframes.hh"
 #include "folding.hh"
 #include "wstring_qt.hh"
-#include "wildcard.hh"
 #include "webmultimediadownload.hh"
 #include "programs.hh"
 #include "gestures.hh"
@@ -238,6 +237,8 @@ void ArticleView::bindDocument()
     d->capture.reset(); d->debounce->stop(); d->latest.reset(); d->debounced.reset();
     ++d->findQuery; ++d->contextQuery; ++d->ftsQuery;
     clearDocumentCaches();
+    resetFtsResults();
+    if( searchIsOpened ) { ui.searchText->setProperty( "noResults", false ); reloadStyleSheet(); }
   } );
   connect( d->bridge, &ArticleBridge::readingStateChanged, this, &ArticleView::updateReadingState );
   connect( d->bridge, &ArticleBridge::activeArticleChanged, this, [this]( QString const & id ) {
@@ -1056,36 +1057,66 @@ void ArticleView::openSearch()
 void ArticleView::performFindOperation( bool restart, bool backwards, bool checkHighlight )
 {
   quint64 const query = ++d->findQuery;
-  QString text = ui.searchText->text();
+  QString const text = ui.searchText->text();
+  bool const highlight = ui.highlightAllButton->isChecked();
   QWebEnginePage::FindFlags flags;
   if( ui.searchCaseSensitive->isChecked() ) flags |= QWebEnginePage::FindCaseSensitively;
   if( backwards ) flags |= QWebEnginePage::FindBackward;
-  if( restart ) { d->page->findText( QString() ); run( "window.getSelection().removeAllRanges()" ); }
-  if( checkHighlight || ui.highlightAllButton->isChecked() )
-    run( "gdHighlightAll([" + json( text ) + "]," + ( ui.searchCaseSensitive->isChecked() ? "true" : "false" ) + ")" );
-  else run( "gdClearHighlights()" );
-  QPointer<ArticleView> guard( this ); auto page = d->page; int generation = d->generation;
-  page->findText( text, flags, [guard, page, generation, query, text]( QWebEngineFindTextResult const & result ) {
-    if( !guard || !page || guard->d->page != page || guard->d->generation != generation || guard->d->findQuery != query ) return;
-    bool missing = !text.isEmpty() && result.numberOfMatches() == 0;
-    guard->ui.searchText->setProperty( "noResults", missing ); guard->reloadStyleSheet();
-    if( !text.isEmpty() ) emit guard->statusBarMessage( missing ? tr( "Phrase not found" ) :
-      tr( "%1 of %2 matches" ).arg( result.activeMatch() ).arg( result.numberOfMatches() ) );
-  } );
+  QPointer<ArticleView> guard( this );
+  auto page = d->page;
+  int const generation = d->generation;
+  auto find = [this, guard, page, generation, query, text, flags] {
+    if( !guard || !page || guard->d->page != page || guard->d->generation != generation ||
+        guard->d->findQuery != query ) return;
+    page->findText( text, flags, [guard, page, generation, query, text]( QWebEngineFindTextResult const & result ) {
+      if( !guard || !page || guard->d->page != page || guard->d->generation != generation ||
+          guard->d->findQuery != query ) return;
+      bool missing = !text.isEmpty() && result.numberOfMatches() == 0;
+      guard->ui.searchText->setProperty( "noResults", missing ); guard->reloadStyleSheet();
+      if( !text.isEmpty() ) emit guard->statusBarMessage( missing ? tr( "Phrase not found" ) :
+        tr( "%1 of %2 matches" ).arg( result.activeMatch() ).arg( result.numberOfMatches() ) );
+    } );
+  };
+  // The toggle only owns the marks; it never issues a find of its own.
+  if( checkHighlight && !restart )
+  {
+    if( highlight ) run( "gdHighlightAll([" + json( text ) + "]," +
+                         ( ui.searchCaseSensitive->isChecked() ? "true" : "false" ) + ")" );
+    else run( "gdClearHighlights()" );
+    return;
+  }
+  QString const marks = highlight ? "gdHighlightAll([" + json( text ) + "]," +
+                          ( ui.searchCaseSensitive->isChecked() ? "true" : "false" ) + ")" :
+                          QStringLiteral( "gdClearHighlights()" );
+  if( !restart )
+  {
+    run( marks );
+    find();
+    return;
+  }
+  d->page->findText( QString() );
+  // A changed query must report its first match. Clearing the engine's find
+  // session keeps its origin at the previous active match, so a collapsed caret
+  // at the document start is installed before the new find is issued.
+  run( "(() => {" + marks + ";const selection=window.getSelection();if(selection){"
+       "selection.removeAllRanges();const root=document.body||document.documentElement;"
+       "if(root){const range=document.createRange();range.setStart(root,0);range.collapse(true);"
+       "selection.addRange(range);}}})()",
+       [find]( QVariant const & ) { find(); } );
 }
 void ArticleView::on_searchPrevious_clicked() { if( searchIsOpened ) performFindOperation( false, true ); }
 void ArticleView::on_searchNext_clicked() { if( searchIsOpened ) performFindOperation( false, false ); }
 void ArticleView::on_searchText_textEdited() { performFindOperation( true, false ); }
 void ArticleView::on_searchText_returnPressed() { on_searchNext_clicked(); }
-void ArticleView::on_searchCloseButton_clicked() { closeSearch(); }
-void ArticleView::on_searchCaseSensitive_clicked() { performFindOperation( true, false ); }
+void ArticleView::on_searchCloseButton_clicked() { closeSearch(); }void ArticleView::on_searchCaseSensitive_clicked() { performFindOperation( true, false ); }
 void ArticleView::on_highlightAllButton_clicked() { performFindOperation( false, false, true ); }
 bool ArticleView::closeSearch()
 {
   ++d->findQuery; ++d->ftsQuery;
   bool wasOpened = searchIsOpened || ftsSearchIsOpened;
-  searchIsOpened = false; ftsSearchIsOpened = false; ftsPosition = 0; ftsCount = 0;
-  ui.searchFrame->hide(); ui.ftsSearchFrame->hide();
+  searchIsOpened = false;
+  resetFtsResults();
+  ui.searchFrame->hide();
   if( wasOpened )
   {
     if( d->page ) d->page->findText( QString() );
@@ -1099,16 +1130,34 @@ void ArticleView::reloadStyleSheet()
   for( auto widget = parentWidget(); widget; widget = widget->parentWidget() )
     if( !widget->styleSheet().isEmpty() ) { widget->setStyleSheet( widget->styleSheet() ); break; }
 }
+void ArticleView::resetFtsResults()
+{
+  // A count belongs to the document that produced it; neither the number nor
+  // the bar may survive a generation change.
+  ftsPosition = 0; ftsCount = 0; ftsSearchIsOpened = false;
+  ui.ftsSearchPrevious->setEnabled( false ); ui.ftsSearchNext->setEnabled( false );
+  ui.ftsSearchStatusLabel->clear(); ui.ftsSearchFrame->hide();
+}
 void ArticleView::highlightFTSResults( int attempt )
 {
   auto parsed = ArticleUrls::parse( d->page->url(), ArticleUrls::Use::DocumentLoad );
   auto spec = parsed.lookup.highlight;
   if( spec.sourcePattern.isEmpty() || !spec.expression.isValid() ) return;
   auto const query = attempt == 0 ? ++d->ftsQuery : d->ftsQuery;
-  QString pattern = spec.sourcePattern;
-  if( parsed.lookup.ignoreDiacritics ) pattern = gd::toQString( Folding::applyDiacriticsOnly( gd::toWString( pattern ) ) );
-  else pattern.remove( QChar( 0x301 ) );
-  QRegularExpression expression( spec.wildcards ? wildcardsToRegexp( pattern ) : pattern, spec.expression.patternOptions() );
+  // Highlight exactly what the codec's typed spec matches: the compiled
+  // expression already carries the wildcard conversion and the case option.
+  // Only the diacritics transform is re-applied, because the visible text below
+  // is normalized the same way.
+  QRegularExpression expression = spec.expression;
+  QString pattern = expression.pattern();
+  if( parsed.lookup.ignoreDiacritics )
+    pattern = gd::toQString( Folding::applyDiacriticsOnly( gd::toWString( pattern ) ) );
+  else
+    pattern.remove( QChar( 0x301 ) );
+  QRegularExpression::PatternOptions options = spec.expression.patternOptions();
+  options.setFlag( QRegularExpression::CaseInsensitiveOption, !spec.matchCase );
+  expression.setPatternOptions( options );
+  expression.setPattern( pattern );
   if( !expression.isValid() ) return;
   run( "(() => { gdHighlightAll([],false); const token=gdSaveSelection(); return {token,text:__gdTextSnapshot.text,version:__gdTextSnapshot.version}; })()",
        [this, expression, query, attempt, ignore = parsed.lookup.ignoreDiacritics]( QVariant const & result ) {
@@ -1126,7 +1175,9 @@ void ArticleView::highlightFTSResults( int attempt )
       spans.append( QVariantMap{{"start", first}, {"length", length}} );
     }
     QVariantMap payload{{"text", original}, {"version", snapshot.value( "version" )}, {"spans", spans}};
-    run( "(() => {const n=gdHighlightAll(" + json( payload ) + ",true);gdRestoreSelection(" + json( snapshot.value( "token" ) ) + ");return n;})()",
+    // A rejected snapshot marked nothing, so the live selection is left for the
+    // recapture instead of being replaced by the pre-mutation saved one.
+    run( "(() => {const n=gdHighlightAll(" + json( payload ) + ",true);if(n>=0)gdRestoreSelection(" + json( snapshot.value( "token" ) ) + ");return n;})()",
          [this, query, attempt]( QVariant const & value ) {
       if( query != d->ftsQuery ) return;
       int count = value.toInt();

@@ -29,7 +29,8 @@ include(../article-test.pri)
 SOURCES += tst_article_bridge.cc
 # Hold selected real completions after Chromium evaluates the production call.
 QMAKE_LFLAGS += -Wl,--wrap=_ZN14QWebEnginePage13runJavaScriptERK7QStringjRKSt8functionIFvRK8QVariantEE \
-                -Wl,--wrap=_ZN15QWebEngineFrame13runJavaScriptERK7QStringjRKSt8functionIFvRK8QVariantEE
+                -Wl,--wrap=_ZN15QWebEngineFrame13runJavaScriptERK7QStringjRKSt8functionIFvRK8QVariantEE \
+                -Wl,--wrap=_ZN14QWebEnginePage8findTextERK7QString6QFlagsINS_8FindFlagEERKSt8functionIFvRK24QWebEngineFindTextResultEE
 
 # Use the shipped resource aliases, without the unrelated version.txt generated
 # by the final application build.

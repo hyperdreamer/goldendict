@@ -169,6 +169,7 @@ private:
   void cleanupTemp();
   bool eventFilter( QObject *, QEvent * ) override;
   void performFindOperation( bool restart, bool backwards, bool checkHighlight = false );
+  void resetFtsResults();
   void highlightFTSResults( int attempt = 0 );
   void performFtsFindOperation( bool backwards );
   void reloadStyleSheet();

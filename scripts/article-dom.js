@@ -227,9 +227,16 @@
   };
   window.gdScrollToHit = i => {
     if (!Number.isInteger(i) || i < 0 || i >= hits.length || !hits[i][0] || !hits[i][0].isConnected) return false;
-    const mark = hits[i][0];
+    const mark = hits[i][0], last = hits[i][hits[i].length - 1];
     const article = mark.closest("[id^=gdfrom-]");
     if (article) activate(article.id);
+    // The active match is also the selection: the shipped article sheet styles
+    // ::selection, so the current hit stays distinguishable from the others and
+    // keeps its presentation when optional parts are shown or hidden.
+    const range = document.createRange();
+    range.setStartBefore(mark); range.setEndAfter(last);
+    const selection = window.getSelection();
+    if (selection) { selection.removeAllRanges(); selection.addRange(range); }
     mark.scrollIntoView({block: "center"});
     return true;
   };

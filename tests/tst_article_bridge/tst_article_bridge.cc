@@ -5,12 +5,18 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QClipboard>
+#include <QCheckBox>
 #include <QFileDialog>
+#include <QFrame>
+#include <QLabel>
+#include <QLineEdit>
 #include <QMenu>
 #include <QNetworkProxy>
 #include <QMouseEvent>
 #include <QTemporaryDir>
+#include <QToolButton>
 #include <QWebChannel>
+#include <QWebEngineFindTextResult>
 #include <QWebEnginePage>
 #include <QWebEngineProfile>
 #include <QWebEngineScript>
@@ -44,6 +50,41 @@ QStringList dispatched;
 bool holdInteraction = false;
 QList<Completion> interactions;
 
+// Native find results are real engine values. Production callbacks for a
+// selected query (or a selected production script) may be held and delivered
+// after a newer query/document exists; the value itself is always the one the
+// engine produced for that exact call.
+struct FindCompletion
+{
+    std::function<void(QWebEngineFindTextResult const &)> callback;
+    void deliver(QWebEngineFindTextResult const &value) const { callback(value); }
+};
+bool holdFind = false;
+QString holdFindQuery;
+QStringList findQueries;
+QMap<QString, QWebEngineFindTextResult> findResults;
+QMap<QString, FindCompletion> heldFind;
+QString holdScriptMarker;
+QList<Completion> heldScripts;
+QList<Completion> &heldHighlights = heldScripts;
+
+void observeFind(QString const &query, QWebEnginePage::FindFlags const &flags,
+                 std::function<void(QWebEngineFindTextResult const &)> const &callback,
+                 std::function<void(std::function<void(QWebEngineFindTextResult const &)> const &)> const &execute)
+{
+    if (query.isEmpty() || !callback) { execute(callback); return; }
+    Q_UNUSED(flags)
+    findQueries.append(query);
+    if (holdFind && query == holdFindQuery) {
+        heldFind.insert(query, FindCompletion{callback});
+        return;
+    }
+    execute([query, callback](QWebEngineFindTextResult const &value) {
+        findResults.insert(query, value);
+        callback(value);
+    });
+}
+
 // Link wrapping affects only the production call sites in this executable. It
 // still evaluates on the real page; only delivery of tagged results is held.
 void observe(QString const &script, ArticleBridge::Result const &callback,
@@ -51,6 +92,10 @@ void observe(QString const &script, ArticleBridge::Result const &callback,
 {
     if (holdInteraction && script.contains("document.elementFromPoint(")) {
         execute([callback](QVariant const &value) { interactions.append({callback, value}); });
+        return;
+    }
+    if (!holdScriptMarker.isEmpty() && script.contains(holdScriptMarker)) {
+        execute([callback](QVariant const &value) { heldScripts.append({callback, value}); });
         return;
     }
     if (!script.startsWith("/*t19:")) { execute(callback); return; }
@@ -182,6 +227,72 @@ QMenu *visibleMenu(ArticleView &view) {
     for (auto menu : view.findChildren<QMenu*>()) if (menu->isVisible()) return menu;
     return nullptr;
 }
+// The find/FTS bars are the retained ArticleView surface: their widgets are
+// addressed by object name, never by a new view API.
+QLineEdit *searchLine(ArticleView &view) { return view.findChild<QLineEdit*>("searchText"); }
+QToolButton *searchTool(ArticleView &view, QString const &name) { return view.findChild<QToolButton*>(name); }
+QFrame *ftsSearchFrame(ArticleView &view) { return view.findChild<QFrame*>("ftsSearchFrame"); }
+QLabel *ftsSearchLabel(ArticleView &view) { return view.findChild<QLabel*>("ftsSearchStatusLabel"); }
+QString statusText(QSignalSpy const &spy)
+{
+    return spy.isEmpty() ? QString() : spy.last().at(0).toString();
+}
+void typeQuery(QLineEdit *line, QString const &text)
+{
+    QTest::keyClick(line, Qt::Key_A, Qt::ControlModifier);
+    QTest::keyClicks(line, text);
+}
+// Marks are enumerated in document order, which is the navigation order.
+QStringList markTexts(QWebEnginePage &page, QDeadlineTimer const &deadline)
+{
+    return evaluate(page, "Array.from(document.querySelectorAll('mark[data-gd-highlight]'))"
+                          ".map(mark => mark.textContent)", deadline).toStringList();
+}
+QList<int> markOffsets(QString const &rootId, QWebEnginePage &page, QDeadlineTimer const &deadline)
+{
+    auto values = evaluate(page, "(() => {const root=document.getElementById(" + quote(rootId) + ");"
+        "return Array.from(root.querySelectorAll('mark[data-gd-highlight]')).map(mark => {"
+        "const range=document.createRange();range.selectNodeContents(root);range.setEndBefore(mark);"
+        "return range.toString().length;});})()", deadline).toList();
+    QList<int> offsets;
+    for (auto const &value : values) offsets.append(value.toInt());
+    return offsets;
+}
+// A lone surrogate is corrupted text, not a mark boundary. Returns false when
+// the document text or any mark contains one.
+bool unicodeScalarsIntact(QWebEnginePage &page, QDeadlineTimer const &deadline)
+{
+    return evaluate(page, R"JS((() => {
+        const intact = text => {
+          for (let i = 0; i < text.length; ++i) {
+            const unit = text.charCodeAt(i);
+            if (unit >= 0xd800 && unit <= 0xdbff) {
+              if (i + 1 >= text.length) return false;
+              const low = text.charCodeAt(++i);
+              if (low < 0xdc00 || low > 0xdfff) return false;
+            } else if (unit >= 0xdc00 && unit <= 0xdfff) return false;
+          }
+          return true;
+        };
+        return [document.body.textContent, ...Array.from(
+          document.querySelectorAll('mark[data-gd-highlight]')).map(mark => mark.textContent)].every(intact);
+      })())JS", deadline).toBool();
+}
+// The shipped article sheet colours the find/FTS selection, which is the active
+// match among the highlighted ones.
+bool selectionRulePresent(QWebEnginePage &page, QDeadlineTimer const &deadline)
+{
+    return evaluate(page, R"JS((() => {
+        for (const sheet of Array.from(document.styleSheets)) {
+          let rules; try { rules = Array.from(sheet.cssRules); } catch (_) { continue; }
+          for (const rule of rules)
+            if ((rule.selectorText || '').indexOf('::selection') >= 0 &&
+                (rule.style.backgroundColor === 'rgb(204, 0, 0)' ||
+                 rule.style.background === 'rgb(204, 0, 0)')) return true;
+        }
+        return false;
+      })())JS", deadline).toBool();
+}
 }
 
 // Exact GNU ld wrappers for the Qt 6.12 page/frame overloads used by the bridge.
@@ -204,6 +315,21 @@ extern "C" void wrapFrameRun(QWebEngineFrame *frame, QString const &script, quin
     observe(script, callback, [&](ArticleBridge::Result cb) { realFrameRun(frame, script, world, cb); });
 }
 
+// The asynchronous find overload is the production call site for both bars.
+extern "C" void realFindText(QWebEnginePage *, QString const &, QWebEnginePage::FindFlags,
+                             std::function<void(QWebEngineFindTextResult const &)> const &)
+    asm("__real__ZN14QWebEnginePage8findTextERK7QString6QFlagsINS_8FindFlagEERKSt8functionIFvRK24QWebEngineFindTextResultEE");
+extern "C" void wrapFindText(QWebEnginePage *, QString const &, QWebEnginePage::FindFlags,
+                             std::function<void(QWebEngineFindTextResult const &)> const &)
+    asm("__wrap__ZN14QWebEnginePage8findTextERK7QString6QFlagsINS_8FindFlagEERKSt8functionIFvRK24QWebEngineFindTextResultEE");
+extern "C" void wrapFindText(QWebEnginePage *page, QString const &query, QWebEnginePage::FindFlags flags,
+                             std::function<void(QWebEngineFindTextResult const &)> const &callback)
+{
+    observeFind(query, flags, callback, [&](std::function<void(QWebEngineFindTextResult const &)> const &cb) {
+        realFindText(page, query, flags, cb);
+    });
+}
+
 class ArticleBridgeTest : public QObject
 {
     Q_OBJECT
@@ -215,7 +341,12 @@ private slots:
         QStringList reasons;
         QVERIFY2(TestSupport::requiredEnvironment(&reasons), qPrintable(reasons.join('\n')));
     }
-    void cleanup() { holdInteraction = false; interactions.clear(); held.clear(); dispatched.clear(); }
+    void cleanup()
+    {
+        holdInteraction = false; interactions.clear(); held.clear(); dispatched.clear();
+        holdFind = false; holdFindQuery.clear(); findQueries.clear(); findResults.clear(); heldFind.clear();
+        holdScriptMarker.clear(); heldScripts.clear();
+    }
     void cleanupTestCase() { TestSupport::clearWatchdog(); }
 
     void doubleClickKeepsPressModifiersAfterDelivery()
@@ -1148,6 +1279,470 @@ private slots:
             QString::fromUtf8("中文词条"), QString::fromUtf8("é"), QString::fromUtf8("rock’n’roll"),
             QString::fromUtf8("𐐀word"), QString(), QString(), QString()}));
     }
+
+    // The engine's asynchronous result is the contract source for counts and the
+    // active index; the UI guard only decides whether a result is still current.
+    void nativeFindCountsAndStaleQueryGuard()
+    {
+        QDeadlineTimer deadline(18000);
+        {
+            Browser b;
+            ArticleWebView view;
+            view.resize(720, 480); view.show();
+            view.configure(b.controller->profile(), &b.cfg);
+            QSignalSpy ready(view.bridge, &ArticleBridge::bridgeReady);
+            view.setHtml(document("<p id='needles'>testneedle and testneedle here</p>"));
+            WAIT_FOR(ready.size() == 1);
+            auto result = std::make_shared<std::optional<QWebEngineFindTextResult>>();
+            view.page()->findText(QStringLiteral("testneedle"), {},
+                                  [result](QWebEngineFindTextResult const &value) { result->emplace(value); });
+            QTRY_VERIFY_WITH_TIMEOUT(result->has_value(), 3000);
+            QCOMPARE(result->value().numberOfMatches(), 2);
+            QCOMPARE(result->value().activeMatch(), 1);
+        }
+
+        InteractionFixture f;
+        f.a->setArticleBody(QByteArray("<p id='n1'>testneedle alpha</p>"
+                                       "<p id='n2'>beta testneedle</p>"));
+        auto view = f.view(); auto web = view->findChild<ArticleWebView*>();
+        QSignalSpy pages(view.get(), &ArticleView::pageLoaded);
+        QSignalSpy status(view.get(), &ArticleView::statusBarMessage);
+        WAIT_FOR(!pages.isEmpty() && view->getPhrase().phrase == "initial");
+        f.search.trigger(); QVERIFY(view->isSearchOpened());
+        auto line = searchLine(*view); QVERIFY(line);
+        typeQuery(line, "beta");
+        WAIT_FOR(statusText(status) == "1 of 1 matches");
+        // Hold the engine result of one query while a newer query owns the bar.
+        holdFind = true; holdFindQuery = "beta";
+        searchTool(*view, "searchNext")->click();
+        WAIT_FOR(heldFind.contains("beta"));
+        holdFind = false;
+        typeQuery(line, "testneedle");
+        QTest::qWait(1500);
+        qDebug() << "DEBUG1 status" << status.size()
+                 << (status.isEmpty() ? QString() : status.last().at(0).toString())
+                 << "finds" << findQueries << "held" << heldFind.keys()
+                 << "results" << findResults.keys() << findResults.value("testneedle").numberOfMatches()
+                 << findResults.value("testneedle").activeMatch();
+        WAIT_FOR(statusText(status) == "1 of 2 matches");
+        QCOMPARE(findResults.value("beta").numberOfMatches(), 1);
+        int const current = status.size();
+        auto stale = heldFind.take("beta");
+        stale.deliver(findResults.value("beta"));
+        auto barrier = std::make_shared<bool>(false);
+        web->bridge->run("true", [barrier](QVariant const &) { *barrier = true; });
+        WAIT_FOR(*barrier);
+        QCOMPARE(status.size(), current);
+        QCOMPARE(statusText(status), QString("1 of 2 matches"));
+        QCOMPARE(line->property("noResults").toBool(), false);
+    }
+
+    // Count/index, forward/backward, wrap, zero, case options and the highlight
+    // all toggle all drive the same retained find bar.
+    void findBarCountsOptionsWrapAndCase()
+    {
+        QDeadlineTimer deadline(15000);
+        InteractionFixture f;
+        f.a->setArticleBody(QByteArray("<p id='n1'>testneedle alpha</p>"
+                                       "<p id='n2'>testneedle TESTNEEDLE</p>"));
+        auto view = f.view(); auto web = view->findChild<ArticleWebView*>();
+        QSignalSpy pages(view.get(), &ArticleView::pageLoaded);
+        QSignalSpy status(view.get(), &ArticleView::statusBarMessage);
+        WAIT_FOR(!pages.isEmpty() && view->getPhrase().phrase == "initial");
+        f.search.trigger(); QVERIFY(view->isSearchOpened());
+        auto line = searchLine(*view); QVERIFY(line);
+        auto next = searchTool(*view, "searchNext"); auto previous = searchTool(*view, "searchPrevious");
+        auto caseBox = view->findChild<QCheckBox*>("searchCaseSensitive");
+        QVERIFY(next && previous && caseBox);
+        typeQuery(line, "TESTNEEDLE");
+        WAIT_FOR(statusText(status) == "1 of 3 matches");
+        next->click(); WAIT_FOR(statusText(status) == "2 of 3 matches");
+        next->click(); WAIT_FOR(statusText(status) == "3 of 3 matches");
+        next->click(); WAIT_FOR(statusText(status) == "1 of 3 matches");
+        previous->click(); WAIT_FOR(statusText(status) == "3 of 3 matches");
+        caseBox->click(); WAIT_FOR(statusText(status) == "1 of 1 matches");
+        QCOMPARE(line->property("noResults").toBool(), false);
+        caseBox->click(); WAIT_FOR(statusText(status) == "1 of 3 matches");
+        // Overlapping queries: a longer query replaces the shorter one's count.
+        typeQuery(line, "test"); WAIT_FOR(statusText(status) == "1 of 3 matches");
+        typeQuery(line, "testneedle"); WAIT_FOR(statusText(status) == "1 of 3 matches");
+        typeQuery(line, "absentneedle");
+        WAIT_FOR(statusText(status) == "Phrase not found");
+        QCOMPARE(line->property("noResults").toBool(), true);
+        typeQuery(line, "testneedle");
+        WAIT_FOR(statusText(status) == "1 of 3 matches");
+        QCOMPARE(line->property("noResults").toBool(), false);
+        // Highlight all marks the retained literal query and never edits text.
+        auto highlightAll = searchTool(*view, "highlightAllButton"); QVERIFY(highlightAll);
+        highlightAll->click();
+        WAIT_FOR(markTexts(*web->page(), deadline).size() == 3);
+        QCOMPARE(markTexts(*web->page(), deadline),
+                 (QStringList{QStringLiteral("testneedle"), QStringLiteral("testneedle"),
+                              QStringLiteral("TESTNEEDLE")}));
+        QCOMPARE(evaluate(*web->page(), "document.getElementById('n1').textContent", deadline).toString(),
+                 QString("testneedle alpha"));
+        QVERIFY(unicodeScalarsIntact(*web->page(), deadline));
+        highlightAll->click();
+        WAIT_FOR(markTexts(*web->page(), deadline).isEmpty());
+        QCOMPARE(evaluate(*web->page(), "document.body.textContent.indexOf('testneedle')", deadline).toInt() >= 0, true);
+        QVERIFY(unicodeScalarsIntact(*web->page(), deadline));
+    }
+
+    void ftsMarksUseCompiledSpecAcrossModes_data()
+    {
+        QTest::addColumn<QString>("body");
+        QTest::addColumn<QString>("pattern");
+        QTest::addColumn<bool>("wildcards");
+        QTest::addColumn<bool>("matchCase");
+        QTest::addColumn<QStringList>("marks");
+
+        QTest::newRow("literal")
+            << QStringLiteral("alpha beta alpha") << QStringLiteral("alpha") << false << false
+            << QStringList{QStringLiteral("alpha"), QStringLiteral("alpha")};
+        QTest::newRow("literal-case-folded")
+            << QStringLiteral("Alpha alpha ALPHA") << QStringLiteral("Alpha") << false << false
+            << QStringList{QStringLiteral("Alpha"), QStringLiteral("alpha"), QStringLiteral("ALPHA")};
+        QTest::newRow("literal-case-sensitive")
+            << QStringLiteral("Alpha alpha ALPHA") << QStringLiteral("Alpha") << false << true
+            << QStringList{QStringLiteral("Alpha")};
+        // Branch reset is PCRE2 syntax; JavaScript RegExp cannot compile it, so
+        // the spans must come from the typed spec's compiled expression.
+        QTest::newRow("regex-pcre-only")
+            << QStringLiteral("alpha beta gamma") << QStringLiteral("(?|alpha|beta)") << false << false
+            << QStringList{QStringLiteral("alpha"), QStringLiteral("beta")};
+        // The codec converts wildcards with Qt's unanchored, non-path
+        // conversion: a backslash stays literal and '*' stays a wildcard.
+        QTest::newRow("wildcard-codec-conversion")
+            << QStringLiteral("a*b a\\z zb") << QStringLiteral("a\\*b") << true << false
+            << QStringList{QStringLiteral("a\\z zb")};
+    }
+    void ftsMarksUseCompiledSpecAcrossModes()
+    {
+        QFETCH(QString, body);
+        QFETCH(QString, pattern);
+        QFETCH(bool, wildcards);
+        QFETCH(bool, matchCase);
+        QFETCH(QStringList, marks);
+        QDeadlineTimer deadline(18000);
+        InteractionFixture f;
+        f.a->setArticleBody((QStringLiteral("<p id='fts'>") + body + QStringLiteral("</p>")).toUtf8());
+        auto view = f.view(); auto web = view->findChild<ArticleWebView*>();
+        QSignalSpy pages(view.get(), &ArticleView::pageLoaded);
+        WAIT_FOR(!pages.isEmpty() && view->getPhrase().phrase == "initial");
+        // The typed spec survives the document URL exactly, and the parser is
+        // what compiles it for both the search and the renderer.
+        ArticleUrls::Lookup lookup;
+        lookup.phrase = Config::InputPhrase::fromPhrase(QStringLiteral("fts"));
+        lookup.group = 17; lookup.groupSpecified = true;
+        lookup.dictionaries = QStringList{QStringLiteral("dict-a")};
+        lookup.highlight.sourcePattern = pattern;
+        lookup.highlight.wildcards = wildcards;
+        lookup.highlight.matchCase = matchCase;
+        auto url = ArticleUrls::lookupDocument(lookup);
+        auto parsed = ArticleUrls::parse(url, ArticleUrls::Use::DocumentLoad);
+        QCOMPARE(parsed.kind, ArticleUrls::Kind::LookupDocument);
+        QCOMPARE(parsed.lookup.highlight.sourcePattern, pattern);
+        QCOMPARE(parsed.lookup.highlight.wildcards, wildcards);
+        QCOMPARE(parsed.lookup.highlight.matchCase, matchCase);
+        QVERIFY(parsed.lookup.highlight.expression.isValid());
+        QCOMPARE(parsed.lookup.highlight.expression.pattern(),
+                 wildcards ? QRegularExpression::wildcardToRegularExpression(pattern,
+                     QRegularExpression::UnanchoredWildcardConversion |
+                     QRegularExpression::NonPathWildcardConversion)
+                           : pattern);
+        auto options = parsed.lookup.highlight.expression.patternOptions();
+        QVERIFY(options.testFlag(QRegularExpression::DotMatchesEverythingOption));
+        QVERIFY(options.testFlag(QRegularExpression::UseUnicodePropertiesOption));
+        QVERIFY(options.testFlag(QRegularExpression::MultilineOption));
+        QVERIFY(options.testFlag(QRegularExpression::InvertedGreedinessOption));
+        QCOMPARE(options.testFlag(QRegularExpression::CaseInsensitiveOption), !matchCase);
+        view->showDefinition("fts", QStringList{QStringLiteral("dict-a")},
+                             parsed.lookup.highlight, 17, false);
+        WAIT_FOR(pages.size() == 2);
+        auto label = ftsSearchLabel(*view); QVERIFY(label);
+        WAIT_FOR(!label->text().isEmpty());
+        QCOMPARE(label->text(), QStringLiteral("1 of %1 matches").arg(marks.size()));
+        QVERIFY(ftsSearchFrame(*view)->isVisible());
+        QCOMPARE(markTexts(*web->page(), deadline), marks);
+        QCOMPARE(evaluate(*web->page(), "document.getElementById('fts').textContent", deadline).toString(), body);
+        QVERIFY(unicodeScalarsIntact(*web->page(), deadline));
+        // Clearing and re-marking keeps the article text byte-identical.
+        evaluate(*web->page(), "gdClearHighlights()", deadline);
+        QVERIFY(markTexts(*web->page(), deadline).isEmpty());
+        QCOMPARE(evaluate(*web->page(), "document.getElementById('fts').textContent", deadline).toString(), body);
+    }
+
+    void ftsUnicodeMarksPreserveTextAndScalars_data()
+    {
+        QTest::addColumn<QString>("body");
+        QTest::addColumn<QString>("pattern");
+        QTest::addColumn<bool>("ignoreDiacritics");
+        QTest::addColumn<QStringList>("marks");
+        QTest::addColumn<QList<int>>("offsets");
+
+        QString const emoji = QString::fromUtf8("\U0001F600");
+        QString const deseret = QString::fromUtf8("\U00010400");
+        QString const combining = QString(QChar(0x0301));
+        QTest::newRow("supplementary-before")
+            << (emoji + "alpha " + emoji + "alpha") << QStringLiteral("alpha") << false
+            << QStringList{QStringLiteral("alpha"), QStringLiteral("alpha")} << QList<int>{2, 10};
+        QTest::newRow("combining-before")
+            << ("e" + combining + "clair alpha") << QStringLiteral("clair") << false
+            << QStringList{QStringLiteral("clair")} << QList<int>{2};
+        QTest::newRow("precomposed-folding")
+            << QString::fromUtf8("caf\u00e9 cr\u00e8me") << QStringLiteral("cafe") << true
+            << QStringList{QString::fromUtf8("caf\u00e9")} << QList<int>{0};
+        QTest::newRow("decomposed-folding")
+            << ("cafe" + combining + " au lait") << QString::fromUtf8("caf\u00e9") << true
+            << QStringList{"cafe" + combining} << QList<int>{0};
+        QTest::newRow("whole-scalar-pattern")
+            << (emoji + QStringLiteral("alpha")) << QStringLiteral(".alpha") << false
+            << QStringList{emoji + QStringLiteral("alpha")} << QList<int>{0};
+        // The combining mark is removed from the normalized text, so a pattern
+        // that continues past it maps back onto the original (mark included) and
+        // the following visible character.
+        QTest::newRow("combining-shift")
+            << ("cafe" + combining + " next") << QStringLiteral("cafe.") << false
+            << QStringList{"cafe" + combining + " "} << QList<int>{0};
+        QTest::newRow("supplementary-pattern")
+            << (deseret + QStringLiteral("word")) << deseret << false
+            << QStringList{deseret} << QList<int>{0};
+    }
+    void ftsUnicodeMarksPreserveTextAndScalars()
+    {
+        QFETCH(QString, body);
+        QFETCH(QString, pattern);
+        QFETCH(bool, ignoreDiacritics);
+        QFETCH(QStringList, marks);
+        QFETCH(QList<int>, offsets);
+        QDeadlineTimer deadline(18000);
+        InteractionFixture f;
+        f.a->setArticleBody((QStringLiteral("<p id='fts'>") + body + QStringLiteral("</p>")).toUtf8());
+        auto view = f.view(); auto web = view->findChild<ArticleWebView*>();
+        QSignalSpy pages(view.get(), &ArticleView::pageLoaded);
+        WAIT_FOR(!pages.isEmpty() && view->getPhrase().phrase == "initial");
+        ArticleUrls::Lookup lookup;
+        lookup.phrase = Config::InputPhrase::fromPhrase(QStringLiteral("fts"));
+        lookup.group = 17; lookup.groupSpecified = true;
+        lookup.dictionaries = QStringList{QStringLiteral("dict-a")};
+        lookup.highlight.sourcePattern = pattern;
+        auto parsed = ArticleUrls::parse(ArticleUrls::lookupDocument(lookup), ArticleUrls::Use::DocumentLoad);
+        QVERIFY(parsed.lookup.highlight.expression.isValid());
+        view->showDefinition("fts", QStringList{QStringLiteral("dict-a")},
+                             parsed.lookup.highlight, 17, ignoreDiacritics);
+        WAIT_FOR(pages.size() == 2);
+        auto label = ftsSearchLabel(*view); QVERIFY(label);
+        WAIT_FOR(!label->text().isEmpty());
+        QCOMPARE(label->text(), QStringLiteral("1 of %1 matches").arg(marks.size()));
+        QCOMPARE(markTexts(*web->page(), deadline), marks);
+        QCOMPARE(markOffsets(QStringLiteral("fts"), *web->page(), deadline), offsets);
+        QCOMPARE(evaluate(*web->page(), "document.getElementById('fts').textContent", deadline).toString(), body);
+        QVERIFY(unicodeScalarsIntact(*web->page(), deadline));
+        for (qsizetype i = 0; i < body.size(); ++i)
+        {
+            if (!body.at(i).isHighSurrogate()) continue;
+            QVERIFY(i + 1 < body.size() && body.at(i + 1).isLowSurrogate());
+        }
+        evaluate(*web->page(), "gdClearHighlights()", deadline);
+        QVERIFY(markTexts(*web->page(), deadline).isEmpty());
+        QCOMPARE(evaluate(*web->page(), "document.getElementById('fts').textContent", deadline).toString(), body);
+        QVERIFY(unicodeScalarsIntact(*web->page(), deadline));
+    }
+
+    // Marks, the active-match selection CSS and the hit navigation survive the
+    // optional-part toggles, which only change presentation.
+    void ftsNavigationSurvivesOptionalSections()
+    {
+        QDeadlineTimer deadline(20000);
+        InteractionFixture f;
+        f.a->setArticleBody(QByteArray("<p id='first'>testneedle one</p>"
+            "<div style='height:1400px'></div>"
+            "<p id='second'>testneedle two "
+            "<span class='dsl_opt' style='display:none'>testneedle optional</span>"
+            "<span class='hidden_expand_opt'>+</span></p>"));
+        auto view = f.view(); auto web = view->findChild<ArticleWebView*>();
+        QSignalSpy pages(view.get(), &ArticleView::pageLoaded);
+        WAIT_FOR(!pages.isEmpty() && view->getPhrase().phrase == "initial");
+        ArticleUrls::Lookup lookup;
+        lookup.phrase = Config::InputPhrase::fromPhrase(QStringLiteral("fts"));
+        lookup.group = 17; lookup.groupSpecified = true;
+        lookup.dictionaries = QStringList{QStringLiteral("dict-a")};
+        lookup.highlight.sourcePattern = QStringLiteral("testneedle");
+        auto parsed = ArticleUrls::parse(ArticleUrls::lookupDocument(lookup), ArticleUrls::Use::DocumentLoad);
+        view->showDefinition("fts", QStringList{QStringLiteral("dict-a")},
+                             parsed.lookup.highlight, 17, false);
+        WAIT_FOR(pages.size() == 2);
+        auto label = ftsSearchLabel(*view); QVERIFY(label);
+        // The hidden optional match is not part of the visible text snapshot.
+        WAIT_FOR(label->text() == QStringLiteral("1 of 2 matches"));
+        QVERIFY(ftsSearchFrame(*view)->isVisible());
+        QVERIFY(selectionRulePresent(*web->page(), deadline));
+        QVERIFY(evaluate(*web->page(), "getSelection().toString() === 'testneedle'", deadline).toBool());
+        searchTool(*view, "ftsSearchNext")->click();
+        WAIT_FOR(label->text() == QStringLiteral("2 of 2 matches"));
+        WAIT_FOR(evaluate(*web->page(), "scrollY > 500", deadline).toBool());
+        auto inViewport = [&] {
+            return evaluate(*web->page(), R"JS((() => {
+                const marks = document.querySelectorAll('mark[data-gd-highlight]');
+                const rect = marks[marks.length - 1].getBoundingClientRect();
+                return rect.top >= 0 && rect.bottom <= innerHeight;
+            })())JS", deadline).toBool();
+        };
+        WAIT_FOR(inViewport());
+        QCOMPARE(evaluate(*web->page(), "getSelection().toString()", deadline).toString(), QString("testneedle"));
+        QString const second = evaluate(*web->page(), "document.getElementById('second').textContent", deadline).toString();
+        QCOMPARE(second, QString("testneedle two testneedle optional+"));
+        view->receiveExpandOptionalParts(true);
+        WAIT_FOR(evaluate(*web->page(),
+            "getComputedStyle(document.querySelector('.dsl_opt')).display === 'inline'", deadline).toBool());
+        QCOMPARE(markTexts(*web->page(), deadline).size(), 2);
+        QVERIFY(evaluate(*web->page(),
+            "Array.from(document.querySelectorAll('mark[data-gd-highlight]')).every(mark => mark.isConnected)",
+            deadline).toBool());
+        QCOMPARE(evaluate(*web->page(), "document.getElementById('second').textContent", deadline).toString(), second);
+        QVERIFY(selectionRulePresent(*web->page(), deadline));
+        QCOMPARE(evaluate(*web->page(), "getSelection().toString()", deadline).toString(), QString("testneedle"));
+        QVERIFY(inViewport());
+        QVERIFY(evaluate(*web->page(), "scrollY > 500", deadline).toBool());
+        // A new run re-applies the same spans on the reloaded document without
+        // touching its text.
+        view->reload();
+        WAIT_FOR(pages.size() == 3);
+        WAIT_FOR(label->text() == QStringLiteral("1 of 2 matches"));
+        QCOMPARE(evaluate(*web->page(), "document.getElementById('second').textContent", deadline).toString(), second);
+        QCOMPARE(markTexts(*web->page(), deadline).size(), 2);
+        QVERIFY(unicodeScalarsIntact(*web->page(), deadline));
+    }
+
+    // A DOM change between extraction and application re-extracts once; a second
+    // change clears every mark and reports it instead of marking stale offsets.
+    void ftsRetryRecapturesOnceThenReportsChange()
+    {
+        QDeadlineTimer deadline(30000);
+        InteractionFixture f;
+        f.a->setArticleBody(QByteArray("<p id='w'>testneedle one</p>"));
+        auto view = f.view(); auto web = view->findChild<ArticleWebView*>();
+        QSignalSpy pages(view.get(), &ArticleView::pageLoaded);
+        QSignalSpy status(view.get(), &ArticleView::statusBarMessage);
+        WAIT_FOR(!pages.isEmpty() && view->getPhrase().phrase == "initial");
+        ArticleUrls::Lookup lookup;
+        lookup.phrase = Config::InputPhrase::fromPhrase(QStringLiteral("fts"));
+        lookup.group = 17; lookup.groupSpecified = true;
+        lookup.dictionaries = QStringList{QStringLiteral("dict-a")};
+        lookup.highlight.sourcePattern = QStringLiteral("testneedle");
+        auto parsed = ArticleUrls::parse(ArticleUrls::lookupDocument(lookup), ArticleUrls::Use::DocumentLoad);
+        auto const spec = parsed.lookup.highlight;
+        auto label = ftsSearchLabel(*view); QVERIFY(label);
+        holdScriptMarker = QStringLiteral("gdSaveSelection(");
+        // One DOM change: the recapture applies the new snapshot and the user's
+        // selection survives the retried marking operation.
+        view->showDefinition("fts", QStringList{QStringLiteral("dict-a")}, spec, 17, false);
+        WAIT_FOR(pages.size() == 2);
+        WAIT_FOR(heldScripts.size() == 1);
+        evaluate(*web->page(), "(() => {const n=document.getElementById('w').firstChild;"
+            "const r=document.createRange();r.setStart(n,11);r.setEnd(n,14);"
+            "const s=getSelection();s.removeAllRanges();s.addRange(r);return s.toString();})()", deadline);
+        QCOMPARE(evaluate(*web->page(), "getSelection().toString()", deadline).toString(), QString("one"));
+        evaluate(*web->page(), "document.getElementById('w').appendChild(document.createTextNode(' testneedle two'))",
+                 deadline);
+        heldScripts.takeFirst().deliver();
+        WAIT_FOR(heldScripts.size() == 1);
+        // Hold the application of the recaptured spans so the restored selection
+        // is observable before hit activation replaces it.
+        holdScriptMarker = QStringLiteral("gdRestoreSelection(");
+        heldScripts.takeFirst().deliver();
+        WAIT_FOR(heldScripts.size() == 1);
+        QCOMPARE(markTexts(*web->page(), deadline), (QStringList{"testneedle", "testneedle"}));
+        QCOMPARE(evaluate(*web->page(), "document.getElementById('w').textContent", deadline).toString(),
+                 QString("testneedle one testneedle two"));
+        QCOMPARE(evaluate(*web->page(), "getSelection().toString()", deadline).toString(), QString("one"));
+        heldScripts.takeFirst().deliver();
+        WAIT_FOR(label->text() == QStringLiteral("1 of 2 matches"));
+        QCOMPARE(evaluate(*web->page(), "getSelection().toString()", deadline).toString(),
+                 QString("testneedle"));
+        QVERIFY(unicodeScalarsIntact(*web->page(), deadline));
+        // Two changes: the one retry is spent, so no stale offsets may mark.
+        holdScriptMarker = QStringLiteral("gdSaveSelection(");
+        f.a->setArticleBody(QByteArray("<p id='w'>testneedle one</p>"));
+        view->showDefinition("fts", QStringList{QStringLiteral("dict-a")}, spec, 17, false);
+        WAIT_FOR(pages.size() == 3);
+        WAIT_FOR(heldScripts.size() == 1);
+        evaluate(*web->page(), "document.getElementById('w').appendChild(document.createTextNode(' testneedle two'))",
+                 deadline);
+        heldScripts.takeFirst().deliver();
+        WAIT_FOR(heldScripts.size() == 1);
+        evaluate(*web->page(), "document.getElementById('w').appendChild(document.createTextNode(' testneedle three'))",
+                 deadline);
+        heldScripts.takeFirst().deliver();
+        WAIT_FOR(statusText(status) == QStringLiteral("Article changed; run the search again."));
+        QVERIFY(markTexts(*web->page(), deadline).isEmpty());
+        QCOMPARE(evaluate(*web->page(), "document.getElementById('w').textContent", deadline).toString(),
+                 QString("testneedle one testneedle two testneedle three"));
+        QVERIFY(!ftsSearchFrame(*view)->isVisible());
+        QVERIFY(unicodeScalarsIntact(*web->page(), deadline));
+        holdScriptMarker.clear();
+        heldScripts.clear();
+    }
+
+    void staleFindAndFtsCannotLeakAcrossDocuments()
+    {
+        QDeadlineTimer deadline(20000);
+        InteractionFixture f;
+        f.a->setArticleBody(QByteArray("<p id='a'>alpha testneedle alpha</p>"));
+        auto view = f.view(); auto web = view->findChild<ArticleWebView*>();
+        QSignalSpy pages(view.get(), &ArticleView::pageLoaded);
+        QSignalSpy status(view.get(), &ArticleView::statusBarMessage);
+        WAIT_FOR(!pages.isEmpty() && view->getPhrase().phrase == "initial");
+        ArticleUrls::Lookup lookup;
+        lookup.phrase = Config::InputPhrase::fromPhrase(QStringLiteral("fts"));
+        lookup.group = 17; lookup.groupSpecified = true;
+        lookup.dictionaries = QStringList{QStringLiteral("dict-a")};
+        lookup.highlight.sourcePattern = QStringLiteral("testneedle");
+        auto parsed = ArticleUrls::parse(ArticleUrls::lookupDocument(lookup), ArticleUrls::Use::DocumentLoad);
+        f.a->setArticleBody(QByteArray("<p id='b'>testneedle and testneedle</p>"));
+        view->showDefinition("fts", QStringList{QStringLiteral("dict-a")},
+                             parsed.lookup.highlight, 17, false);
+        WAIT_FOR(pages.size() == 2);
+        auto label = ftsSearchLabel(*view); QVERIFY(label);
+        WAIT_FOR(label->text() == QStringLiteral("1 of 2 matches"));
+        QVERIFY(ftsSearchFrame(*view)->isVisible());
+        // Hold a native find result and the next FTS apply, then reload through
+        // the document the FTS bar was computed for.
+        f.search.trigger(); QVERIFY(view->isSearchOpened());
+        auto line = searchLine(*view); QVERIFY(line);
+        holdFind = true; holdFindQuery = "testneedle";
+        typeQuery(line, "testneedle");
+        WAIT_FOR(heldFind.contains("testneedle"));
+        holdScriptMarker = QStringLiteral("const n=gdHighlightAll(");
+        view->reload();
+        WAIT_FOR(pages.size() == 3);
+        WAIT_FOR(heldScripts.size() == 1);
+        // The reloaded generation resets the count-bearing FTS UI immediately.
+        QVERIFY(!ftsSearchFrame(*view)->isVisible());
+        QVERIFY(!label->text().contains(QStringLiteral("matches")));
+        // Navigate away from the reloaded document; late callbacks follow.
+        f.a->setArticleBody(QByteArray("<p id='a'>alpha testneedle alpha</p>"));
+        QVERIFY(view->canGoBack());
+        view->back();
+        WAIT_FOR(pages.size() == 4);
+        WAIT_FOR(view->getPhrase().phrase == "initial");
+        int const beforeStatus = status.size();
+        heldScripts.takeFirst().deliver();
+        heldFind.take("testneedle").deliver(findResults.value("testneedle"));
+        auto barrier = std::make_shared<bool>(false);
+        web->bridge->run("true", [barrier](QVariant const &) { *barrier = true; });
+        WAIT_FOR(*barrier);
+        QCOMPARE(status.size(), beforeStatus);
+        QVERIFY(markTexts(*web->page(), deadline).isEmpty());
+        QVERIFY(!ftsSearchFrame(*view)->isVisible());
+        QVERIFY(!label->text().contains(QStringLiteral("matches")));
+        QCOMPARE(line->property("noResults").toBool(), false);
+        QCOMPARE(evaluate(*web->page(), "document.body.textContent.indexOf('alpha')", deadline).toInt() >= 0, true);
+        // The find bar itself still serves the current document.
+        typeQuery(line, "alpha");
+        WAIT_FOR(statusText(status) == "1 of 2 matches");
+    }
+
 
     void domHelpersQuotingSelectionHighlightsAndRestore()
     {
