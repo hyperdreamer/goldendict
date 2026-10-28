@@ -241,7 +241,7 @@ void ArticleBridge::retireInFlightFrame()
   if( operation && operation->frame ) retireOperation( operation );
 }
 
-void ArticleBridge::enqueue( std::optional<QWebEngineFrame> frame, QString const & script, Result callback )
+void ArticleBridge::enqueue( std::optional<QWebEngineFrame> frame, QString const & script, Result callback, int deadlineMs )
 {
   if( state == State::Closed || !page ) return;
   if( nextOperation == std::numeric_limits<quint64>::max() )
@@ -250,8 +250,22 @@ void ArticleBridge::enqueue( std::optional<QWebEngineFrame> frame, QString const
     retire();
     return;
   }
-  queue.enqueue( std::make_shared<Operation>( Operation{ currentGeneration, ++nextOperation,
-                   std::move( frame ), script, std::move( callback ), false } ) );
+  auto operation = std::make_shared<Operation>( Operation{ currentGeneration, ++nextOperation,
+                   std::move( frame ), script, std::move( callback ), false } );
+  queue.enqueue( operation );
+  if( deadlineMs > 0 )
+  {
+    QTimer::singleShot( deadlineMs, this, [this, operation] {
+      if( operation->completed || operation->generation != currentGeneration || state == State::Closed || !page ) return;
+      if( inFlight == operation ) { retireOperation( operation ); return; }
+      // A capture queued while the channel is installing also has a deadline.
+      // Remove only its own slot; never release a different in-flight operation.
+      if( !queue.removeOne( operation ) ) return;
+      operation->completed = true;
+      auto callback = std::move( operation->callback );
+      if( callback ) callback( {} );
+    } );
+  }
   dispatch();
 }
 

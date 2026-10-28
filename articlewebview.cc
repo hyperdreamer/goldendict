@@ -9,6 +9,7 @@
 #include <QMouseEvent>
 #include <QTimer>
 #include <QWebEngineContextMenuRequest>
+#include <QWebEngineHistory>
 #include <QWebEngineProfile>
 #include <QWebEngineSettings>
 #include <QWheelEvent>
@@ -161,7 +162,18 @@ bool ArticleWebView::prepareNavigation()
   navigated = true;
   return true;
 }
-void ArticleWebView::load( QUrl const & url ) { if( prepareNavigation() ) ownedPage->load( url ); }
+void ArticleWebView::load( QUrl const & url ) { navigate( url, NavigationKind::NewLookup ); }
+void ArticleWebView::navigate( QUrl const & url, NavigationKind kind )
+{
+  if( !prepareNavigation() ) return;
+  switch( kind )
+  {
+    case NavigationKind::Back: ownedPage->history()->back(); break;
+    case NavigationKind::Forward: ownedPage->history()->forward(); break;
+    case NavigationKind::Reload: ownedPage->triggerAction( QWebEnginePage::Reload ); break;
+    default: ownedPage->load( url ); break;
+  }
+}
 void ArticleWebView::setHtml( QString const & html, QUrl const & base )
 {
   if( prepareNavigation() ) ownedPage->setHtml( html, base );

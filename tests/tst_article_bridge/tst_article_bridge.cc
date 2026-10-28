@@ -145,6 +145,44 @@ private slots:
     void cleanup() { held.clear(); dispatched.clear(); }
     void cleanupTestCase() { TestSupport::clearWatchdog(); }
 
+    // T22's bounded capture uses this same queue, including while the channel
+    // is not ready. Expiry must retire only its own slot.
+    void boundedCaptureExpiryCannotReleaseAnotherOperation()
+    {
+        QDeadlineTimer deadline(10000);
+        Browser b;
+        ArticleWebView view; view.configure(b.controller->profile(), &b.cfg);
+        auto bridge = view.bridge.data();
+        int pendingReplies = 0;
+        bridge->enqueue({}, "/*t19:pending-expired*/ 41", [&](QVariant const &value) {
+            QVERIFY(!value.isValid()); ++pendingReplies;
+        }, 100);
+        WAIT_FOR(pendingReplies == 1);
+        QVERIFY(bridge->queue.isEmpty()); QVERIFY(dispatched.isEmpty());
+        QSignalSpy ready(bridge, &ArticleBridge::bridgeReady);
+        view.setHtml(document()); WAIT_FOR(ready.size() == 1);
+        int expired = 0, trailing = 0;
+        bridge->run("/*t19:hold-owner*/ 1"); WAIT_FOR(held.contains("hold-owner"));
+        bridge->enqueue({}, "/*t19:queued-expired*/ 42", [&](QVariant const &value) {
+            QVERIFY(!value.isValid()); ++expired;
+        }, 100);
+        bridge->run("/*t19:tail*/ 43", [&](QVariant const &value) { QCOMPARE(value.toInt(), 43); ++trailing; });
+        WAIT_FOR(expired == 1);
+        QVERIFY(!dispatched.contains("queued-expired")); QVERIFY(!trailing);
+        held.take("hold-owner").deliver(); WAIT_FOR(trailing == 1);
+        int freshReplies = 0;
+        bridge->enqueue({}, "/*t19:hold-expired*/ 44", [&](QVariant const &value) {
+            QVERIFY(!value.isValid()); ++expired;
+        }, 100);
+        WAIT_FOR(held.contains("hold-expired")); WAIT_FOR(expired == 2);
+        auto retired = held.take("hold-expired");
+        bridge->run("/*t19:hold-fresh*/ 45", [&](QVariant const &value) { QCOMPARE(value.toInt(), 45); ++freshReplies; });
+        WAIT_FOR(held.contains("hold-fresh"));
+        bridge->run("/*t19:after-fresh*/ 46", [&](QVariant const &) { ++trailing; });
+        retired.deliver(); QCOMPARE(trailing, 1); QCOMPARE(freshReplies, 0);
+        held.take("hold-fresh").deliver(); WAIT_FOR(freshReplies == 1 && trailing == 2);
+    }
+
     void parserTimeAndPermanentFacade()
     {
         QDeadlineTimer deadline(20000);
