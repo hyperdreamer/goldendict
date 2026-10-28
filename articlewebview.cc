@@ -88,8 +88,8 @@ bool ArticleWebPage::acceptNavigationRequest( QUrl const & url, NavigationType t
   if( type == NavigationTypeLinkClicked )
   {
     auto view = qobject_cast<ArticleWebView *>( QWebEngineView::forPage( this ) );
-    // Chromium's navigation callback carries no modifier state, so the click's
-    // press is what the application's keyboard state reports.
+    // The navigation callback carries no modifier state of its own; the press that
+    // produced this link click is what the application's keyboard state reports.
     Qt::KeyboardModifiers const modifiers = QApplication::keyboardModifiers();
     // Baseline: Alt locks the jump on a link. The engine does not navigate and no
     // action is dispatched.
