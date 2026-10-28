@@ -697,6 +697,91 @@ private slots:
         QVERIFY(view.inspector->page()->findChild<QObject *>("gdArticleRequestInterceptor", Qt::FindDirectChildrenOnly));
     }
 
+    // A UTF-16 caret can land inside a supplementary letter; the production
+    // helper must measure the whole scalar and return the complete word.
+    void supplementaryWordThroughReadyBridge()
+    {
+        QDeadlineTimer deadline(10000);
+        Browser b;
+        ArticleWebView view;
+        view.resize(720, 480); view.show();
+        view.configure(b.controller->profile(), &b.cfg);
+        QFile fixture(TestSupport::repositoryRoot() + "/tests/fixtures/article/dom.html");
+        QVERIFY(fixture.open(QIODevice::ReadOnly));
+        QSignalSpy ready(view.bridge, &ArticleBridge::bridgeReady);
+        view.setHtml(QString::fromUtf8(fixture.readAll())); WAIT_FOR(ready.size() == 1);
+        auto answer = std::make_shared<std::optional<QString>>();
+        view.bridge->run(QString::fromUtf8(R"JS((() => {
+          const node = document.createElement('span');
+          node.textContent = '𐐀word';
+          node.style.cssText = 'position:fixed;left:40px;top:40px;font:24px monospace;z-index:2147483647';
+          document.body.appendChild(node);
+          const range = document.createRange();
+          range.setStart(node.firstChild, 0);
+          range.setEnd(node.firstChild, 2);
+          const rect = range.getBoundingClientRect();
+          const word = gdWordAtPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+          node.remove();
+          return word;
+        })())JS"), [answer](QVariant const &value) { *answer = value.toString(); });
+        WAIT_FOR(answer->has_value());
+        QCOMPARE(**answer, QString::fromUtf8("𐐀word"));
+        QVERIFY(!(**answer).contains(QChar(0xfffd)));
+        for (qsizetype i = 0; i < (**answer).size(); ++i)
+            if ((**answer).at(i).isSurrogate()) {
+                QVERIFY((**answer).at(i).isHighSurrogate());
+                QVERIFY(i + 1 < (**answer).size() && (**answer).at(++i).isLowSurrogate());
+            }
+    }
+
+    void wordFallbackThroughRealDom_data()
+    {
+        QTest::addColumn<QString>("caretSetup");
+        QTest::newRow("native") << QString();
+        QTest::newRow("range-only") << QString("document.caretPositionFromPoint=undefined;");
+        QTest::newRow("position-null") << QString("document.caretPositionFromPoint=()=>null;");
+        QTest::newRow("position-throws") << QString("document.caretPositionFromPoint=()=>{throw Error('unavailable')};");
+        QTest::newRow("both-null") << QString("document.caretPositionFromPoint=()=>null;document.caretRangeFromPoint=()=>null;");
+        QTest::newRow("both-throw") << QString("document.caretPositionFromPoint=document.caretRangeFromPoint=()=>{throw Error('unavailable')};");
+        QTest::newRow("foreign-root") << QString("const foreign=document.createElement('span').attachShadow({mode:'open'});"
+            "foreign.textContent='foreign';document.caretPositionFromPoint=()=>({offsetNode:foreign.firstChild,offset:1});"
+            "document.caretRangeFromPoint=()=>null;");
+    }
+    void wordFallbackThroughRealDom()
+    {
+        QFETCH(QString, caretSetup);
+        QDeadlineTimer deadline(10000);
+        Browser b;
+        ArticleWebView view; view.resize(720, 480); view.show();
+        view.configure(b.controller->profile(), &b.cfg);
+        QFile fixture(TestSupport::repositoryRoot() + "/tests/fixtures/article/dom.html");
+        QVERIFY(fixture.open(QIODevice::ReadOnly));
+        QSignalSpy ready(view.bridge, &ArticleBridge::bridgeReady);
+        view.setHtml(QString::fromUtf8(fixture.readAll())); WAIT_FOR(ready.size() == 1);
+        auto answer = std::make_shared<std::optional<QStringList>>();
+        view.bridge->run("(() => {" + caretSetup + QString::fromUtf8(R"JS(
+          const result = [];
+          for (const [id, offset, length] of [['word-latin',1,1],['word-cyrillic',1,1],
+              ['word-cjk',1,1],['word-combining',0,2],['word-apostrophe',1,1]]) {
+            const n=document.getElementById(id).firstChild, r=document.createRange();
+            r.setStart(n,offset);r.setEnd(n,offset+length);const b=r.getBoundingClientRect();
+            result.push(gdWordAtPoint(b.x+b.width/2,b.y+b.height/2));
+          }
+          const n=document.createElement('span');n.textContent='𐐀word !  ';
+          n.style.cssText='position:fixed;left:40px;top:40px;font:24px monospace;z-index:2147483647';
+          document.body.append(n);
+          for (const [start,end] of [[0,2],[7,8],[8,9]]) {
+            const r=document.createRange();r.setStart(n.firstChild,start);r.setEnd(n.firstChild,end);
+            const b=r.getBoundingClientRect();result.push(gdWordAtPoint(b.x+b.width/2,b.y+b.height/2));
+          }
+          n.remove();result.push(gdWordAtPoint(-10,-10));return result;
+        })())JS"), [answer](QVariant const &value) { *answer = value.toStringList(); });
+        WAIT_FOR(answer->has_value());
+        QCOMPARE(**answer, (QStringList{QStringLiteral("latin"), QString::fromUtf8("Привет"),
+            QString::fromUtf8("中文词条"), QString::fromUtf8("é"), QString::fromUtf8("rock’n’roll"),
+            QString::fromUtf8("𐐀word"), QString(), QString(), QString()}));
+    }
+
     void domHelpersQuotingSelectionHighlightsAndRestore()
     {
         QDeadlineTimer deadline(15000);

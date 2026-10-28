@@ -67,35 +67,65 @@
   window.gdWordAtPoint = (x, y) => {
     if (!Number.isFinite(x) || !Number.isFinite(y)) return "";
     const element = document.elementFromPoint(x, y);
-    if (!element || element.closest("input,textarea,select,button")) return "";
-    let node, offset;
-    if (document.caretPositionFromPoint) {
-      const caret = document.caretPositionFromPoint(x, y);
-      if (caret) { node = caret.offsetNode; offset = caret.offset; }
-    } else if (document.caretRangeFromPoint) {
-      const caret = document.caretRangeFromPoint(x, y);
-      if (caret) { node = caret.startContainer; offset = caret.startOffset; }
+    if (!element || element.closest("input,textarea,select,button,[contenteditable=true]")) return "";
+    // All offsets are UTF-16, but geometry is measured one complete scalar at a
+    // time. Native caret APIs may snap to either side of a glyph, or fail on
+    // embedded content. The fallback has a finite node/scalar budget, including
+    // zero-width glyphs, and never changes the user's selection.
+    const maxNodes = 256, maxScalars = 8192, maxText = 65536;
+    let remaining = maxScalars;
+    const valid = node => node && node.nodeType === Node.TEXT_NODE && node.isConnected &&
+      node.ownerDocument === document && node.getRootNode() === document && !excluded(node) &&
+      (element.contains(node) || node.parentElement.contains(element));
+    const scalarStart = (text, offset) => offset > 0 && offset < text.length &&
+      /[\uD800-\uDBFF]/u.test(text[offset - 1]) && /[\uDC00-\uDFFF]/u.test(text[offset]) ? offset - 1 : offset;
+    const contains = (node, start) => {
+      if (start < 0 || start >= node.length || remaining-- <= 0) return false;
+      const end = start + (node.data.codePointAt(start) > 0xffff ? 2 : 1);
+      const range = document.createRange();
+      range.setStart(node, start); range.setEnd(node, end);
+      return Array.from(range.getClientRects()).some(rect => rect.width > 0 && rect.height > 0 &&
+        x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom);
+    };
+    let hit = null;
+    for (const api of ["caretPositionFromPoint", "caretRangeFromPoint"]) {
+      try {
+        if (typeof document[api] !== "function") continue;
+        const caret = document[api](x, y);
+        const node = caret && (api === "caretPositionFromPoint" ? caret.offsetNode : caret.startContainer);
+        const offset = caret && (api === "caretPositionFromPoint" ? caret.offset : caret.startOffset);
+        if (!valid(node) || !Number.isInteger(offset) || offset < 0 || offset > node.length) continue;
+        const at = scalarStart(node.data, offset);
+        for (const start of [at, scalarStart(node.data, at - 1)])
+          if (contains(node, start)) { hit = {node, offset: start}; break; }
+        if (hit) break;
+      } catch (_) { /* Try the other native API, then bounded Range geometry. */ }
     }
-    if (!node || node.nodeType !== Node.TEXT_NODE || excluded(node)) return "";
-    // A caret can snap to text from whitespace: require the actual glyph rect.
-    const glyph = document.createRange();
-    const at = Math.min(offset, Math.max(0, node.length - 1));
-    glyph.setStart(node, at); glyph.setEnd(node, Math.min(node.length, at + 1));
-    let rect = glyph.getBoundingClientRect();
-    if ((x < rect.left || x > rect.right) && offset > 0) {
-      glyph.setStart(node, offset - 1); glyph.setEnd(node, offset);
-      rect = glyph.getBoundingClientRect();
-      if (x >= rect.left && x <= rect.right) offset--;
+    if (!hit) {
+      const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+      let count = 0;
+      for (let node = walker.nextNode(); node && count++ < maxNodes && remaining > 0; node = walker.nextNode()) {
+        if (!valid(node)) continue;
+        let offset = 0;
+        for (const scalar of node.data) {
+          if (contains(node, offset)) { hit = {node, offset}; break; }
+          offset += scalar.length;
+          if (remaining <= 0) break;
+        }
+        if (hit) break;
+      }
     }
-    if (x < rect.left || x > rect.right || y < rect.top || y > rect.bottom) return "";
-    let block = node.parentElement;
+    if (!hit) return "";
+    let block = hit.node.parentElement;
     while (block.parentElement && ["inline", "contents"].includes(getComputedStyle(block).display))
       block = block.parentElement;
-    const nodes = textNodes(block);
-    let text = "", position = -1;
-    for (const part of nodes) {
-      if (part === node) position = text.length + offset;
-      text += part.data;
+    const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
+    let text = "", position = -1, count = 0;
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      if (++count > maxNodes || text.length + node.length > maxText) return "";
+      if (excluded(node) || !node.parentElement.getClientRects().length) continue;
+      if (node === hit.node) position = text.length + hit.offset;
+      text += node.data;
     }
     if (position < 0) return "";
     const pattern = /[\p{L}\p{M}\p{N}]+(?:['’\-][\p{L}\p{M}\p{N}]+)*/gu;
