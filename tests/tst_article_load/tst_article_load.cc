@@ -199,7 +199,13 @@ private slots:
         QStringList reasons;
         QVERIFY2(TestSupport::requiredEnvironment(&reasons), qPrintable(reasons.join('\n')));
     }
-    void cleanup() { holdCapture = false; captures.clear(); captureCalls = 0; }
+    void cleanup()
+    {
+        holdCapture = false; captures.clear(); captureCalls = 0;
+        // Desktop-services targets are per-test objects; never leave one behind.
+        QDesktopServices::unsetUrlHandler("https");
+        QDesktopServices::unsetUrlHandler("file");
+    }
     void cleanupTestCase() { TestSupport::clearWatchdog(); }
 
     // Break: default-profile page, missing attachPage or missing initial scripts.
