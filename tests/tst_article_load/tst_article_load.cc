@@ -43,7 +43,9 @@
 #include <QtTest>
 #include <QApplication>
 #include <QDeadlineTimer>
+#include <QDesktopServices>
 #include <QElapsedTimer>
+#include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QNetworkProxy>
@@ -94,13 +96,30 @@ QVariant evaluate(QWebEnginePage *page, QString const &script)
         QTest::qFail("real renderer evaluation timed out", __FILE__, __LINE__);
     return answer->value;
 }
+// A desktop-services target so external dispatch is observed instead of launched.
+struct DesktopTarget final : QObject
+{
+    Q_OBJECT
+public:
+    QList<QUrl> opened;
+    QList<QByteArray> contents;
+public slots:
+    void handle(QUrl const &url)
+    {
+        opened.append(url);
+        if (!url.isLocalFile()) return;
+        QFile file(url.toLocalFile());
+        contents.append(file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray());
+    }
+};
 struct Fixture
 {
     struct Player final : AudioPlayerInterface
     {
         QByteArray played;
+        int stops = 0;
         QString play(char const *bytes, int size) override { played = QByteArray(bytes, size); return {}; }
-        void stop() override {}
+        void stop() override { ++stops; }
     };
     Config::Class config;
     sptr<TestSupport::FixtureDictionary> a{new TestSupport::FixtureDictionary};
@@ -133,6 +152,16 @@ struct Fixture
         return result;
     }
 };
+// The status bar also carries hover notifications; only a real message is a diagnosis.
+QString reported(QSignalSpy const &messages)
+{
+    for (int row = 0; row < messages.size(); ++row)
+    {
+        auto text = messages.at(row).at(0).toString();
+        if (!text.isEmpty()) return text;
+    }
+    return {};
+}
 bool loaded(ArticleView &view, QSignalSpy const &spy, int before, QString const &word)
 {
     return spy.size() > before && view.getPhrase().phrase == word && !view.getArticlesList().isEmpty();
@@ -544,6 +573,270 @@ private slots:
         QVERIFY(elapsed.elapsed() < 1000);
         QVERIFY(!evaluate(web->page(), "window.__hiddenFrameRan===true").toBool());
         QCOMPARE(evaluate(web->page(), "scrollY").toInt(), 120);
+    }
+
+    // Break: a real user click misses the retained handler, the new-tab intent
+    // is raised twice or lost, or Alt stops locking the jump.
+    void rendererClicksDispatchExactlyOnceAndAltLocksTheJump()
+    {
+        QDeadlineTimer deadline(16000);
+        Fixture f;
+        f.a->setArticleBody("<p id='fixture-headword'>fixture-headword</p>"
+                            "<a id='path-link' href='gdlookup://localhost/alpha'>alpha</a>"
+                            "<a id='word-link' href='bword:beta'>beta</a>");
+        auto view = f.view(); auto web = view->findChild<ArticleWebView*>();
+        auto *page = qobject_cast<ArticleWebPage*>(web->page());
+        QVERIFY(page);
+        QSignalSpy pages(view.get(), &ArticleView::pageLoaded);
+        QSignalSpy actions(page, &ArticleWebPage::userLink);
+        QSignalSpy newTabs(view.get(), &ArticleView::openLinkInNewTab);
+        QSignalSpy words(view.get(), &ArticleView::sendWordToHistory);
+        view->showDefinition("A", 17); WAIT_FOR(loaded(*view, pages, 0, "A"));
+        QCOMPARE(words.size(), 1);
+        int const index = web->history()->currentItemIndex();
+        int const generation = view->findChild<ArticleBridge*>()->generation();
+        int const requests = f.a->articleRequestCount();
+        QWidget *target = web->focusProxy() ? web->focusProxy() : static_cast<QWidget *>(web);
+        QVERIFY(target);
+        auto linkPoint = [&](QString const &id) {
+            auto box = evaluate(web->page(), "(() => {const r=document.getElementById('" + id +
+                "').getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};})()").toMap();
+            return target->mapFrom(web, QPoint(qRound(box.value("x").toDouble()), qRound(box.value("y").toDouble())));
+        };
+        QVERIFY(evaluate(web->page(), "(() => !!document.getElementById('path-link') && "
+                                   "!!document.getElementById('word-link'))()").toBool());
+        // Control-click raises one new-tab intent and performs nothing here.
+        auto controlPoint = linkPoint("path-link");
+        QTest::mouseClick(target, Qt::LeftButton, Qt::ControlModifier, controlPoint);
+        WAIT_FOR(actions.size() == 1);
+        QCOMPARE(actions.at(0).at(0).toUrl(), QUrl("gdlookup://localhost/alpha"));
+        QCOMPARE(actions.at(0).at(1).toBool(), true);
+        WAIT_FOR(newTabs.size() == 1);
+        QCOMPARE(newTabs.at(0).at(0).toUrl(), QUrl("gdlookup://localhost/alpha"));
+        QCOMPARE(newTabs.at(0).at(2).toString(), QStringLiteral("gdfrom-dict-a"));
+        QCOMPARE(pages.size(), 1);
+        QCOMPARE(web->history()->currentItemIndex(), index);
+        QCOMPARE(view->findChild<ArticleBridge*>()->generation(), generation);
+        QCOMPARE(words.size(), 1);
+        QCOMPARE(f.a->articleRequestCount(), requests);
+        // The middle button raises exactly one further new-tab intent.
+        auto wordPoint = linkPoint("word-link");
+        QTest::mouseClick(target, Qt::MiddleButton, Qt::NoModifier, wordPoint);
+        WAIT_FOR(actions.size() == 2);
+        QCOMPARE(actions.at(1).at(0).toUrl(), QUrl("bword:beta"));
+        QCOMPARE(actions.at(1).at(1).toBool(), true);
+        WAIT_FOR(newTabs.size() == 2);
+        QCOMPARE(newTabs.at(1).at(0).toUrl(), QUrl("bword:beta"));
+        QCOMPARE(pages.size(), 1);
+        // Alt locks the jump: the following Control-click must be the third action.
+        QTest::keyPress(target, Qt::Key_Alt);
+        QTest::mouseClick(target, Qt::LeftButton, Qt::AltModifier, wordPoint);
+        QTest::keyRelease(target, Qt::Key_Alt);
+        QTest::mouseClick(target, Qt::LeftButton, Qt::ControlModifier, wordPoint);
+        WAIT_FOR(actions.size() == 3);
+        QCOMPARE(actions.at(2).at(0).toUrl(), QUrl("bword:beta"));
+        QCOMPARE(actions.at(2).at(1).toBool(), true);
+        QCOMPARE(newTabs.size(), 3);
+        QCOMPARE(pages.size(), 1);
+        QCOMPARE(f.a->articleRequestCount(), requests);
+        // A plain click dispatches the inherited reference group exactly once.
+        QTest::mouseClick(target, Qt::LeftButton, Qt::NoModifier, controlPoint);
+        WAIT_FOR(actions.size() == 4);
+        QCOMPARE(actions.at(3).at(0).toUrl(), QUrl("gdlookup://localhost/alpha"));
+        QCOMPARE(actions.at(3).at(1).toBool(), false);
+        QCOMPARE(newTabs.size(), 3);
+        WAIT_FOR(loaded(*view, pages, 1, "alpha"));
+        QCOMPARE(view->getViewGroup(), 17U);
+        QCOMPARE(QUrlQuery(web->url()).queryItemValue("group"), QStringLiteral("17"));
+        QCOMPARE(gd::toQString(f.a->lastLookup().word), QStringLiteral("alpha"));
+        QCOMPARE(words.size(), 2);
+        QCOMPARE(f.a->articleRequestCount(), requests + 1);
+    }
+
+    // Break: a clicked lookup loses the target dictionary, the inherited group or
+    // scroll target, the anchor override, or turns a fragment into a new document.
+    void clickedLookupsKeepDictionaryTargetGroupAndAnchorPrecedence()
+    {
+        QDeadlineTimer deadline(20000);
+        Fixture f;
+        f.a->setArticleBody("<p id='fixture-headword'>fixture-headword</p>"
+                            "<a id='first' name='first'>first anchor</a>"
+                            "<div style='height:1800px'></div>"
+                            "<a id='second' name='second'>second anchor</a>"
+                            "<div style='height:1800px'></div>");
+        f.b->setArticleBody("<p>Second dictionary</p><div style='height:1800px'></div>"
+                            "<a id='second' name='second'>second anchor</a><div style='height:1800px'></div>");
+        auto view = f.view(); auto web = view->findChild<ArticleWebView*>();
+        QSignalSpy pages(view.get(), &ArticleView::pageLoaded);
+        QSignalSpy errors(view.get(), &ArticleView::statusBarMessage);
+        view->showDefinition("A", 17); WAIT_FOR(loaded(*view, pages, 0, "A"));
+        QVERIFY2(reported(errors).isEmpty(), qPrintable(reported(errors)));
+        // A display-name target selects that dictionary's article, and a clicked
+        // lookup stops playback exactly as the retained showDefinition path did.
+        auto *player = static_cast<Fixture::Player*>(f.player.data());
+        int stops = player->stops;
+        int count = pages.size();
+        view->openLink(QUrl("gdlookup://localhost/cat?dict=Fixture%20Dictionary%20B"), web->url());
+        QCOMPARE(player->stops, stops + 1);
+        WAIT_FOR(loaded(*view, pages, count, "cat"));
+        WAIT_FOR(view->getCurrentArticle() == "gdfrom-dict-b");
+        QCOMPARE(ArticleUrls::parse(web->url(), ArticleUrls::Use::DocumentLoad).lookup.scrollTo,
+                 QStringLiteral("gdfrom-dict-b"));
+        QCOMPARE(QUrlQuery(web->url()).queryItemValue("group"), QStringLiteral("17"));
+        // An unknown display name leaves the inherited scroll target in place.
+        count = pages.size();
+        view->openLink(QUrl("gdlookup://localhost/dog?dict=Missing%20Dictionary"), web->url(), "gdfrom-dict-a");
+        WAIT_FOR(loaded(*view, pages, count, "dog"));
+        WAIT_FOR(view->getCurrentArticle() == "gdfrom-dict-a");
+        QCOMPARE(ArticleUrls::parse(web->url(), ArticleUrls::Use::DocumentLoad).lookup.scrollTo,
+                 QStringLiteral("gdfrom-dict-a"));
+        // The encoded headword survives and an explicit anchor beats the inherited one.
+        count = pages.size();
+        view->openLink(QUrl("gdlookup://localhost/red%20fox?gdanchor=second"), web->url(), {},
+                       {{QStringLiteral("gdanchor"), QStringLiteral("first")},
+                        {QStringLiteral("dict-b"), QStringLiteral("click-context")}});
+        WAIT_FOR(loaded(*view, pages, count, QString::fromUtf8("red fox")));
+        auto anchor = ArticleUrls::parse(web->url(), ArticleUrls::Use::DocumentLoad).lookup;
+        QCOMPARE(anchor.anchor, QStringLiteral("second"));
+        QCOMPARE(anchor.contexts.value("dict-b"), QStringLiteral("click-context"));
+        QVERIFY(!anchor.contexts.contains("gdanchor"));
+        WAIT_FOR(evaluate(web->page(), "scrollY").toInt() > 1000);
+        // A fragment-only action scrolls this document without a loader/history item.
+        count = pages.size();
+        stops = player->stops;
+        int const index = web->history()->currentItemIndex();
+        int const generation = view->findChild<ArticleBridge*>()->generation();
+        auto fragment = web->url(); fragment.setFragment("first");
+        view->openLink(fragment, web->url());
+        QCOMPARE(player->stops, stops);
+        WAIT_FOR(evaluate(web->page(), "scrollY").toInt() < 300);
+        QCOMPARE(pages.size(), count);
+        QCOMPARE(web->history()->currentItemIndex(), index);
+        QCOMPARE(view->findChild<ArticleBridge*>()->generation(), generation);
+        // A reference FTS subset wins over the group: only that dictionary is asked.
+        count = pages.size();
+        view->showDefinition("filtered", QStringList{"dict-b"}, FtsHighlightSpec{}, 17, false);
+        WAIT_FOR(loaded(*view, pages, count, "filtered"));
+        int askedA = f.a->articleRequestCount(), askedB = f.b->articleRequestCount();
+        count = pages.size(); errors.clear();
+        view->openLink(QUrl("gdlookup://localhost/kitten?group=17"), web->url());
+        WAIT_FOR(loaded(*view, pages, count, "kitten"));
+        QCOMPARE(ArticleUrls::parse(web->url(), ArticleUrls::Use::DocumentLoad).lookup.dictionaries,
+                 QStringList{"dict-b"});
+        QCOMPARE(f.a->articleRequestCount(), askedA);
+        QCOMPARE(f.b->articleRequestCount(), askedB + 1);
+        QCOMPARE(gd::toQString(f.b->lastLookup().word), QStringLiteral("kitten"));
+        QVERIFY2(reported(errors).isEmpty(), qPrintable(reported(errors)));
+        // A malformed action is diagnosed and changes no history or document.
+        count = pages.size();
+        int const diagnosedIndex = web->history()->currentItemIndex();
+        int const diagnosedGeneration = view->findChild<ArticleBridge*>()->generation();
+        view->openLink(QUrl("gdlookup://localhost/cat?contexts=broken"), web->url());
+        WAIT_FOR(!errors.isEmpty());
+        QCOMPARE(pages.size(), count);
+        QCOMPARE(web->history()->currentItemIndex(), diagnosedIndex);
+        QCOMPARE(view->findChild<ArticleBridge*>()->generation(), diagnosedGeneration);
+    }
+
+    // Break: a click on a resource, picture or external link is swallowed or
+    // re-routed into a document load instead of its retained handler.
+    void clickedResourcesPicturesAndExternalLinksRetainTheirHandlers()
+    {
+        QDeadlineTimer deadline(16000);
+        Fixture f;
+        QByteArray const pixel = QByteArray::fromBase64(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=");
+        f.a->setResources({{"pixel.png?size=2", pixel}, {"sound.wav", "fixture-audio"},
+                           {"clip.mp4", "fixture-video"}});
+        f.a->setArticleBody("<p>fixture-headword</p>");
+        DesktopTarget desktop;
+        QDesktopServices::setUrlHandler("https", &desktop, "handle");
+        QDesktopServices::setUrlHandler("file", &desktop, "handle");
+        {
+            auto view = f.view(); auto web = view->findChild<ArticleWebView*>();
+            QSignalSpy pages(view.get(), &ArticleView::pageLoaded);
+            QSignalSpy errors(view.get(), &ArticleView::statusBarMessage);
+            view->showDefinition("A", 17); WAIT_FOR(loaded(*view, pages, 0, "A"));
+            int count = pages.size();
+            // External links reach desktop services with query and fragment intact.
+            view->openLink(QUrl("https://example.invalid/path?q=1#frag"), web->url());
+            QCOMPARE(desktop.opened.size(), 1);
+            QCOMPARE(desktop.opened.constFirst(), QUrl("https://example.invalid/path?q=1#frag"));
+            QCOMPARE(desktop.contents.size(), 0);
+            QCOMPARE(pages.size(), count);
+            // An audio action plays the resource bytes.
+            view->openLink(QUrl("gdau://dict-a/sound.wav"), web->url());
+            WAIT_FOR(static_cast<Fixture::Player*>(f.player.data())->played == "fixture-audio");
+            QCOMPARE(pages.size(), count);
+            // A video action hands the downloaded bytes to the desktop.
+            view->openLink(QUrl("gdvideo://dict-a/clip.mp4"), web->url());
+            WAIT_FOR(desktop.contents.size() == 1);
+            QCOMPARE(desktop.opened.constLast().toLocalFile().isEmpty(), false);
+            QCOMPARE(desktop.contents.constFirst(), QByteArray("fixture-video"));
+            QCOMPARE(pages.size(), count);
+            // A save action writes the same bytes and reports completion once.
+            QTemporaryDir directory;
+            QVERIFY(directory.isValid());
+            auto saved = directory.filePath("saved.wav");
+            auto handler = view->saveResource(QUrl("gdau://dict-a/sound.wav"), saved);
+            QVERIFY(handler);
+            WAIT_FOR(QFileInfo(saved).size() == QByteArray("fixture-audio").size());
+            QFile file(saved);
+            QVERIFY(file.open(QIODevice::ReadOnly));
+            QCOMPARE(file.readAll(), QByteArray("fixture-audio"));
+            // A picture action keeps its full encoded URL and loads its image.
+            count = pages.size();
+            view->openLink(QUrl("gdpicture://dict-a/pixel.png?size=2"), web->url());
+            WAIT_FOR(pages.size() == count + 1 && web->url().scheme() == "gdpicture");
+            QCOMPARE(web->url().query(), QStringLiteral("size=2"));
+            WAIT_FOR(evaluate(web->page(), "document.querySelector('img').naturalWidth").toInt() > 0);
+            QVERIFY(f.a->requestedResources().contains("pixel.png?size=2"));
+            QVERIFY2(reported(errors).isEmpty(), qPrintable(reported(errors)));
+        }
+        QDesktopServices::unsetUrlHandler("https");
+        QDesktopServices::unsetUrlHandler("file");
+    }
+
+    // Break: a script-initiated navigation is dispatched as a user click, a
+    // redirect raises a second action, or a website frame loses its real origin.
+    void navigationKindsStayDistinctAcrossClicksScriptsAndRedirects()
+    {
+        QDeadlineTimer deadline(16000);
+        Fixture f;
+        f.a->setArticleBody("<p id='fixture-headword'>fixture-headword</p>");
+        auto view = f.view(); auto web = view->findChild<ArticleWebView*>();
+        auto *page = qobject_cast<ArticleWebPage*>(web->page());
+        QVERIFY(page);
+        QSignalSpy pages(view.get(), &ArticleView::pageLoaded);
+        QSignalSpy actions(page, &ArticleWebPage::userLink);
+        QSignalSpy requested(web, &ArticleWebView::navigationRequested);
+        QSignalSpy words(view.get(), &ArticleView::sendWordToHistory);
+        view->showDefinition("A", 17); WAIT_FOR(loaded(*view, pages, 0, "A"));
+        QCOMPARE(words.size(), 1);
+        // A programmatic document change is a navigation, never a user click.
+        int count = pages.size();
+        int const index = web->history()->currentItemIndex();
+        page->load(QUrl("gdlookup://localhost/?word=scripted&group=17"));
+        WAIT_FOR(loaded(*view, pages, count, "scripted"));
+        QCOMPARE(actions.size(), 0);
+        QCOMPARE(requested.size(), 1);
+        QCOMPARE(qvariant_cast<NavigationKind>(requested.at(0).at(1)), NavigationKind::NewLookup);
+        QCOMPARE(web->history()->currentItemIndex(), index + 1);
+        QCOMPARE(words.size(), 1);
+        // A redirect inside the issued navigation commits once without a dispatch.
+        TestSupport::HttpFixture server;
+        QVERIFY2(server.start(QHostAddress("127.0.0.1")), qPrintable(server.errorString()));
+        count = pages.size();
+        int const generations = view->findChild<ArticleBridge*>()->generation();
+        page->load(server.url("/redirect"));
+        WAIT_FOR(pages.size() == count + 1);
+        QVERIFY(web->url().path().endsWith("/dir/first.html"));
+        QCOMPARE(server.requestCount("/redirect"), 1);
+        QCOMPARE(view->findChild<ArticleBridge*>()->generation(), generations + 1);
+        QCOMPARE(requested.size(), 2);
+        QCOMPARE(qvariant_cast<NavigationKind>(requested.at(1).at(1)), NavigationKind::NewLookup);
+        QCOMPARE(words.size(), 1);
+        QCOMPARE(actions.size(), 0);
     }
 
     // Break: uncoordinated link auto-load, stale action/capture reenters on the

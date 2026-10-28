@@ -177,10 +177,14 @@ ArticleView::ArticleView( QWidget * parent, QWebEngineProfile & profile, Article
   connect( ui.definition, &QWidget::customContextMenuRequested, this, &ArticleView::contextMenuRequested );
   connect( ui.definition, &ArticleWebView::doubleClicked, this, &ArticleView::doubleClicked );
   connect( ui.definition, &ArticleWebView::userLink, this, [this]( QUrl url, bool newTab ) {
+    // Capture the pre-dispatch state once: an emitter's slot cannot change the
+    // reference document or the inherited article of this action afterwards.
     Contexts contexts;
     tryMangleWebsiteClickedUrl( url, contexts );
-    if( newTab && !popupView ) emit openLinkInNewTab( url, d->page->url(), getCurrentArticle(), contexts );
-    else openLink( url, d->page->url(), getCurrentArticle(), contexts );
+    QUrl const reference = d->page ? d->page->url() : QUrl();
+    QString const article = getCurrentArticle();
+    if( newTab && !popupView ) emit openLinkInNewTab( url, reference, article, contexts );
+    else openLink( url, reference, article, contexts );
   } );
   connect( ui.definition, &ArticleWebView::navigationRequested, this, &ArticleView::requestNavigation );
   ui.definition->installEventFilter( this );
@@ -639,38 +643,56 @@ bool ArticleView::isExternalLink( QUrl const & url ) const
 void ArticleView::linkClicked( QUrl const & url ) { openLink( url, d->page->url(), getCurrentArticle() ); }
 void ArticleView::openLink( QUrl const & url, QUrl const & ref, QString const & scrollTo, Contexts const & contexts )
 {
+  // A URL fragment is page navigation, not a lookup: the retained anchor path wins
+  // and the fragment never becomes a headword or an anchor query item.
   if( url.hasFragment() && ( url.scheme() == "gdlookup" || url.scheme().isEmpty() ) )
   {
     run( "(() => {const a=" + json( url.fragment( QUrl::FullyDecoded ) ) +
          "; const e=document.getElementById(a)||document.getElementsByName(a)[0]; if(e)e.scrollIntoView();})()" );
     return;
   }
-  auto parsed = ArticleUrls::parse( url, ArticleUrls::Use::UserAction );
+  // The pure parser only classifies and validates the wire form. Resolving the
+  // reference view's group, dictionary subset, contexts and scroll state stays
+  // here, exactly as the retained handler did.
+  auto const parsed = ArticleUrls::parse( url, ArticleUrls::Use::UserAction );
   if( parsed.kind == ArticleUrls::Kind::Invalid ) { emit statusBarMessage( parsed.error, 10000 ); return; }
   if( parsed.kind == ArticleUrls::Kind::LookupAction )
   {
     auto lookup = parsed.lookup;
     auto reference = ArticleUrls::parse( ref, ArticleUrls::Use::DocumentLoad ).lookup;
     if( !lookup.groupSpecified ) { lookup.group = getGroup( ref ); lookup.groupSpecified = true; }
+    // A reference FTS result keeps its explicit dictionary subset, which the maker
+    // dispatches as the explicit-dictionary branch.
     if( lookup.dictionaries.isEmpty() ) lookup.dictionaries = reference.dictionaries;
     Contexts inherited = reference.contexts;
     for( auto it = contexts.cbegin(); it != contexts.cend(); ++it ) inherited[ it.key() ] = it.value();
     for( auto it = lookup.contexts.cbegin(); it != lookup.contexts.cend(); ++it ) inherited[ it.key() ] = it.value();
     lookup.contexts = inherited;
+    // An unknown display name leaves the inherited scroll target in place; only a
+    // name that resolves against the current dictionaries replaces it.
     if( lookup.scrollTo.isEmpty() ) lookup.scrollTo = scrollTo;
     if( !lookup.dictionaryName.isEmpty() )
       for( auto const & dictionary : allDictionaries )
         if( QString::fromStdString( dictionary->getName() ) == lookup.dictionaryName )
         { lookup.scrollTo = scrollToFromDictionaryId( QString::fromStdString( dictionary->getId() ) ); break; }
+    // An explicit target anchor overrides the inherited context anchor.
     if( !lookup.anchor.isEmpty() ) lookup.contexts[ "gdanchor" ] = lookup.anchor;
     lookup.ignoreDiacritics = reference.ignoreDiacritics || cfg.preferences.ignoreDiacritics;
     lookup.muted = getMutedForGroup( lookup.group ).split( ',', Qt::SkipEmptyParts );
-    QPointer<ArticleView> guard( this ); emit sendWordToHistory( lookup.phrase.phrase ); if( !guard ) return;
+    // Retained effect order: stop playback, record the word, reset the search UI,
+    // then change the document through one validated Use::DocumentLoad URL.
+    audioPlayer->stop();
+    QPointer<ArticleView> guard( this );
+    emit sendWordToHistory( lookup.phrase.phrase );
+    if( !guard ) return;
     closeSearch();
+    ui.highlightAllButton->setChecked( false );
+    emit setExpandMode( expandOptionalParts );
+    if( !guard ) return;
     requestNavigation( ArticleUrls::lookupDocument( lookup ), NavigationKind::LinkClick );
     return;
   }
-  if( parsed.kind == ArticleUrls::Kind::PictureDocument ) { requestNavigation( url, NavigationKind::LinkClick ); return; }
+  if( parsed.kind == ArticleUrls::Kind::PictureDocument ) { requestNavigation( parsed.url, NavigationKind::LinkClick ); return; }
   if( url.scheme() == "gdprg" )
   {
     for( auto const & program : cfg.programs ) if( program.id == url.host() )

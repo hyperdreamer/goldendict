@@ -145,6 +145,72 @@ private slots:
     void cleanup() { held.clear(); dispatched.clear(); }
     void cleanupTestCase() { TestSupport::clearWatchdog(); }
 
+    // Break: a main-frame navigation is not classified as a user action, a
+    // website frame loses its real origin, or a redirect becomes a new action.
+    void navigationClassificationDistinguishesActionsFramesAndRedirects()
+    {
+        QDeadlineTimer deadline(10000);
+        Browser b;
+        ArticleWebView view;
+        view.configure(b.controller->profile(), &b.cfg);
+        auto page = view.ownedPage.data();
+        auto bridge = view.bridge.data();
+        QSignalSpy links(&view, &ArticleWebView::userLink);
+        QSignalSpy navigation(&view, &ArticleWebView::navigationRequested);
+        QSignalSpy ready(bridge, &ArticleBridge::bridgeReady);
+        view.setHtml(document()); WAIT_FOR(ready.size() == 1);
+        auto internal = QUrl("gdlookup://localhost/cat?gdanchor=part");
+        // A main-frame application link is refused and dispatched exactly once.
+        QVERIFY(!page->acceptNavigationRequest(internal, QWebEnginePage::NavigationTypeLinkClicked, true));
+        WAIT_FOR(links.size() == 1);
+        QCOMPARE(links.at(0).at(0).toUrl(), internal);
+        QCOMPARE(links.at(0).at(1).toBool(), false);
+        // A website frame keeps its real origin: an ordinary navigation stays native.
+        QVERIFY(page->acceptNavigationRequest(QUrl("https://example.invalid/page.html"),
+                                              QWebEnginePage::NavigationTypeLinkClicked, false));
+        QVERIFY(page->acceptNavigationRequest(QUrl("https://example.invalid/page.html"),
+                                              QWebEnginePage::NavigationTypeFormSubmitted, false));
+        QCOMPARE(links.size(), 1); QCOMPARE(navigation.size(), 0);
+        // An application URL never becomes a website frame's document.
+        QVERIFY(!page->acceptNavigationRequest(internal, QWebEnginePage::NavigationTypeOther, false));
+        QCOMPARE(links.size(), 1); QCOMPARE(navigation.size(), 0);
+        QVERIFY(!page->acceptNavigationRequest(internal, QWebEnginePage::NavigationTypeLinkClicked, false));
+        WAIT_FOR(links.size() == 2);
+        QCOMPARE(links.at(1).at(1).toBool(), false);
+        // A script-initiated document change is a navigation, never a user click.
+        auto scripted = QUrl("gdlookup://localhost/?word=x&group=3");
+        QVERIFY(!page->acceptNavigationRequest(scripted, QWebEnginePage::NavigationTypeOther, true));
+        WAIT_FOR(navigation.size() == 1);
+        QCOMPARE(navigation.at(0).at(0).toUrl(), scripted);
+        QCOMPARE(qvariant_cast<NavigationKind>(navigation.at(0).at(1)), NavigationKind::NewLookup);
+        QCOMPARE(links.size(), 2);
+        // The issued navigation has one consumed permit; its redirects are allowed.
+        bridge->reset();
+        view.load(b.article()); WAIT_FOR(ready.size() == 2);
+        auto redirect = QUrl("gdlookup://localhost/?word=y&group=3");
+        QVERIFY(page->acceptNavigationRequest(redirect, QWebEnginePage::NavigationTypeRedirect, true));
+        QCOMPARE(links.size(), 2); QCOMPARE(navigation.size(), 1);
+        // Alt locks the jump: the press carries the modifier Chromium's callback
+        // does not report, so no action may be dispatched.
+        QPoint const point(40, 40);
+        QTest::mousePress(&view, Qt::LeftButton, Qt::AltModifier, point);
+        QVERIFY(!page->acceptNavigationRequest(internal, QWebEnginePage::NavigationTypeLinkClicked, true));
+        QTest::mouseRelease(&view, Qt::LeftButton, Qt::AltModifier, point);
+        QCOMPARE(links.size(), 2);
+        // Control raises one new-tab intent through the same captured press state.
+        QTest::mousePress(&view, Qt::LeftButton, Qt::ControlModifier, point);
+        QVERIFY(!page->acceptNavigationRequest(internal, QWebEnginePage::NavigationTypeLinkClicked, true));
+        QTest::mouseRelease(&view, Qt::LeftButton, Qt::ControlModifier, point);
+        WAIT_FOR(links.size() == 3);
+        QCOMPARE(links.at(2).at(1).toBool(), true);
+        // A bare click is one ordinary dispatch, not a new tab.
+        QTest::mousePress(&view, Qt::LeftButton, Qt::NoModifier, point);
+        QVERIFY(!page->acceptNavigationRequest(internal, QWebEnginePage::NavigationTypeLinkClicked, true));
+        QTest::mouseRelease(&view, Qt::LeftButton, Qt::NoModifier, point);
+        WAIT_FOR(links.size() == 4);
+        QCOMPARE(links.at(3).at(1).toBool(), false);
+    }
+
     // T22's bounded capture uses this same queue, including while the channel
     // is not ready. Expiry must retire only its own slot.
     void boundedCaptureExpiryCannotReleaseAnotherOperation()
