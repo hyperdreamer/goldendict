@@ -372,9 +372,48 @@ private slots:
         QCOMPARE(wordAt(browser.frames, point, deadline), QStringLiteral("wordword"));
         QCOMPARE(evaluate(nested, "getSelection().toString()", deadline), original);
         evaluate(nested, "document.caretRangeFromPoint=undefined", deadline);
-        QCOMPARE(wordAt(browser.frames, point, deadline), QString());
+        QCOMPARE(wordAt(browser.frames, point, deadline), QStringLiteral("wordword"));
         QCOMPARE(wordAt(browser.frames, QPointF(-100, -100), deadline), QString());
         QCOMPARE(wordAt(browser.frames, QPointF(std::numeric_limits<double>::infinity(), 0), deadline), QString());
+    }
+
+    void unicodeCaretFallbacksThroughNativeFrame_data()
+    {
+        QTest::addColumn<QString>("mode");
+        for(auto mode : {"native","range-only","position-null","position-throws","both-null","both-throw","foreign-root"})
+            QTest::newRow(mode)<<QString(mode);
+    }
+    void unicodeCaretFallbacksThroughNativeFrame()
+    {
+        QFETCH(QString,mode); QDeadlineTimer deadline(20000);
+        TestSupport::HttpFixture origin;
+        QVERIFY2(origin.start(QHostAddress("127.0.0.2")),qPrintable(origin.errorString()));
+        Browser b; QSignalSpy events(&b.bridge,&ArticleBridge::frameEvent);
+        b.load(origin.url("/dir/first.html"));
+        WAIT_FOR(!readyAt(events,0).isEmpty()); WAIT_FOR(b.visible(deadline));
+        auto frame=remote(b.page,"/dir/first.html",deadline);
+        evaluate(frame,"(() => {const e=document.createElement('div');e.id='vocabulary';"
+            "e.style.cssText='position:fixed;left:10px;top:10px;background:white;font:24px monospace;z-index:2147483647';"
+            "e.innerHTML='<p>latin</p><p>Привет</p><p>中文词条</p><p>é</p><p>rock’n’roll</p><p>𐐀word</p><p>   </p><p>!!!</p>';"
+            "document.body.appendChild(e);for(const p of e.children)p.style.margin='0';window.nativePosition=document.caretPositionFromPoint;window.nativeRange=document.caretRangeFromPoint;})()",deadline);
+        QString change;
+        if(mode=="range-only") change="document.caretPositionFromPoint=undefined";
+        if(mode=="position-null") change="document.caretPositionFromPoint=()=>null";
+        if(mode=="position-throws") change="document.caretPositionFromPoint=()=>{throw Error('caret')}";
+        if(mode=="both-null") change="document.caretPositionFromPoint=document.caretRangeFromPoint=()=>null";
+        if(mode=="both-throw") change="document.caretPositionFromPoint=document.caretRangeFromPoint=()=>{throw Error('caret')}";
+        if(mode=="foreign-root") change="document.caretPositionFromPoint=()=>{const d=document.implementation.createHTMLDocument();"
+            "return {offsetNode:d.createTextNode('foreign'),offset:0}};document.caretRangeFromPoint=()=>null";
+        if(!change.isEmpty()) evaluate(frame,change,deadline);
+        QStringList expected{"latin","Привет","中文词条","é","rock’n’roll","𐐀word","",""};
+        auto originPoint=contentOrigin(b.page.mainFrame(),"iframe",deadline);
+        for(int index=0;index<expected.size();++index) {
+            auto coords=evaluate(frame,QString("(() => {const n=document.querySelectorAll('#vocabulary p')[%1].firstChild,r=document.createRange();"
+                "r.setStart(n,0);r.setEnd(n,n.data.codePointAt(0)>65535?2:1);const b=r.getBoundingClientRect();return [b.x+b.width/2,b.y+b.height/2]})()").arg(index),deadline).toList();
+            QCOMPARE(coords.size(),2);
+            QCOMPARE(wordAt(b.frames,originPoint+QPointF(coords[0].toDouble(),coords[1].toDouble()),deadline),expected[index]);
+        }
+        evaluate(frame,"document.querySelector('#vocabulary').remove()",deadline);
     }
 
     void samplingAndResize()

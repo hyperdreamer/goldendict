@@ -8,6 +8,7 @@
 #include <QFocusEvent>
 #include <QMouseEvent>
 #include <QTimer>
+#include <QWebChannel>
 #include <QWebEngineContextMenuRequest>
 #include <QWebEngineHistory>
 #include <QWebEngineProfile>
@@ -31,6 +32,8 @@ bool attach( QWebEnginePage * page )
 class LinkCapturePage final : public QWebEnginePage
 {
   QPointer<ArticleWebPage> source;
+  QPointer<ArticleBridge> sourceBridge;
+  int generation = 0;
   bool captured = false;
 public:
   explicit LinkCapturePage( ArticleWebPage * owner ):
@@ -38,6 +41,9 @@ public:
   {
     settings()->setAttribute( QWebEngineSettings::BackForwardCacheEnabled, false );
     attach( this );
+    if( owner->webChannel() )
+      sourceBridge = qobject_cast<ArticleBridge *>( owner->webChannel()->registeredObjects().value( "articleview" ) );
+    generation = sourceBridge ? sourceBridge->generation() : 0;
   }
 protected:
   bool acceptNavigationRequest( QUrl const & url, NavigationType, bool ) override
@@ -45,8 +51,10 @@ protected:
     if( !captured )
     {
       captured = true;
-      QPointer<ArticleWebPage> guard = source;
-      QTimer::singleShot( 0, source, [guard, url] { if( guard ) emit guard->userLink( url, true ); } );
+      QPointer<ArticleWebPage> guard = source; auto bridge = sourceBridge; int const stamp = generation;
+      QTimer::singleShot( 0, source, [guard, bridge, stamp, url] {
+        if( guard && bridge && bridge->generation() == stamp ) emit guard->userLink( url, true );
+      } );
       deleteLater();
     }
     return false;
@@ -88,15 +96,19 @@ bool ArticleWebPage::acceptNavigationRequest( QUrl const & url, NavigationType t
   if( type == NavigationTypeLinkClicked )
   {
     auto view = qobject_cast<ArticleWebView *>( QWebEngineView::forPage( this ) );
-    // The navigation callback carries no modifier state of its own; the press that
-    // produced this link click is what the application's keyboard state reports.
-    Qt::KeyboardModifiers const modifiers = QApplication::keyboardModifiers();
+    bool const pressed = view && view->bridge && view->inputPage == this &&
+                         view->inputGeneration == view->bridge->generation();
+    Qt::KeyboardModifiers const modifiers = pressed ? view->pressModifiers : QApplication::keyboardModifiers();
     // Baseline: Alt locks the jump on a link. The engine does not navigate and no
     // action is dispatched.
     if( modifiers.testFlag( Qt::AltModifier ) ) return false;
-    bool const newTab = ( view && view->isMidButtonPressed() ) ||
+    bool const newTab = ( pressed && view->pressButton == Qt::MiddleButton ) ||
         modifiers.testFlag( Qt::ControlModifier ) || modifiers.testFlag( Qt::ShiftModifier );
-    QTimer::singleShot( 0, this, [this, url, newTab] { emit userLink( url, newTab ); } );
+    QPointer<ArticleBridge> bridge = view ? view->bridge : nullptr;
+    int const generation = bridge ? bridge->generation() : 0;
+    QTimer::singleShot( 0, this, [this, url, newTab, bridge, generation] {
+      if( bridge && bridge->generation() == generation ) emit userLink( url, newTab );
+    } );
     return false;
   }
   auto kind = type == NavigationTypeReload ? NavigationKind::Reload :
@@ -147,6 +159,19 @@ void ArticleWebView::installPage( QWebEngineProfile * profile )
   QPointer<ArticleWebPage> previous = ownedPage;
   ownedPage = replacement;
   bridge = replacementBridge;
+  selection.clear(); selectionReady = false; inputPage.clear(); inputGeneration = 0;
+  connect( replacementBridge, &ArticleBridge::generationChanged, this, [this] {
+    selectionReady = false; selection.clear(); inputPage.clear(); inputGeneration = 0;
+  } );
+  connect( replacementBridge, &ArticleBridge::bridgeReady, this, [this, replacement, replacementBridge]( int generation ) {
+    if( ownedPage != replacement || bridge != replacementBridge || bridge->generation() != generation ) return;
+    selectionReady = true;
+    selection = replacement->selectedText();
+  } );
+  connect( replacement, &QWebEnginePage::selectionChanged, this, [this, replacement, replacementBridge] {
+    if( selectionReady && ownedPage == replacement && bridge == replacementBridge )
+      selection = replacement->selectedText();
+  } );
   setPage( replacement );
   if( previous ) delete previous.data();
   watchChildren( this );
@@ -239,6 +264,17 @@ bool ArticleWebView::event( QEvent * event )
   return QWebEngineView::event( event );
 }
 
+void ArticleWebView::queueLookup( QPoint const & position, Qt::KeyboardModifiers modifiers )
+{
+  QPointer<ArticleWebPage> page = ownedPage;
+  QPointer<ArticleBridge> source = bridge;
+  int const generation = source ? source->generation() : 0;
+  QTimer::singleShot( 0, this, [this, page, source, generation, position, modifiers] {
+    if( page && ownedPage == page && source && bridge == source && source->generation() == generation )
+      emit doubleClicked( position, modifiers );
+  } );
+}
+
 bool ArticleWebView::eventFilter( QObject * watched, QEvent * event )
 {
   if( event->type() == QEvent::ChildAdded && watched != this )
@@ -248,36 +284,59 @@ bool ArticleWebView::eventFilter( QObject * watched, QEvent * event )
   }
   auto widget = qobject_cast<QWidget *>( watched );
   if( !widget || ( widget != this && !isAncestorOf( widget ) ) ) return false;
-  if( event->type() == QEvent::MouseButtonPress )
+  if( event->type() == QEvent::MouseButtonPress && !syntheticClick )
   {
     auto mouse = static_cast<QMouseEvent *>( event );
+    inputPage = ownedPage; inputGeneration = bridge ? bridge->generation() : 0;
+    pressPosition = widget->mapTo( this, mouse->position().toPoint() );
+    pressModifiers = mouse->modifiers(); pressButton = mouse->button();
+    dragging = doubleClick = false;
     if( mouse->button() == Qt::MiddleButton ) midButtonPressed = true;
-    if( selectionBySingleClick && !syntheticClick && mouse->button() == Qt::LeftButton )
-    {
-      QPointer<QWidget> child( widget );
-      QPointF const local = mouse->position(), global = mouse->globalPosition();
-      auto modifiers = mouse->modifiers();
-      QTimer::singleShot( 0, this, [this, child, local, global, modifiers] {
-        if( !child ) return;
-        syntheticClick = true;
-        QMouseEvent click( QEvent::MouseButtonDblClick, local, global,
-                           Qt::LeftButton, Qt::LeftButton, modifiers );
-        QApplication::sendEvent( child, &click );
-        syntheticClick = false;
-      } );
-    }
   }
-  else if( event->type() == QEvent::MouseButtonRelease )
+  else if( event->type() == QEvent::MouseMove && !syntheticClick )
   {
     auto mouse = static_cast<QMouseEvent *>( event );
-    // Chromium consumes the event after this filter. Keep the modifier through
-    // its navigation callback, then retire the pressed state on the event queue.
+    if( mouse->buttons().testFlag( Qt::LeftButton ) &&
+        ( widget->mapTo( this, mouse->position().toPoint() ) - pressPosition ).manhattanLength() >= QApplication::startDragDistance() )
+      dragging = true;
+  }
+  else if( event->type() == QEvent::MouseButtonRelease && !syntheticClick )
+  {
+    auto mouse = static_cast<QMouseEvent *>( event );
     if( mouse->button() == Qt::MiddleButton ) QTimer::singleShot( 0, this, [this] { midButtonPressed = false; } );
+    bool const current = inputPage && inputPage == ownedPage && bridge && inputGeneration == bridge->generation();
+    if( current && mouse->button() == Qt::LeftButton && !dragging && !doubleClick &&
+        ( widget->mapTo( this, mouse->position().toPoint() ) - pressPosition ).manhattanLength() < QApplication::startDragDistance() )
+    {
+      if( pressModifiers.testFlag( Qt::AltModifier ) ) queueLookup( pressPosition, pressModifiers );
+      else if( selectionBySingleClick )
+      {
+        QPointer<QWidget> child( widget ); auto page = inputPage; auto source = bridge; int generation = inputGeneration;
+        QPointF const local = mouse->position(), global = mouse->globalPosition(); auto modifiers = pressModifiers;
+        auto const timestamp = mouse->timestamp();
+        QTimer::singleShot( 0, this, [this, child, page, source, generation, local, global, modifiers, timestamp] {
+          if( !child || !page || ownedPage != page || !source || bridge != source || source->generation() != generation ) return;
+          syntheticClick = true;
+          QMouseEvent click( QEvent::MouseButtonDblClick, local, global, Qt::LeftButton, Qt::LeftButton, modifiers );
+          click.setTimestamp( timestamp + 1 );
+          QApplication::sendEvent( child, &click );
+          QMouseEvent release( QEvent::MouseButtonRelease, local, global, Qt::LeftButton, Qt::NoButton, modifiers );
+          release.setTimestamp( timestamp + 2 );
+          QApplication::sendEvent( child, &release );
+          syntheticClick = false;
+        } );
+      }
+    }
   }
   else if( event->type() == QEvent::MouseButtonDblClick )
   {
-    QPoint const position = widget->mapTo( this, static_cast<QMouseEvent *>( event )->position().toPoint() );
-    QTimer::singleShot( 0, this, [this, position] { emit doubleClicked( position ); } );
+    auto mouse = static_cast<QMouseEvent *>( event );
+    if( mouse->button() == Qt::LeftButton )
+    {
+      QPoint const position = widget->mapTo( this, mouse->position().toPoint() );
+      doubleClick = true;
+      queueLookup( position, mouse->modifiers() );
+    }
   }
   else if( event->type() == QEvent::Wheel && static_cast<QWheelEvent *>( event )->modifiers().testFlag( Qt::ControlModifier ) )
   {
@@ -300,11 +359,7 @@ void ArticleWebView::wheelEvent( QWheelEvent * event )
 }
 void ArticleWebView::contextMenuEvent( QContextMenuEvent * event )
 {
-  if( auto request = lastContextMenuRequest() )
-  {
-    // The request is ephemeral; retain only plain values copied in this event.
-    context = {request->position(), request->selectedText(), request->linkText(),
-               request->linkUrl(), request->mediaUrl(), bridge ? bridge->generation() : 0};
-  }
+  // ArticleView uses CustomContextMenu and copies lastContextMenuRequest()
+  // synchronously in that signal. A bare view retains WebEngine's default menu.
   QWebEngineView::contextMenuEvent( event );
 }

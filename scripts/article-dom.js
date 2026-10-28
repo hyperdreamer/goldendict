@@ -20,6 +20,7 @@
     const audio = window.gdAudioLinks;
     return {kind, currentArticle: articles.some(id => `gdfrom-${id}` === current) ? current : "",
       sx: window.scrollX, sy: window.scrollY, articles,
+      framedArticles: articles.filter(id => document.getElementById(`gdexpandframe-${id}`)?.tagName === 'IFRAME'),
       hasAudio: !!(audio && (audio.first || articles.some(id => audio[id])))};
   };
   const changed = () => {
