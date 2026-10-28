@@ -44,6 +44,7 @@ public:
   // Controlled entry points install the next generation before asking Chromium
   // to navigate. The ArticleView history coordinator can capture state first.
   void load( QUrl const & url );
+  void navigate( QUrl const & url, NavigationKind kind );
   void setHtml( QString const & html, QUrl const & baseUrl = QUrl() );
 signals:
   void doubleClicked( QPoint position );

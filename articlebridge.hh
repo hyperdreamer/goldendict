@@ -40,6 +40,7 @@ signals:
   void generationChanged( int generation );
   void bridgeReady( int generation );
 private:
+  friend class ArticleView;
   friend class ArticleBridgeTest;
   friend class ArticleWebView;
   enum class State { Installing, ChannelPending, Ready, Closed };
@@ -66,7 +67,7 @@ private:
   bool advanceGeneration();
   void installScripts();
   void retire();
-  void enqueue( std::optional<QWebEngineFrame> frame, QString const & script, Result callback );
+  void enqueue( std::optional<QWebEngineFrame> frame, QString const & script, Result callback, int deadlineMs = 0 );
   void dispatch();
   void complete( std::shared_ptr<Operation> const & operation, QVariant const & value );
   void retireOperation( std::shared_ptr<Operation> const & operation );
