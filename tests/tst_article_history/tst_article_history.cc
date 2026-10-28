@@ -366,6 +366,49 @@ private slots:
     QVERIFY( !history.stateFor( 0, &out ) );
   }
 
+  /// Saving reads the outgoing document's engine item, not a URL-derived or dense
+  /// application counter. The real page supplies both the zero item and the
+  /// duplicate-URL successor used by the save/history boundary.
+  void realPageSaveOutgoingIndexMatchesEngine()
+  {
+    QWebEngineProfile profile;
+    QWebEnginePage page( &profile );
+    page.settings()->setAttribute( QWebEngineSettings::BackForwardCacheEnabled, false );
+    QSignalSpy finished( &page, &QWebEnginePage::loadFinished );
+
+    auto load = [&]( QString const & marker ) {
+      finished.clear();
+      page.setHtml( articleDocument( marker ), documentUrl );
+      if( !QTest::qWaitFor( [&] { return !finished.isEmpty(); }, StepBudgetMs ) ) return false;
+      return finished.constFirst().at( 0 ).toBool();
+    };
+
+    ArticleHistory history;
+    ArticleState out;
+    QCOMPARE( page.history()->currentItemIndex(), -1 );
+    QVERIFY( !history.stateFor( -1, &out ) );
+
+    QVERIFY2( load( QStringLiteral( "save-a" ) ), "the save source document did not load" );
+    QCOMPARE( page.history()->currentItemIndex(), 0 );
+    int const saveOutgoing = page.history()->currentItemIndex();
+    history.commit( page.url(), saveOutgoing, NavigationKind::NewLookup );
+    history.setCurrent( saveOutgoing, state( QStringLiteral( "gdfrom-save-a" ), 0, 0 ) );
+
+    QVERIFY( history.stateFor( saveOutgoing, &out ) );
+    QCOMPARE( out.currentArticle, QStringLiteral( "gdfrom-save-a" ) );
+    QCOMPARE( out.sx, 0.0 );
+    QCOMPARE( out.sy, 0.0 );
+
+    QVERIFY2( load( QStringLiteral( "save-b" ) ), "the next document did not load" );
+    int const next = page.history()->currentItemIndex();
+    QCOMPARE( next, saveOutgoing + 1 );
+    QCOMPARE( page.url(), documentUrl );
+    history.commit( page.url(), next, NavigationKind::NewLookup );
+    QVERIFY( !history.stateFor( next, &out ) );
+    QVERIFY( history.stateFor( saveOutgoing, &out ) );
+    QCOMPARE( out.currentArticle, QStringLiteral( "gdfrom-save-a" ) );
+  }
+
   /// A controlled real page: every index, count and truncation the module sees
   /// below is the engine's own, not a hand-written guess.
   void realEngineIndicesMirrorTheMap()
