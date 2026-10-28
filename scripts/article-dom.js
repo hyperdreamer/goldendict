@@ -4,6 +4,7 @@
   const generation = window.__gdDocumentGeneration;
   const documentId = (globalThis.crypto && crypto.randomUUID) ? crypto.randomUUID() :
     `${generation}-${Date.now()}-${Math.random()}`;
+  window.__gdFrameDocumentId = documentId;
   let ready = false, readingTimer = null, restoreNumber = 0;
   const selections = new Map(), marks = new Set();
   let selectionNumber = 0, hits = [], textVersion = 0, lastText = null;
@@ -33,6 +34,7 @@
     if (ready || !window.__gdChannelReady || document.readyState === "loading") return;
     ready = true;
     window.articleview.onJsReadingState(snapshot("ready"));
+    window.dispatchEvent(new Event("gd-article-ready"));
   };
   window.addEventListener("scroll", changed, {passive: true});
   window.addEventListener("gd-active-article", changed);
@@ -209,8 +211,13 @@
   };
   window.gdMeasureFrame = () => {
     const root = document.documentElement, body = document.body;
-    const height = Math.max(root ? root.scrollHeight : 0, root ? root.offsetHeight : 0,
-      body ? body.scrollHeight : 0, body ? body.offsetHeight : 0);
+    const rect = body && body.getBoundingClientRect();
+    // A subframe's root scrollHeight includes the viewport's minimum height.
+    // Feeding that back into the iframe prevents a later, shorter document from
+    // shrinking. Measure the body content and its margins in that document.
+    const height = body ? Math.max(body.scrollHeight, body.offsetHeight,
+      rect.bottom + window.scrollY + (parseFloat(getComputedStyle(body).marginBottom) || 0)) :
+      (root ? root.scrollHeight : 0);
     const width = Math.max(root ? root.scrollWidth : 0, root ? root.offsetWidth : 0,
       body ? body.scrollWidth : 0, body ? body.offsetWidth : 0);
     return Number.isFinite(height) && Number.isFinite(width) && height > 0 && width > 0 ?
