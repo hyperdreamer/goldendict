@@ -690,6 +690,13 @@ private slots:
         WAIT_FOR(view->getCurrentArticle() == "gdfrom-dict-a");
         QCOMPARE(ArticleUrls::parse(web->url(), ArticleUrls::Use::DocumentLoad).lookup.scrollTo,
                  QStringLiteral("gdfrom-dict-a"));
+        // An explicit valid target group overrides the inherited reference group,
+        // including the valid zero group.
+        count = pages.size();
+        view->openLink(QUrl("gdlookup://localhost/puppy?group=0"), web->url());
+        WAIT_FOR(loaded(*view, pages, count, "puppy"));
+        QCOMPARE(QUrlQuery(web->url()).queryItemValue("group"), QStringLiteral("0"));
+        QCOMPARE(ArticleUrls::parse(web->url(), ArticleUrls::Use::DocumentLoad).lookup.group, 0U);
         // The encoded headword survives and an explicit anchor beats the inherited one.
         count = pages.size();
         view->openLink(QUrl("gdlookup://localhost/red%20fox?gdanchor=second"), web->url(), {},
@@ -837,6 +844,62 @@ private slots:
         QCOMPARE(qvariant_cast<NavigationKind>(requested.at(1).at(1)), NavigationKind::NewLookup);
         QCOMPARE(words.size(), 1);
         QCOMPARE(actions.size(), 0);
+    }
+
+    // Break: a double click translates an image, keeps translating with the
+    // preference off, or stops translating the clicked word.
+    void doubleClickRulesRetainImageAndPreferenceOutcomes()
+    {
+        QDeadlineTimer deadline(16000);
+        Fixture f;
+        QByteArray const pixel = QByteArray::fromBase64(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=");
+        f.a->setResources({{"pixel.png", pixel}});
+        f.a->setArticleBody("<p id='fixture-headword'>fixture-headword</p>"
+                            "<img id='pixel' src='bres://dict-a/pixel.png' style='width:60px;height:60px'>"
+                            "<p><span id='dbl-word'>dblclicked</span></p>");
+        DesktopTarget desktop;
+        QDesktopServices::setUrlHandler("file", &desktop, "handle");
+        {
+            auto view = f.view(); auto web = view->findChild<ArticleWebView*>();
+            auto *page = qobject_cast<ArticleWebPage*>(web->page());
+            QVERIFY(page);
+            QVERIFY(view->findChild<ArticleBridge*>());
+            QSignalSpy pages(view.get(), &ArticleView::pageLoaded);
+            QSignalSpy actions(page, &ArticleWebPage::userLink);
+            QSignalSpy words(view.get(), &ArticleView::sendWordToHistory);
+            view->showDefinition("A", 17); WAIT_FOR(loaded(*view, pages, 0, "A"));
+            WAIT_FOR(evaluate(web->page(), "document.getElementById('pixel').naturalWidth").toInt() > 0);
+            QWidget *target = web->focusProxy() ? web->focusProxy() : static_cast<QWidget*>(web);
+            QVERIFY(target);
+            auto pointAt = [&](QString const &id) {
+                auto box = evaluate(web->page(), "(() => {const r=document.getElementById('" + id +
+                    "').getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};})()").toMap();
+                return target->mapFrom(web, QPoint(qRound(box.value("x").toDouble()), qRound(box.value("y").toDouble())));
+            };
+            // With the preference off a text double click performs no action. The
+            // following image double click is the ordering barrier: its observed
+            // file cannot arrive before any action the text click had queued.
+            f.config.preferences.doubleClickTranslates = false;
+            auto text = pointAt("dbl-word");
+            QTest::mouseDClick(target, Qt::LeftButton, Qt::NoModifier, text);
+            // The image wins over translation: its bytes reach the desktop.
+            auto image = pointAt("pixel");
+            QTest::mouseDClick(target, Qt::LeftButton, Qt::NoModifier, image);
+            WAIT_FOR(desktop.contents.size() == 1);
+            QCOMPARE(desktop.contents.constFirst(), pixel);
+            QCOMPARE(words.size(), 1);
+            QCOMPARE(actions.size(), 0);
+            QCOMPARE(pages.size(), 1);
+            // With the preference on a text double click looks its word up once.
+            f.config.preferences.doubleClickTranslates = true;
+            QTest::mouseDClick(target, Qt::LeftButton, Qt::NoModifier, text);
+            WAIT_FOR(words.size() == 2);
+            QCOMPARE(words.at(1).at(0).toString(), QStringLiteral("dblclicked"));
+            WAIT_FOR(loaded(*view, pages, 1, "dblclicked"));
+            QCOMPARE(actions.size(), 0);
+        }
+        QDesktopServices::unsetUrlHandler("file");
     }
 
     // Break: uncoordinated link auto-load, stale action/capture reenters on the
