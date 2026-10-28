@@ -13,6 +13,7 @@
 #include "gestures.hh"
 #include <QApplication>
 #include <QClipboard>
+#include <QDeadlineTimer>
 #include <QDesktopServices>
 #include <QFileDialog>
 #include <QJsonArray>
@@ -109,6 +110,16 @@ struct ArticleView::Capture
   bool done = false;
   std::vector<std::function<void(ArticleState const &)>> callbacks;
 };
+struct ArticleView::Hit
+{
+  QPointer<QWebEnginePage> page;
+  QPointer<ArticleBridge> bridge;
+  int generation = 0;
+  QDeadlineTimer deadline{InteractionDeadlineMs};
+  bool done = false;
+  QVariantMap value;
+  std::function<void(QVariantMap const &)> callback;
+};
 struct ArticleView::State
 {
   struct Intent { QUrl url; NavigationKind kind; };
@@ -118,6 +129,7 @@ struct ArticleView::State
   ArticleHistory history;
   std::optional<Intent> pending;
   std::shared_ptr<Capture> capture;
+  std::shared_ptr<Hit> hit;
   QTimer * debounce = nullptr;
   std::optional<ArticleState> latest, debounced;
   QStringList articles;
@@ -129,6 +141,8 @@ struct ArticleView::State
   NavigationKind kind = NavigationKind::NewLookup;
   quint64 navigation = 0, findQuery = 0, contextQuery = 0, ftsQuery = 0;
   QMap<QString, QPair<QString, QString>> frameLinks;
+  QMap<QString, QString> frameContextText;
+  QSet<QString> framedArticles;
   std::shared_ptr<ArticleRequestPolicy const> policy;
   QMap<QUrl, QList<QUrl>> knownFileUrls;
 };
@@ -236,7 +250,9 @@ void ArticleView::bindDocument()
     d->ready = true; finishLoad();
   } );
   connect( d->frames, &WebsiteFrames::frameText, this, [this]( QString const & id, QString const & text, bool context ) {
-    d->frameLinks[ id ] = {text, context ? QStringLiteral( "context" ) : QStringLiteral( "click" )};
+    d->framedArticles.insert( id );
+    if( context ) d->frameContextText[ id ] = text;
+    else d->frameLinks[ id ] = {text, QStringLiteral( "click" )};
     setCurrentArticle( scrollToFromDictionaryId( id ) );
   } );
 }
@@ -259,6 +275,9 @@ void ArticleView::updateReadingState( QVariantMap const & value )
   d->debounce->start();
   auto articles = value.value( "articles" ).toStringList();
   bool audio = value.value( "hasAudio" ).toBool();
+  d->framedArticles.clear();
+  for( auto const & id : value.value( "framedArticles" ).toStringList() )
+    if( articles.contains( id ) ) d->framedArticles.insert( id );
   QPointer<ArticleView> guard( this ); int generation = d->generation;
   if( articles != d->articles ) { d->articles = articles; emit articlesChanged( articles ); }
   if( !guard || d->generation != generation ) return;
@@ -269,6 +288,8 @@ void ArticleView::clearDocumentCaches()
   QPointer<ArticleView> guard( this ); int generation = d->generation;
   bool hadArticles = !d->articles.isEmpty(), hadAudio = d->audio;
   d->articles.clear(); d->current.clear(); d->audio = false; d->frameLinks.clear();
+  d->frameContextText.clear(); d->framedArticles.clear(); d->ready = false;
+  if( d->hit ) { d->hit->done = true; d->hit->callback = {}; d->hit.reset(); }
   if( hadArticles ) emit articlesChanged( {} );
   if( !guard || d->generation != generation ) return;
   if( hadAudio ) emit soundAvailabilityChanged( false );
@@ -622,6 +643,8 @@ bool ArticleView::setCurrentArticle( QString const & id, bool move )
   })())JS" ).arg( json( id ), move ? "true" : "false" ) );
   return true;
 }
+bool ArticleView::isFramedArticle( QString const & id ) const
+{ return d->framedArticles.contains( id.startsWith( "gdfrom-" ) ? id.mid( 7 ) : id ); }
 void ArticleView::selectCurrentArticle() { run( "if (window.gdSelectArticle) gdSelectArticle(" + json( getActiveArticleId() ) + ")" ); }
 void ArticleView::playSound()
 {
@@ -836,49 +859,158 @@ void ArticleView::moveOneArticleDown()
   jumpToDictionary( d->articles.at( ( d->articles.indexOf( getActiveArticleId() ) + 1 ) % d->articles.size() ), true );
 }
 void ArticleView::linkHovered( QString const & link ) { emit statusBarMessage( link ); }
-void ArticleView::contextMenuRequested( QPoint const & pos )
+void ArticleView::requestHit( QPoint const & pos, std::function<void(QVariantMap const &)> callback )
 {
-  // Copy the ephemeral engine request before any asynchronous work or menu event loop.
-  auto request = ui.definition->lastContextMenuRequest();
-  QUrl link = request ? request->linkUrl() : QUrl();
-  QUrl media = request ? request->mediaUrl() : QUrl();
-  QString selection = request ? request->selectedText() : ui.definition->selectedText();
-  quint64 const operation = ++d->contextQuery;
-  run( QStringLiteral( "gdWordAtPoint(%1,%2)" ).arg( pos.x() / ui.definition->zoomFactor() ).arg( pos.y() / ui.definition->zoomFactor() ),
-       [this, pos, link, media, selection, operation]( QVariant const & value ) {
-    if( operation != d->contextQuery ) return;
-    auto menu = new QMenu( this ); menu->setAttribute( Qt::WA_DeleteOnClose );
-    int generation = d->generation; auto page = d->page;
-    auto add = [this, menu, generation, page, operation]( QString const & text, std::function<void()> callback ) {
-      auto action = menu->addAction( text );
-      connect( action, &QAction::triggered, this, [this, generation, page, operation, callback] {
-        if( d->page == page && page && d->generation == generation && d->contextQuery == operation ) callback();
-      } );
-    };
-    if( !link.isEmpty() )
-    {
-      add( tr( "Open Link" ), [this, link] { linkClicked( link ); } );
-      if( !popupView ) add( tr( "Open Link in New Tab" ), [this, link] { emit openLinkInNewTab( link, d->page->url(), getCurrentArticle(), {} ); } );
-      menu->addAction( ui.definition->pageAction( QWebEnginePage::CopyLinkToClipboard ) );
-      if( isExternalLink( link ) ) add( tr( "Open Link in External Browser" ), [link] { QDesktopServices::openUrl( link ); } );
+  if( d->closing || !d->ready || !d->page || !d->bridge ) return;
+  if( d->hit ) { d->hit->done = true; d->hit->callback = {}; }
+  auto hit = std::make_shared<Hit>();
+  hit->page = d->page; hit->bridge = d->bridge; hit->generation = d->generation;
+  hit->callback = std::move( callback ); d->hit = hit;
+  QPointer<ArticleView> guard( this );
+  // The timer covers the complete top-document + native-frame continuation,
+  // rather than starting a second budget after the first result arrives.
+  QTimer::singleShot( InteractionDeadlineMs, this, [guard, hit] {
+    if( !guard || hit->done ) return;
+    auto value = hit->value; value[ "word" ] = QString();
+    guard->finishHit( hit, value );
+  } );
+  auto x = pos.x() / ui.definition->zoomFactor(), y = pos.y() / ui.definition->zoomFactor();
+  d->bridge->enqueue( {}, QStringLiteral( R"JS((() => {
+    const x=%1, y=%2, e=document.elementFromPoint(x,y);
+    if (!e) return {};
+    const article=e.closest('[id^="gdfrom-"]'), image=e.closest('img'), link=e.closest('a[href]');
+    let background='';
+    for (let n=e; n && !background; n=n.parentElement) {
+      const match=/^url\(["']?(.*?)["']?\)$/.exec(getComputedStyle(n).backgroundImage);
+      if (match) { try { background=new URL(match[1],document.baseURI).href; } catch (_) {} }
     }
-    QString text = selection.isEmpty() ? value.toString() : selection;
-    if( !text.trimmed().isEmpty() && text.size() < 60 )
+    let selection=''; const selected=window.getSelection();
+    if (selected && !selected.isCollapsed) for (let i=0; i<selected.rangeCount; ++i)
+      if (Array.from(selected.getRangeAt(i).getClientRects()).some(r => x>=r.left && x<=r.right && y>=r.top && y<=r.bottom))
+        selection=selected.toString();
+    return {article:article ? article.id : '', image:image ? image.currentSrc || image.src : '',
+      link:link ? link.href : '', background, selection,
+      frame:e.tagName==='IFRAME', word:window.gdWordAtPoint ? gdWordAtPoint(x,y) : ''};
+  })())JS" ).arg( x ).arg( y ), [guard, hit, pos]( QVariant const & value ) {
+    if( !guard || hit->done || guard->d->hit != hit || !hit->page || !hit->bridge ||
+        guard->d->page != hit->page || guard->d->bridge != hit->bridge ||
+        hit->generation != hit->bridge->generation() ) return;
+    if( hit->deadline.hasExpired() ) { guard->finishHit( hit, {} ); return; }
+    hit->value = value.toMap();
+    if( !hit->value.value( "frame" ).toBool() ) { guard->finishHit( hit, hit->value ); return; }
+    guard->d->frames->wordAtPoint( pos, [guard, hit]( QString const & word ) {
+      if( !guard || hit->done ) return;
+      auto result = hit->value;
+      result[ "word" ] = hit->deadline.hasExpired() ? QString() : word;
+      guard->finishHit( hit, result );
+    } );
+  }, InteractionDeadlineMs );
+}
+void ArticleView::finishHit( std::shared_ptr<Hit> const & hit, QVariantMap const & value )
+{
+  if( hit->done || d->hit != hit || d->closing || !hit->page || !hit->bridge ||
+      d->page != hit->page || d->bridge != hit->bridge || d->generation != hit->generation ||
+      hit->bridge->generation() != hit->generation ) return;
+  hit->done = true;
+  auto callback = std::move( hit->callback );
+  d->hit.reset();
+  if( callback ) callback( value );
+}
+void ArticleView::contextMenuRequested( QPoint const & position )
+{
+  // lastContextMenuRequest() is only valid during this event: every value used
+  // below, including the position and reference document, is copied now.
+  auto request = ui.definition->lastContextMenuRequest();
+  QPoint const pos = request ? request->position() : position;
+  QUrl const link = request ? request->linkUrl() : QUrl();
+  QUrl const media = request ? request->mediaUrl() : QUrl();
+  QString const linkText = request ? request->linkText() : QString();
+  QString const selection = request ? request->selectedText() : ui.definition->selectedText();
+  QUrl const reference = d->page ? d->page->url() : QUrl();
+  unsigned const group = getGroup( reference );
+  quint64 const operation = ++d->contextQuery;
+  // Close an older popup even when the second request is in the same document.
+  QPointer<ArticleView> owner( this );
+  emit closePopupMenu();
+  if( !owner ) return;
+  requestHit( pos, [this, pos, link, media, linkText, selection, reference, group, operation]( QVariantMap const & value ) {
+    if( operation != d->contextQuery ) return;
+    QString article = value.value( "article" ).toString();
+    if( !article.startsWith( "gdfrom-" ) || !d->articles.contains( article.mid( 7 ) ) ) article = getCurrentArticle();
+    QPointer<ArticleView> owner( this );
+    if( !article.isEmpty() ) setCurrentArticle( article );
+    if( !owner ) return;
+    auto menu = new QMenu( this ); menu->setAttribute( Qt::WA_DeleteOnClose );
+    int const generation = d->generation; auto page = d->page; auto bridge = d->bridge;
+    auto valid = [owner, page, bridge, generation, operation] {
+      return owner && !owner->d->closing && page && bridge && owner->d->page == page &&
+        owner->d->bridge == bridge && bridge->generation() == generation &&
+        owner->d->generation == generation && owner->d->contextQuery == operation;
+    };
+    auto add = [this, menu, valid]( QString const & text, std::function<void()> callback ) {
+      auto action = menu->addAction( text );
+      connect( action, &QAction::triggered, this, [valid, callback] { if( valid() ) callback(); } );
+      return action;
+    };
+    QUrl const target = link.isEmpty() ? QUrl( value.value( "link" ).toString() ) : link;
+    if( !target.isEmpty() )
     {
-      add( tr( "Look up \"%1\"" ).arg( text ), [this, text] { showDefinition( text, getViewGroup(), getCurrentArticle() ); } );
-      if( !popupView ) add( tr( "Look up in New Tab" ), [this, text] { emit showDefinitionInNewTab( text, getViewGroup(), getCurrentArticle(), {} ); } );
+      Contexts contexts;
+      QUrl lookup = target;
+      if( value.value( "frame" ).toBool() && isFramedArticle( article ) &&
+          ( target.scheme() == "http" || target.scheme() == "https" ) &&
+          !Dictionary::WebMultimediaDownload::isAudioUrl( target ) )
+      {
+        contexts[ article.mid( 7 ) ] = QString::fromLatin1( target.toEncoded() );
+        QString text = linkText.isEmpty() ? d->frameContextText.value( article.mid( 7 ) ) : linkText;
+        lookup = QUrl( "gdlookup://localhost" ); lookup.setPath( '/' + ( text.isEmpty() ? QStringLiteral( " " ) : text ) );
+      }
+      add( tr( "Open Link" ), [this, lookup, reference, article, contexts] { openLink( lookup, reference, article, contexts ); } );
+      if( !popupView ) add( tr( "Open Link in New Tab" ), [this, lookup, reference, article, contexts] {
+        emit openLinkInNewTab( lookup, reference, article, contexts );
+      } );
+      add( tr( "Copy Link" ), [target] { QApplication::clipboard()->setText( target.toString( QUrl::FullyEncoded ) ); } );
+      if( isExternalLink( target ) ) add( tr( "Open Link in External Browser" ), [target] { QDesktopServices::openUrl( target ); } );
+    }
+    QString const text = ( selection.isEmpty() ? value.value( "word" ).toString() : selection ).trimmed();
+    if( !text.isEmpty() && text.size() < 60 )
+    {
+      add( tr( "Look up \"%1\"" ).arg( text ), [this, text, group, article] { showDefinition( text, group, article ); } );
+      if( !popupView ) add( tr( "Look up in New Tab" ), [this, text, group, article] { emit showDefinitionInNewTab( text, group, article, {} ); } );
       add( tr( "Add to history" ), [this, text] { emit forceAddWordToHistory( text ); } );
       add( tr( "Send to input line" ), [this, text] { emit sendWordToInputLine( text ); } );
-      if( groupComboBox && groupComboBox->getCurrentGroup() != getViewGroup() )
-        add( tr( "Look up in selected group" ), [this, text] { showDefinition( text, groupComboBox->getCurrentGroup() ); } );
+      if( groupComboBox && groupComboBox->getCurrentGroup() != group )
+      {
+        unsigned const selectedGroup = groupComboBox->getCurrentGroup();
+        add( tr( "Look up in selected group" ), [this, text, selectedGroup, article] { showDefinition( text, selectedGroup, article ); } );
+      }
     }
-    if( !media.isEmpty() && !popupView ) add( tr( "Save resource..." ), [this, media] {
-      auto destination = QFileDialog::getSaveFileName( this, tr( "Save resource" ), cfg.resourceSavePath + '/' + media.fileName() );
-      if( !destination.isEmpty() ) { emit storeResourceSavePath( QFileInfo( destination ).absolutePath() ); saveResource( media, destination ); }
+    auto save = [this, add, valid, reference]( QUrl const & url, QString const & title ) {
+      if( url.isEmpty() || popupView ) return;
+      add( title, [this, url, reference, valid] {
+        auto dialog = new QFileDialog( this, tr( "Save resource" ), cfg.resourceSavePath );
+        dialog->setAttribute( Qt::WA_DeleteOnClose );
+        dialog->setAcceptMode( QFileDialog::AcceptSave ); dialog->selectFile( url.fileName() );
+        connect( dialog, &QFileDialog::fileSelected, this, [this, valid, url, reference]( QString const & destination ) {
+          if( !valid() || destination.isEmpty() ) return;
+          emit storeResourceSavePath( QFileInfo( destination ).absolutePath() );
+          if( valid() ) saveResource( url, reference, destination );
+        } );
+        connect( this, &ArticleView::closePopupMenu, dialog, &QDialog::reject );
+        connect( d->bridge, &ArticleBridge::generationChanged, dialog, &QDialog::reject );
+        dialog->open();
+      } );
+    };
+    save( media.isEmpty() ? QUrl( value.value( "image" ).toString() ) : media, tr( "Save resource..." ) );
+    save( QUrl( value.value( "background" ).toString() ), tr( "Save background..." ) );
+    auto copy = [selection] { if( !selection.isEmpty() ) QApplication::clipboard()->setText( selection ); };
+    add( tr( "Copy" ), copy )->setEnabled( !selection.isEmpty() );
+    add( tr( "Copy as text" ), copy )->setEnabled( !selection.isEmpty() );
+    add( selectCurrentArticleAction.text(), [this, article] {
+      run( "if (window.gdSelectArticle) gdSelectArticle(" + json( article.mid( 7 ) ) + ")" );
     } );
-    menu->addAction( ui.definition->pageAction( QWebEnginePage::Copy ) );
-    menu->addAction( &copyAsTextAction ); menu->addAction( &selectCurrentArticleAction );
-    menu->addAction( ui.definition->pageAction( QWebEnginePage::SelectAll ) );
+    add( tr( "Select All" ), [page] { page->triggerAction( QWebEnginePage::SelectAll ); } );
+    add( tr( "Search" ), [this] { openSearch(); } );
     int count = 0;
     for( auto const & id : d->articles )
     {
@@ -887,36 +1019,29 @@ void ArticleView::contextMenuRequested( QPoint const & pos )
       for( auto const & dictionary : allDictionaries ) if( QString::fromStdString( dictionary->getId() ) == id )
         add( QString::fromStdString( dictionary->getName() ), [this, id] { jumpToDictionary( id, true ); } );
     }
-    menu->addAction( &inspectAction );
+    add( inspectAction.text(), [this] { inspect(); } );
     connect( this, &ArticleView::closePopupMenu, menu, &QMenu::close );
-    connect( d->bridge, &ArticleBridge::generationChanged, menu, &QMenu::close );
+    connect( bridge, &ArticleBridge::generationChanged, menu, &QMenu::close );
     menu->popup( ui.definition->mapToGlobal( pos ) );
   } );
 }
-void ArticleView::doubleClicked( QPoint pos )
+void ArticleView::doubleClicked( QPoint pos, Qt::KeyboardModifiers modifiers )
 {
-  auto x = pos.x() / ui.definition->zoomFactor(), y = pos.y() / ui.definition->zoomFactor();
-  run( QStringLiteral( "(() => {const e=document.elementFromPoint(%1,%2); return e && e.tagName==='IMG' ? e.src : '';})()" ).arg( x ).arg( y ),
-       [this, pos]( QVariant const & value ) {
-    if( !value.toString().isEmpty() )
-    {
-      QUrl image( value.toString() ); cancelRequests( resourceDownloadRequests, this ); resourceDownloadUrl = image;
-      try {
-        sptr<Dictionary::DataRequest> request;
-        if( image.scheme() == "http" || image.scheme() == "https" ) request = new Dictionary::WebMultimediaDownload( image, articleNetMgr );
-        else { QString type; request = articleNetMgr.getResource( image, type ); }
-        if( request.get() ) { resourceDownloadRequests.push_back( request ); connect( request.get(), &Dictionary::Request::finished, this, &ArticleView::resourceDownloadFinished ); resourceDownloadFinished(); }
-      } catch( std::exception const & e ) { emit statusBarMessage( QString::fromUtf8( e.what() ), 10000 ); }
-      return;
-    }
-    if( !cfg.preferences.doubleClickTranslates ) return;
-    QPointer<ArticleView> guard( this ); auto page = d->page; int generation = d->generation;
-    d->frames->wordAtPoint( pos, [guard, page, generation]( QString const & word ) {
-      if( !guard || !page || guard->d->page != page || guard->d->generation != generation || word.isEmpty() || word.size() >= 60 ) return;
-      if( QApplication::keyboardModifiers() & ( Qt::ControlModifier | Qt::ShiftModifier ) )
-        emit guard->showDefinitionInNewTab( word, guard->getViewGroup(), guard->getCurrentArticle(), {} );
-      else guard->openLink( QUrl( "bword:" + QString::fromLatin1( QUrl::toPercentEncoding( word ) ) ), page->url(), guard->getCurrentArticle() );
-    } );
+  auto page = d->page; QUrl const reference = page ? page->url() : QUrl();
+  unsigned const group = getGroup( reference );
+  requestHit( pos, [this, modifiers, page, reference, group]( QVariantMap const & value ) {
+    QString article = value.value( "article" ).toString();
+    if( !article.startsWith( "gdfrom-" ) || !d->articles.contains( article.mid( 7 ) ) ) article = getCurrentArticle();
+    if( modifiers.testFlag( Qt::AltModifier ) && !value.value( "link" ).toString().isEmpty() ) return;
+    if( !value.value( "image" ).toString().isEmpty() )
+    { openLink( QUrl( value.value( "image" ).toString() ), reference, article ); return; }
+    if( !cfg.preferences.doubleClickTranslates && !modifiers.testFlag( Qt::AltModifier ) ) return;
+    QString word = value.value( "selection" ).toString().trimmed();
+    if( word.isEmpty() ) word = value.value( "word" ).toString().trimmed();
+    if( word.isEmpty() || word.size() >= 60 ) return;
+    if( !popupView && ( modifiers & ( Qt::ControlModifier | Qt::ShiftModifier ) ) )
+      emit showDefinitionInNewTab( word, group, article, {} );
+    else openLink( QUrl( "bword:" + QString::fromLatin1( QUrl::toPercentEncoding( word ) ) ), reference, article );
   } );
 }
 void ArticleView::openSearch()
@@ -1031,7 +1156,20 @@ void ArticleView::on_ftsSearchNext_clicked() { performFtsFindOperation( false );
 void ArticleView::copyAsText() { auto text = ui.definition->selectedText(); if( !text.isEmpty() ) QApplication::clipboard()->setText( text ); }
 void ArticleView::inspect() { ui.definition->triggerPageAction( QWebEnginePage::InspectElement ); }
 void ArticleView::receiveExpandOptionalParts( bool expand ) { if( expandOptionalParts != expand ) switchExpandOptionalParts(); }
-void ArticleView::switchExpandOptionalParts() { expandOptionalParts = !expandOptionalParts; emit setExpandMode( expandOptionalParts ); reload(); }
+void ArticleView::switchExpandOptionalParts()
+{
+  expandOptionalParts = !expandOptionalParts;
+  QPointer<ArticleView> guard( this );
+  emit setExpandMode( expandOptionalParts );
+  if( !guard ) return;
+  run( QStringLiteral( R"JS((() => {
+    const expand=%1;
+    for (const node of document.querySelectorAll('.dsl_opt'))
+      node.style.setProperty('display', expand ? 'inline' : 'none', 'important');
+    for (const node of document.querySelectorAll('.hidden_expand_opt'))
+      node.style.setProperty('display', expand ? 'none' : 'inline', 'important');
+  })())JS" ).arg( expandOptionalParts ? "true" : "false" ) );
+}
 void ArticleView::showEvent( QShowEvent * event )
 { QFrame::showEvent( event ); ui.searchFrame->setVisible( searchIsOpened ); ui.ftsSearchFrame->setVisible( ftsSearchIsOpened ); }
 bool ArticleView::handleF3( QObject *, QEvent * event )

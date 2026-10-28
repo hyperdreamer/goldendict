@@ -4,7 +4,11 @@
 #include <QDeadlineTimer>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QClipboard>
+#include <QFileDialog>
+#include <QMenu>
 #include <QNetworkProxy>
+#include <QMouseEvent>
 #include <QTemporaryDir>
 #include <QWebChannel>
 #include <QWebEnginePage>
@@ -17,6 +21,8 @@
 #include "articlebridge.hh"
 #include "articleprofile.hh"
 #include "articlewebview.hh"
+#include "articleview.hh"
+#include "websiteframes.hh"
 #include "articleschemes.hh"
 #include "article_netmgr.hh"
 #include "articleurls.hh"
@@ -35,12 +41,18 @@ struct Completion
 };
 QMap<QString, Completion> held;
 QStringList dispatched;
+bool holdInteraction = false;
+QList<Completion> interactions;
 
 // Link wrapping affects only the production call sites in this executable. It
 // still evaluates on the real page; only delivery of tagged results is held.
 void observe(QString const &script, ArticleBridge::Result const &callback,
              std::function<void(ArticleBridge::Result)> const &execute)
 {
+    if (holdInteraction && script.contains("document.elementFromPoint(")) {
+        execute([callback](QVariant const &value) { interactions.append({callback, value}); });
+        return;
+    }
     if (!script.startsWith("/*t19:")) { execute(callback); return; }
     auto label = script.mid(6, script.indexOf("*/") - 6);
     dispatched.append(label);
@@ -109,6 +121,67 @@ struct Browser
         return ArticleUrls::lookupDocument(lookup);
     }
 };
+struct InteractionFixture
+{
+    struct Player final : AudioPlayerInterface {
+        QString play(char const *, int) override { return {}; }
+        void stop() override {}
+    };
+    Config::Class cfg;
+    sptr<TestSupport::FixtureDictionary> a{new TestSupport::FixtureDictionary};
+    sptr<TestSupport::FixtureDictionary> b{new TestSupport::FixtureDictionary("dict-b", "Dictionary B")};
+    std::vector<sptr<Dictionary::Class>> dictionaries{a,b};
+    Instances::Groups groups;
+    ArticleMaker maker{dictionaries, groups, {}, {}};
+    ArticleNetworkAccessManager resources{nullptr, dictionaries, maker,
+        cfg.preferences.disallowContentFromOtherSites, cfg.preferences.hideGoldenDictHeader};
+    AudioPlayerPtr player{new Player};
+    QAction search;
+    std::unique_ptr<ArticleProfileController> controller;
+    InteractionFixture() {
+        cfg.preferences.maxNetworkCacheSize = 0;
+        cfg.preferences.disallowContentFromOtherSites = false;
+        cfg.preferences.doubleClickTranslates = true;
+        Instances::Group group("Interaction group");
+        group.id = 17; group.dictionaries = dictionaries; groups.push_back(group);
+        a->setArticleBody("<p id='click-word' style='font:24px monospace'>alpha</p>"
+                          "<p id='spaces'> &nbsp; &#x2003; </p>");
+        b->setArticleBody("<a id='context-link' href='bword:copied-link'>copied link</a>"
+                          "<div id='background' style='width:110px;height:45px;background-image:url(bres://dict-b/fixture.bin)'></div>"
+                          "<img id='image' src='bres://dict-b/fixture.png' width='100' height='45'>");
+        b->setResources({{"fixture.bin", QByteArray("resource-body")}, {"fixture.png", QByteArray::fromBase64(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a4KcAAAAASUVORK5CYII=")}});
+        controller = std::make_unique<ArticleProfileController>(cfg, resources, nullptr);
+    }
+    std::unique_ptr<ArticleView> view() {
+        auto result = std::make_unique<ArticleView>(nullptr, *controller->profile(), resources, player,
+                                                   dictionaries, groups, false, cfg, search);
+        result->resize(800,600); result->show(); result->showDefinition("initial",17);
+        return result;
+    }
+};
+QPoint point(QWebEnginePage &page, QString const &id, QDeadlineTimer const &deadline) {
+    auto result = evaluate(page, "(() => {const e=document.getElementById(" + quote(id) +
+        ");e.scrollIntoView({block:'center'});const r=e.getBoundingClientRect();"
+        "return [r.x+Math.min(r.width/2,25),r.y+r.height/2];})()", deadline).toList();
+    return result.size() == 2 ? QPoint(qRound(result[0].toDouble()),qRound(result[1].toDouble())) : QPoint();
+}
+bool focusAt(ArticleWebView &web, QPoint const &position, QDeadlineTimer const &deadline) {
+    QApplication::setActiveWindow(web.window()); web.setFocus();
+    evaluate(*web.page(), "window.__gdTestClicked=false;document.addEventListener('click',"
+        "()=>window.__gdTestClicked=true,{once:true})",deadline);
+    QTest::mouseClick(web.focusProxy(),Qt::LeftButton,Qt::NoModifier,position);
+    return QTest::qWaitFor([&] { return evaluate(*web.page(),"window.__gdTestClicked && document.hasFocus()",deadline).toBool(); },
+        int(qMax<qint64>(0,deadline.remainingTime())));
+}
+QAction *action(QMenu *menu, QString const &text) {
+    if (menu) for (auto a : menu->actions()) if (a->text() == text) return a;
+    return nullptr;
+}
+QMenu *visibleMenu(ArticleView &view) {
+    for (auto menu : view.findChildren<QMenu*>()) if (menu->isVisible()) return menu;
+    return nullptr;
+}
 }
 
 // Exact GNU ld wrappers for the Qt 6.12 page/frame overloads used by the bridge.
@@ -142,8 +215,298 @@ private slots:
         QStringList reasons;
         QVERIFY2(TestSupport::requiredEnvironment(&reasons), qPrintable(reasons.join('\n')));
     }
-    void cleanup() { held.clear(); dispatched.clear(); }
+    void cleanup() { holdInteraction = false; interactions.clear(); held.clear(); dispatched.clear(); }
     void cleanupTestCase() { TestSupport::clearWatchdog(); }
+
+    void doubleClickKeepsPressModifiersAfterDelivery()
+    {
+        QDeadlineTimer deadline(12000);
+        InteractionFixture f; auto view = f.view(); auto web = view->findChild<ArticleWebView*>();
+        QSignalSpy pages(view.get(), &ArticleView::pageLoaded);
+        QSignalSpy tabs(view.get(), &ArticleView::showDefinitionInNewTab);
+        WAIT_FOR(!pages.isEmpty() && view->getPhrase().phrase == "initial");
+        QPoint p = point(*web->page(), "click-word", deadline);
+        holdInteraction = true;
+        QTest::mouseDClick(web->focusProxy(), Qt::LeftButton, Qt::ControlModifier, p);
+        QTest::mouseRelease(web->focusProxy(), Qt::LeftButton, Qt::NoModifier, p);
+        WAIT_FOR(!interactions.isEmpty());
+        QVERIFY(!(QApplication::keyboardModifiers() & Qt::ControlModifier));
+        holdInteraction = false; auto saved = interactions.takeFirst(); saved.deliver();
+        WAIT_FOR(tabs.size() == 1);
+        QCOMPARE(tabs.at(0).at(0).toString(), QString("alpha"));
+        QCOMPARE(tabs.at(0).at(1).toUInt(), 17u);
+        QCOMPARE(tabs.at(0).at(2).toString(), QString("gdfrom-dict-a"));
+        QCOMPARE(view->getPhrase().phrase, QString("initial"));
+    }
+    void altClickAndWhitespaceSelection()
+    {
+        QDeadlineTimer deadline(12000);
+        InteractionFixture f; f.cfg.preferences.doubleClickTranslates = false;
+        auto view = f.view(); auto web = view->findChild<ArticleWebView*>();
+        QSignalSpy pages(view.get(), &ArticleView::pageLoaded);
+        WAIT_FOR(!pages.isEmpty() && view->getPhrase().phrase == "initial");
+        QPoint p = point(*web->page(), "click-word", deadline);
+        QTest::mouseClick(web->focusProxy(), Qt::LeftButton, Qt::AltModifier, p);
+        WAIT_FOR(view->getPhrase().phrase == "alpha");
+        WAIT_FOR(pages.size() == 2);
+        evaluate(*web->page(), "(() => {const r=document.createRange();r.selectNodeContents(document.getElementById('spaces'));"
+            "const s=getSelection();s.removeAllRanges();s.addRange(r);})()", deadline);
+        WAIT_FOR(web->hasSelection());
+        QCOMPARE(web->selectedText().trimmed(), QString());
+        f.cfg.preferences.doubleClickTranslates=true;
+        QSignalSpy tabs(view.get(),&ArticleView::showDefinitionInNewTab);
+        auto coordinates=evaluate(*web->page(),"(() => {const r=getSelection().getRangeAt(0).getBoundingClientRect();"
+            "return [r.x+r.width/2,r.y+r.height/2];})()",deadline).toList();
+        p=QPoint(qRound(coordinates.at(0).toDouble()),qRound(coordinates.at(1).toDouble())); holdInteraction=true;
+        view->doubleClicked(p,Qt::ControlModifier);
+        WAIT_FOR(!interactions.isEmpty()); holdInteraction=false; auto whitespace=interactions.takeFirst();
+        QVERIFY(!whitespace.value.toMap().value("selection").toString().isEmpty());
+        QVERIFY(whitespace.value.toMap().value("selection").toString().trimmed().isEmpty()); whitespace.deliver();
+        QCOMPARE(tabs.size(),0); QCOMPARE(view->getPhrase().phrase,QString("alpha"));
+        web->bridge->reset();
+        QVERIFY(!web->hasSelection());
+        QCOMPARE(web->selectedText(), QString());
+    }
+
+    void selectionClickDragAndGeneration()
+    {
+        QDeadlineTimer deadline(15000);
+        InteractionFixture f; f.cfg.preferences.doubleClickTranslates = false;
+        auto view = f.view(); auto web = view->findChild<ArticleWebView*>();
+        QSignalSpy pages(view.get(), &ArticleView::pageLoaded);
+        WAIT_FOR(!pages.isEmpty() && view->getPhrase().phrase == "initial");
+        QVERIFY(!view->isFramedArticle("dict-a"));
+        view->setSelectionBySingleClick(true);
+        QPoint p = point(*web->page(), "click-word", deadline);
+        QTest::mouseClick(web->focusProxy(), Qt::LeftButton, Qt::NoModifier, p);
+        WAIT_FOR(web->selectedText() == "alpha");
+        QVERIFY(web->hasSelection());
+        QCOMPARE(view->getPhrase().phrase, QString("initial"));
+        evaluate(*web->page(), "getSelection().removeAllRanges()", deadline);
+        WAIT_FOR(!web->hasSelection());
+        auto begin = p - QPoint(24,0), end = p + QPoint(30,0);
+        QTest::mousePress(web->focusProxy(), Qt::LeftButton, Qt::NoModifier, begin);
+        QMouseEvent move(QEvent::MouseMove, end, web->focusProxy()->mapToGlobal(end),
+            Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(web->focusProxy(), &move);
+        QTest::mouseRelease(web->focusProxy(), Qt::LeftButton, Qt::NoModifier, end);
+        WAIT_FOR(web->hasSelection());
+        QVERIFY(web->selectedText().contains("alp"));
+        QSignalSpy doubles(web, &ArticleWebView::doubleClicked);
+        evaluate(*web->page(), "document.getElementById('spaces').textContent='next-word'", deadline);
+        web->bridge->reset();
+        QCOMPARE(web->selectedText(), QString()); QVERIFY(!web->hasSelection());
+        // A synthetic selection posted by release is stamped before the reset.
+        QTest::mouseClick(web->focusProxy(), Qt::LeftButton, Qt::NoModifier, p);
+        web->bridge->reset();
+        auto barrier = std::make_shared<bool>(false);
+        QTimer::singleShot(0, web, [barrier] { *barrier=true; }); WAIT_FOR(*barrier);
+        QCOMPARE(doubles.size(), 0);
+    }
+    void contextCopiesLinkAndGuardsEveryAction()
+    {
+        QDeadlineTimer deadline(18000);
+        InteractionFixture f; auto view = f.view(); auto web = view->findChild<ArticleWebView*>();
+        QSignalSpy pages(view.get(), &ArticleView::pageLoaded);
+        QSignalSpy requests(web, &QWidget::customContextMenuRequested);
+        QSignalSpy tabs(view.get(), &ArticleView::openLinkInNewTab);
+        WAIT_FOR(!pages.isEmpty() && view->getPhrase().phrase == "initial");
+        QPoint p = point(*web->page(), "context-link", deadline);
+        holdInteraction = true;
+        QTest::mouseClick(web->focusProxy(), Qt::RightButton, Qt::NoModifier, p);
+        WAIT_FOR(!requests.isEmpty() && !interactions.isEmpty());
+        evaluate(*web->page(), "document.getElementById('context-link').href='bword:changed-link'", deadline);
+        holdInteraction = false;
+        auto copied = interactions.takeFirst(); auto alternate = copied.value.toMap();
+        alternate["link"] = QString("bword:late-js-result"); copied.value = alternate; copied.deliver();
+        WAIT_FOR(visibleMenu(*view));
+        auto menu = visibleMenu(*view);
+        QVERIFY(action(menu,"Copy Link")); QVERIFY(action(menu,"Open Link in New Tab"));
+        action(menu,"Copy Link")->trigger();
+        QCOMPARE(QApplication::clipboard()->text(), QString("bword:copied-link"));
+        action(menu,"Open Link in New Tab")->trigger();
+        QCOMPARE(tabs.size(),1);
+        QCOMPARE(tabs.at(0).at(0).toUrl(), QUrl("bword:copied-link"));
+        QCOMPARE(tabs.at(0).at(2).toString(), QString("gdfrom-dict-b"));
+        QCOMPARE(QUrlQuery(tabs.at(0).at(1).toUrl()).queryItemValue("word"), QString("initial"));
+        WAIT_FOR(view->getActiveArticleId() == "dict-b");
+        // Retain actions as if trigger delivery was already queued when the menu
+        // closed. They must each reject the new generation on their own.
+        menu->setAttribute(Qt::WA_DeleteOnClose,false);
+        view->showDefinition("new-document",17);
+        WAIT_FOR(pages.size() == 2);
+        QApplication::clipboard()->setText("new-page-clipboard");
+        int const before = tabs.size();
+        action(menu,"Copy Link")->trigger(); action(menu,"Select All")->trigger();
+        action(menu,"Open Link in New Tab")->trigger(); action(menu,"Search")->trigger();
+        auto barrier = std::make_shared<bool>(false);
+        web->bridge->run("true",[barrier](QVariant const &) { *barrier=true; }); WAIT_FOR(*barrier);
+        QCOMPARE(QApplication::clipboard()->text(),QString("new-page-clipboard"));
+        QVERIFY(!web->hasSelection()); QVERIFY(!view->isSearchOpened()); QCOMPARE(tabs.size(),before);
+        delete menu;
+    }
+    void contextSelectionLookupCopyAndSearch()
+    {
+        QDeadlineTimer deadline(15000);
+        InteractionFixture f; auto view=f.view(); auto web=view->findChild<ArticleWebView*>();
+        QSignalSpy pages(view.get(), &ArticleView::pageLoaded);
+        QSignalSpy tabs(view.get(), &ArticleView::showDefinitionInNewTab);
+        QSignalSpy input(view.get(), &ArticleView::sendWordToInputLine);
+        WAIT_FOR(!pages.isEmpty());
+        QPoint p=point(*web->page(),"click-word",deadline);
+        QVERIFY(focusAt(*web,p,deadline));
+        evaluate(*web->page(),"(() => {const r=document.createRange();r.selectNodeContents(document.getElementById('click-word'));"
+            "const s=getSelection();s.removeAllRanges();s.addRange(r);})()",deadline);
+        WAIT_FOR(web->selectedText()=="alpha");
+        QTest::mouseClick(web->focusProxy(),Qt::RightButton,Qt::NoModifier,p);
+        WAIT_FOR(visibleMenu(*view)); auto menu=visibleMenu(*view);
+        QVERIFY(action(menu,"Copy")); QVERIFY(action(menu,"Look up in New Tab"));
+        evaluate(*web->page(),"getSelection().removeAllRanges()",deadline); WAIT_FOR(!web->hasSelection());
+        action(menu,"Copy")->trigger(); QCOMPARE(QApplication::clipboard()->text(),QString("alpha"));
+        action(menu,"Look up in New Tab")->trigger(); QCOMPARE(tabs.size(),1);
+        QCOMPARE(tabs.at(0).at(0).toString(),QString("alpha"));
+        action(menu,"Send to input line")->trigger(); QCOMPARE(input.size(),1);
+        QCOMPARE(input.at(0).at(0).toString(),QString("alpha"));
+        action(menu,"Search")->trigger(); QVERIFY(view->isSearchOpened());
+        menu->close();
+    }
+    void contextResourceAndBackgroundSave()
+    {
+        QDeadlineTimer deadline(15000);
+        InteractionFixture f; auto view=f.view(); auto web=view->findChild<ArticleWebView*>();
+        QSignalSpy pages(view.get(), &ArticleView::pageLoaded);
+        WAIT_FOR(!pages.isEmpty());
+        QPoint p=point(*web->page(),"background",deadline);
+        QTest::mouseClick(web->focusProxy(),Qt::RightButton,Qt::NoModifier,p);
+        WAIT_FOR(visibleMenu(*view)); auto menu=visibleMenu(*view);
+        QVERIFY(action(menu,"Save background..."));
+        QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
+        action(menu,"Save background...")->trigger();
+        WAIT_FOR(view->findChild<QFileDialog*>() && view->findChild<QFileDialog*>()->isVisible());
+        auto dialog=view->findChild<QFileDialog*>();
+        QCOMPARE(dialog->selectedFiles().value(0).section('/',-1),QString("fixture.bin"));
+        QTemporaryDir output; QVERIFY(output.isValid());
+        auto destination=output.filePath("saved.bin");
+        QVERIFY(QMetaObject::invokeMethod(dialog,"fileSelected",Qt::DirectConnection,Q_ARG(QString,destination)));
+        QFile file(destination); QVERIFY(file.open(QIODevice::ReadOnly)); QCOMPARE(file.readAll(),QByteArray("resource-body"));
+        dialog->reject(); menu->close();
+        WAIT_FOR(!visibleMenu(*view));
+        p=point(*web->page(),"image",deadline);
+        QTest::mouseClick(web->focusProxy(),Qt::RightButton,Qt::NoModifier,p);
+        WAIT_FOR(visibleMenu(*view)); menu=visibleMenu(*view);
+        QVERIFY(action(menu,"Save resource..."));
+        menu->setAttribute(Qt::WA_DeleteOnClose,false);
+        action(menu,"Save resource...")->trigger();
+        WAIT_FOR(view->findChild<QFileDialog*>() && view->findChild<QFileDialog*>()->isVisible());
+        QPointer<QFileDialog> pending=view->findChild<QFileDialog*>();
+        pending->setAttribute(Qt::WA_DeleteOnClose,false);
+        QCOMPARE(pending->selectedFiles().value(0).section('/',-1),QString("fixture.png"));
+        auto imagePath=output.filePath("saved.png");
+        QVERIFY(QMetaObject::invokeMethod(pending,"fileSelected",Qt::DirectConnection,Q_ARG(QString,imagePath)));
+        QFile imageFile(imagePath); QVERIFY(imageFile.open(QIODevice::ReadOnly));
+        QCOMPARE(imageFile.read(8),QByteArray::fromHex("89504e470d0a1a0a"));
+        view->showDefinition("after-save",17); WAIT_FOR(pages.size()==2);
+        QVERIFY(pending);
+        QVERIFY(QMetaObject::invokeMethod(pending,"fileSelected",Qt::DirectConnection,
+            Q_ARG(QString,output.filePath("stale.png"))));
+        QVERIFY(!QFile::exists(output.filePath("stale.png"))); delete pending.data(); delete menu;
+    }
+    void delayedHitExpiryNavigationAndOwnerDestruction()
+    {
+        QDeadlineTimer deadline(15000);
+        QCOMPARE(ArticleView::InteractionDeadlineMs,500);
+        InteractionFixture f; auto view=f.view(); auto web=view->findChild<ArticleWebView*>();
+        QSignalSpy pages(view.get(), &ArticleView::pageLoaded);
+        QSignalSpy tabs(view.get(), &ArticleView::showDefinitionInNewTab);
+        WAIT_FOR(!pages.isEmpty()); QPoint p=point(*web->page(),"click-word",deadline);
+        holdInteraction=true;
+        QTest::mouseDClick(web->focusProxy(),Qt::LeftButton,Qt::ControlModifier,p);
+        WAIT_FOR(!interactions.isEmpty());
+        auto barrier=std::make_shared<bool>(false);
+        web->bridge->run("true",[barrier](QVariant const &) { *barrier=true; });
+        QVERIFY2(QTest::qWaitFor([&] { return *barrier; },3000),"interaction budget must retire a withheld result and release the queue");
+        holdInteraction=false; interactions.takeFirst().deliver();
+        QCOMPARE(tabs.size(),0); QCOMPARE(view->getPhrase().phrase,QString("initial"));
+        holdInteraction=true;
+        QTest::mouseDClick(web->focusProxy(),Qt::LeftButton,Qt::ControlModifier,p);
+        WAIT_FOR(!interactions.isEmpty());
+        view->showDefinition("after-hit",17); WAIT_FOR(pages.size()==2);
+        holdInteraction=false; interactions.takeFirst().deliver();
+        QCOMPARE(tabs.size(),0); QCOMPARE(view->getPhrase().phrase,QString("after-hit"));
+        p=point(*web->page(),"context-link",deadline); holdInteraction=true;
+        QTest::mouseClick(web->focusProxy(),Qt::RightButton,Qt::NoModifier,p); WAIT_FOR(!interactions.isEmpty());
+        auto saved=interactions.takeFirst(); view.reset(); saved.deliver();
+    }
+
+    void invalidFrameAndStaleSelectionAreEmpty()
+    {
+        QDeadlineTimer deadline(15000);
+        InteractionFixture f; auto view=f.view(); auto web=view->findChild<ArticleWebView*>();
+        QSignalSpy pages(view.get(), &ArticleView::pageLoaded);
+        WAIT_FOR(!pages.isEmpty());
+        evaluate(*web->page(),"(() => {const i=document.createElement('iframe');i.id=i.name='gdexpandframe-dict-a';"
+            "i.srcdoc='<p>untrusted-frame-word</p>';document.getElementById('click-word').append(i);"
+            "window.dispatchEvent(new Event('gd-active-article'));})()",deadline);
+        WAIT_FOR(view->isFramedArticle("dict-a")); QVERIFY(view->isFramedArticle("gdfrom-dict-a"));
+        QPoint p=point(*web->page(),"gdexpandframe-dict-a",deadline);
+        auto result=std::make_shared<QVariantMap>(); auto done=std::make_shared<bool>(false);
+        int ticks=0; QTimer heartbeat; connect(&heartbeat,&QTimer::timeout,this,[&] { ++ticks; }); heartbeat.start(10);
+        view->requestHit(p,[result,done](QVariantMap const &value) { *result=value; *done=true; });
+        WAIT_FOR(*done); QCOMPARE(result->value("word").toString(),QString());
+        QVERIFY(result->value("frame").toBool()); QVERIFY(ticks>0);
+        QVERIFY(focusAt(*web,point(*web->page(),"spaces",deadline),deadline));
+        evaluate(*web->page(),"(() => {const e=document.getElementById('spaces');e.textContent='old selection';"
+            "const r=document.createRange();r.selectNodeContents(e);getSelection().removeAllRanges();getSelection().addRange(r);})()",deadline);
+        WAIT_FOR(web->selectedText()=="old selection");
+        p=point(*web->page(),"spaces",deadline); holdInteraction=true;
+        QTest::mouseClick(web->focusProxy(),Qt::RightButton,Qt::NoModifier,p); WAIT_FOR(!interactions.isEmpty());
+        view->showDefinition("selection-page",17);
+        WAIT_FOR(pages.size()==2); QCOMPARE(web->selectedText(),QString());
+        QVERIFY(!view->isFramedArticle("dict-a"));
+        QVERIFY(focusAt(*web,point(*web->page(),"spaces",deadline),deadline));
+        evaluate(*web->page(),"(() => {const e=document.getElementById('spaces');e.textContent='new selection';"
+            "const r=document.createRange();r.selectNodeContents(e);getSelection().removeAllRanges();getSelection().addRange(r);})()",deadline);
+        WAIT_FOR(web->selectedText()=="new selection");
+        holdInteraction=false; interactions.takeFirst().deliver();
+        QCOMPARE(web->selectedText(),QString("new selection")); QVERIFY(!visibleMenu(*view));
+    }
+    void contextSupersededInSameDocument()
+    {
+        QDeadlineTimer deadline(15000);
+        InteractionFixture f; auto view=f.view(); auto web=view->findChild<ArticleWebView*>();
+        QSignalSpy pages(view.get(), &ArticleView::pageLoaded);
+        WAIT_FOR(!pages.isEmpty());
+        auto p=point(*web->page(),"context-link",deadline);
+        QTest::mouseClick(web->focusProxy(),Qt::RightButton,Qt::NoModifier,p);
+        WAIT_FOR(visibleMenu(*view)); auto old=visibleMenu(*view); old->setAttribute(Qt::WA_DeleteOnClose,false);
+        auto saved=action(old,"Copy Link"); QVERIFY(saved);
+        p=point(*web->page(),"click-word",deadline); holdInteraction=true;
+        QTest::mouseClick(web->focusProxy(),Qt::RightButton,Qt::NoModifier,p); WAIT_FOR(!interactions.isEmpty());
+        QApplication::clipboard()->setText("latest context"); saved->trigger();
+        QCOMPARE(QApplication::clipboard()->text(),QString("latest context"));
+        holdInteraction=false; interactions.takeFirst().deliver(); WAIT_FOR(visibleMenu(*view));
+        QVERIFY(!action(visibleMenu(*view),"Copy Link")); delete old;
+    }
+
+    void optionalSelectorsRunThroughView()
+    {
+        QDeadlineTimer deadline(12000);
+        InteractionFixture f;
+        f.a->setArticleBody("<span class='dsl_opt' id='optional' style='display:none'>optional word</span>"
+            "<span class='hidden_expand_opt' id='expander'>+</span>");
+        auto view=f.view(); auto web=view->findChild<ArticleWebView*>();
+        QSignalSpy pages(view.get(),&ArticleView::pageLoaded); WAIT_FOR(!pages.isEmpty());
+        view->receiveExpandOptionalParts(true);
+        auto state=std::make_shared<QVariant>();
+        web->bridge->run("[getComputedStyle(document.getElementById('optional')).display,"
+            "getComputedStyle(document.getElementById('expander')).display]",[state](QVariant const &v) { *state=v; });
+        WAIT_FOR(state->isValid()); QCOMPARE(state->toStringList(),(QStringList{"inline","none"}));
+        view->receiveExpandOptionalParts(false); *state=QVariant();
+        web->bridge->run("[getComputedStyle(document.getElementById('optional')).display,"
+            "getComputedStyle(document.getElementById('expander')).display]",[state](QVariant const &v) { *state=v; });
+        WAIT_FOR(state->isValid()); QCOMPARE(state->toStringList(),(QStringList{"none","inline"}));
+        QCOMPARE(pages.size(),1);
+    }
 
     // Break: a main-frame navigation is not classified as a user action, a
     // website frame loses its real origin, or a redirect becomes a new action.
@@ -695,6 +1058,95 @@ private slots:
         QVERIFY(view.inspector);
         QCOMPARE(view.inspector->page()->profile(), page->profile());
         QVERIFY(view.inspector->page()->findChild<QObject *>("gdArticleRequestInterceptor", Qt::FindDirectChildrenOnly));
+        auto stalePopup = page->createWindow(QWebEnginePage::WebBrowserTab);
+        QPointer<QWebEnginePage> staleGuard(stalePopup);
+        view.bridge->reset(); stalePopup->load(url);
+        WAIT_FOR(!staleGuard); QCOMPARE(links.size(),2);
+    }
+
+    // A UTF-16 caret can land inside a supplementary letter; the production
+    // helper must measure the whole scalar and return the complete word.
+    void supplementaryWordThroughReadyBridge()
+    {
+        QDeadlineTimer deadline(10000);
+        Browser b;
+        ArticleWebView view;
+        view.resize(720, 480); view.show();
+        view.configure(b.controller->profile(), &b.cfg);
+        QFile fixture(TestSupport::repositoryRoot() + "/tests/fixtures/article/dom.html");
+        QVERIFY(fixture.open(QIODevice::ReadOnly));
+        QSignalSpy ready(view.bridge, &ArticleBridge::bridgeReady);
+        view.setHtml(QString::fromUtf8(fixture.readAll())); WAIT_FOR(ready.size() == 1);
+        auto answer = std::make_shared<std::optional<QString>>();
+        view.bridge->run(QString::fromUtf8(R"JS((() => {
+          const node = document.createElement('span');
+          node.textContent = '𐐀word';
+          node.style.cssText = 'position:fixed;left:40px;top:40px;font:24px monospace;z-index:2147483647';
+          document.body.appendChild(node);
+          const range = document.createRange();
+          range.setStart(node.firstChild, 0);
+          range.setEnd(node.firstChild, 2);
+          const rect = range.getBoundingClientRect();
+          const word = gdWordAtPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+          node.remove();
+          return word;
+        })())JS"), [answer](QVariant const &value) { *answer = value.toString(); });
+        WAIT_FOR(answer->has_value());
+        QCOMPARE(**answer, QString::fromUtf8("𐐀word"));
+        QVERIFY(!(**answer).contains(QChar(0xfffd)));
+        for (qsizetype i = 0; i < (**answer).size(); ++i)
+            if ((**answer).at(i).isSurrogate()) {
+                QVERIFY((**answer).at(i).isHighSurrogate());
+                QVERIFY(i + 1 < (**answer).size() && (**answer).at(++i).isLowSurrogate());
+            }
+    }
+
+    void wordFallbackThroughRealDom_data()
+    {
+        QTest::addColumn<QString>("caretSetup");
+        QTest::newRow("native") << QString();
+        QTest::newRow("range-only") << QString("document.caretPositionFromPoint=undefined;");
+        QTest::newRow("position-null") << QString("document.caretPositionFromPoint=()=>null;");
+        QTest::newRow("position-throws") << QString("document.caretPositionFromPoint=()=>{throw Error('unavailable')};");
+        QTest::newRow("both-null") << QString("document.caretPositionFromPoint=()=>null;document.caretRangeFromPoint=()=>null;");
+        QTest::newRow("both-throw") << QString("document.caretPositionFromPoint=document.caretRangeFromPoint=()=>{throw Error('unavailable')};");
+        QTest::newRow("foreign-root") << QString("const foreign=document.createElement('span').attachShadow({mode:'open'});"
+            "foreign.textContent='foreign';document.caretPositionFromPoint=()=>({offsetNode:foreign.firstChild,offset:1});"
+            "document.caretRangeFromPoint=()=>null;");
+    }
+    void wordFallbackThroughRealDom()
+    {
+        QFETCH(QString, caretSetup);
+        QDeadlineTimer deadline(10000);
+        Browser b;
+        ArticleWebView view; view.resize(720, 480); view.show();
+        view.configure(b.controller->profile(), &b.cfg);
+        QFile fixture(TestSupport::repositoryRoot() + "/tests/fixtures/article/dom.html");
+        QVERIFY(fixture.open(QIODevice::ReadOnly));
+        QSignalSpy ready(view.bridge, &ArticleBridge::bridgeReady);
+        view.setHtml(QString::fromUtf8(fixture.readAll())); WAIT_FOR(ready.size() == 1);
+        auto answer = std::make_shared<std::optional<QStringList>>();
+        view.bridge->run("(() => {" + caretSetup + QString::fromUtf8(R"JS(
+          const result = [];
+          for (const [id, offset, length] of [['word-latin',1,1],['word-cyrillic',1,1],
+              ['word-cjk',1,1],['word-combining',0,2],['word-apostrophe',1,1]]) {
+            const n=document.getElementById(id).firstChild, r=document.createRange();
+            r.setStart(n,offset);r.setEnd(n,offset+length);const b=r.getBoundingClientRect();
+            result.push(gdWordAtPoint(b.x+b.width/2,b.y+b.height/2));
+          }
+          const n=document.createElement('span');n.textContent='𐐀word !  ';
+          n.style.cssText='position:fixed;left:40px;top:40px;font:24px monospace;z-index:2147483647';
+          document.body.append(n);
+          for (const [start,end] of [[0,2],[7,8],[8,9]]) {
+            const r=document.createRange();r.setStart(n.firstChild,start);r.setEnd(n.firstChild,end);
+            const b=r.getBoundingClientRect();result.push(gdWordAtPoint(b.x+b.width/2,b.y+b.height/2));
+          }
+          n.remove();result.push(gdWordAtPoint(-10,-10));return result;
+        })())JS"), [answer](QVariant const &value) { *answer = value.toStringList(); });
+        WAIT_FOR(answer->has_value());
+        QCOMPARE(**answer, (QStringList{QStringLiteral("latin"), QString::fromUtf8("Привет"),
+            QString::fromUtf8("中文词条"), QString::fromUtf8("é"), QString::fromUtf8("rock’n’roll"),
+            QString::fromUtf8("𐐀word"), QString(), QString(), QString()}));
     }
 
     void domHelpersQuotingSelectionHighlightsAndRestore()

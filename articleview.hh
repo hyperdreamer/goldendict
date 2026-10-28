@@ -119,13 +119,19 @@ private slots:
   void on_highlightAllButton_clicked();
   void on_ftsSearchPrevious_clicked();
   void on_ftsSearchNext_clicked();
-  void doubleClicked( QPoint );
+  void doubleClicked( QPoint, Qt::KeyboardModifiers );
   void audioPlayerError( QString const & );
   void copyAsText();
   void inspect();
 private:
+  friend class ArticleBridgeTest;
+  static constexpr int InteractionDeadlineMs = 500;
   struct State;
   struct Capture;
+  struct Hit;
+  void requestHit( QPoint const &, std::function<void(QVariantMap const &)> );
+  void finishHit( std::shared_ptr<Hit> const &, QVariantMap const & );
+  bool isFramedArticle( QString const & ) const;
   std::unique_ptr<State> d;
   ArticleNetworkAccessManager & articleNetMgr;
   AudioPlayerPtr const & audioPlayer;
