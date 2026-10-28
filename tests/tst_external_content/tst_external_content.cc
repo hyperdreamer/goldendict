@@ -59,7 +59,7 @@ struct CallbackGate
 struct Observation
 {
     bool substitute = false;
-    QUrl request, firstParty, initiator, expectedRedirect;
+    QUrl request, firstParty, initiator, expectedRedirect, realInitiator;
     int requests = 0, firstParties = 0, initiators = 0, blocks = 0, redirects = 0;
     bool blocked = false;
     QUrl redirected;
@@ -181,6 +181,7 @@ QUrl __wrap__ZNK24QWebEngineUrlRequestInfo9initiatorEv(QWebEngineUrlRequestInfo 
     auto o = observations.value(request);
     if (!o) return real;
     ++o->initiators;
+    o->realInitiator = real;
     return o->substitute ? o->initiator : real;
 }
 void __wrap__ZN24QWebEngineUrlRequestInfo5blockEb(QWebEngineUrlRequestInfo *info, bool block)
@@ -390,7 +391,8 @@ struct RealArticleFixture
     Config::Class firstConfig;
     Config::Class secondConfig;
     sptr<TestSupport::FixtureDictionary> dictionary{new TestSupport::FixtureDictionary};
-    std::vector<sptr<Dictionary::Class>> dictionaries{dictionary};
+    sptr<TestSupport::FixtureDictionary> otherDictionary{new TestSupport::FixtureDictionary("dict-b", "Fixture Dictionary B")};
+    std::vector<sptr<Dictionary::Class>> dictionaries{dictionary, otherDictionary};
     Instances::Groups groups;
     ArticleMaker maker{dictionaries, groups, {}, {}};
     ArticleNetworkAccessManager resources{nullptr, dictionaries, maker,
@@ -401,10 +403,11 @@ struct RealArticleFixture
     QAction search;
     HttpFixture originA, originB, originC;
 
-    RealArticleFixture()
+    explicit RealArticleFixture(bool blocking = true, bool proxy = false)
     {
         controllerConfig.preferences.maxNetworkCacheSize = 0;
-        controllerConfig.preferences.disallowContentFromOtherSites = true;
+        controllerConfig.preferences.disallowContentFromOtherSites = blocking;
+        controllerConfig.preferences.proxyServer.enabled = proxy;
         firstConfig = controllerConfig;
         secondConfig = controllerConfig;
 
@@ -414,6 +417,11 @@ struct RealArticleFixture
         groups.push_back(group);
 
         dictionary->setResources({{QStringLiteral("fixture-image.png"), HttpFixture::pixelPng()}});
+        if (!proxy) construct();
+    }
+
+    void construct()
+    {
         controller = std::make_unique<ArticleProfileController>(controllerConfig, resources, nullptr);
     }
 
@@ -434,21 +442,25 @@ struct RealArticleFixture
         return result;
     }
 
+    static QString entryBody()
+    {
+        // ArticleMaker supplies the real document header, dictionary wrappers,
+        // bootstrap and footer. Keep the backend body substantial and avoid
+        // nesting the standalone HTTP fixture's duplicate dictionary IDs.
+        return QStringLiteral(
+            "<h1 id='headword'>fixture-headword</h1>"
+            "<p id='multilingual'>Привет 中文 العربية 😀 é</p>"
+            "<p id='long-text'>%1</p>"
+            "<div class='dsl_opt'>Optional dictionary material</div>")
+            .arg(QStringLiteral("A complete dictionary entry with pronunciation, meaning and usage. ").repeated(100));
+    }
+
     QByteArray articleBody(QUrl const & fileUrl) const
     {
         QString const a = originA.url("/").toString();
         QString const b = originB.url("/").toString();
         QString const c = originC.url("/").toString();
         QString const pixel = QString::fromLatin1(HttpFixture::pixelPng().toBase64());
-        // ArticleMaker supplies the real document header, dictionary wrappers,
-        // bootstrap and footer. Keep the backend body substantial and avoid
-        // nesting the standalone HTTP fixture's duplicate dictionary IDs.
-        QString const body = QStringLiteral(
-            "<h1 id='headword'>fixture-headword</h1>"
-            "<p id='multilingual'>Привет 中文 العربية 😀 é</p>"
-            "<p id='long-text'>%1</p>"
-            "<div class='dsl_opt'>Optional dictionary material</div>")
-            .arg(QStringLiteral("A complete dictionary entry with pronunciation, meaning and usage. ").repeated(100));
         QString const probes = QStringLiteral(
             "<section id='external-policy-probes'>"
             "<style id='remote-import'>"
@@ -475,7 +487,7 @@ struct RealArticleFixture
             "})();</script>"
             "</section>")
             .arg(a, b, c, fileUrl.toString(QUrl::FullyEncoded), pixel);
-        return (body + probes).toUtf8();
+        return (entryBody() + probes).toUtf8();
     }
 };
 
@@ -489,9 +501,10 @@ class ArticleDomProbe
         bool pending = false;
     };
     QPointer<ArticleWebView> view;
+    QString frameName;
     std::shared_ptr<State> state = std::make_shared<State>();
 public:
-    explicit ArticleDomProbe(ArticleWebView *owner): view(owner) {}
+    explicit ArticleDomProbe(ArticleWebView *owner, QString const &frame = {}): view(owner), frameName(frame) {}
     QVariantMap sample()
     {
         if (!view) return {};
@@ -505,7 +518,7 @@ public:
         }
         if (state->pending) return state->value;
         state->pending = true;
-        page->runJavaScript(QStringLiteral(R"JS(
+        QString const script = QStringLiteral(R"JS(
         (function () {
             function width(id) {
                 var element = document.getElementById(id);
@@ -528,17 +541,40 @@ public:
                 bodyLength: document.getElementById('long-text')?.textContent.length || 0,
                 wrappers: document.querySelectorAll('#gdfrom-dict-a').length,
                 ownedFile: width('owned-file'),
+                ownedFileSource: document.getElementById('owned-file')?.getAttribute('src') || '',
                 ownedAgain: width('owned-again'),
                 foreignFile: width('foreign-file'),
                 fileProbeDone: window.fileProbeDone === true,
-                foreignFileDone: window.foreignFileDone === true
+                liveDone: window.livePolicyDone === true,
+                liveToken: window.livePolicyToken || '',
+                frameLocation: location.href,
+                bodyText: document.body?.textContent || '',
+                deniedMarker: document.body?.textContent.includes('deny-marker') || false,
+                opaqueDone: window.opaqueDone === true,
+                opaqueOrigin: window.origin,
+                opaqueImage: width('opaque-image'),
+                firstMarker: document.getElementById('first-marker')?.textContent || '',
+                fetchMarker: document.getElementById('fetch-marker')?.textContent || '',
+                relativeImage: width('relative-image'),
+                sameOrigin: width('same-origin'),
+                crossDone: window.crossDone === true,
+                crossToken: window.crossToken || '',
+                crossB: width('cross-b'),
+                crossC: width('cross-c')
             };
         })()
-    )JS"), [owner = view, page, bridge, generation, result = state](QVariant const &value) {
+    )JS");
+        auto callback = [owner = view, page, bridge, generation, result = state](QVariant const &value) {
             if (!owner || !page || owner->page() != page || !bridge || bridge->generation() != generation) return;
             result->value = value.toMap();
             result->pending = false;
-        });
+        };
+        if (frameName.isEmpty()) page->runJavaScript(script, callback);
+        else {
+            auto frame = page->findFrameByName(frameName);
+            if (!frame || !frame->isValid()) { state->pending = false; return {}; }
+            frame->runJavaScript(script, callback);
+        }
         return state->value;
     }
 };
@@ -666,6 +702,8 @@ private slots:
         row("data", "data:text/plain,hello", "", "", {}, true);
         row("about", "about:blank", "", "", {}, true);
         row("blob", "blob:https://dict.example/token", "", "", {}, true);
+        row("ftp-blocked", "ftp://example.org/file.png", "gdlookup://localhost/", "gdlookup://localhost/", {}, false);
+        row("ftp-flag-off", "ftp://example.org/file.png", "gdlookup://localhost/", "gdlookup://localhost/", {}, true, false);
         row("unknown-blocked", "unhandled://example.org/x", "", "", {}, false);
         row("unknown-flag-off", "unhandled://example.org/x", "", "", {}, true, false);
         row("https-flag-off", "https://unrelated.example/x", "", "", {}, true, false);
@@ -778,17 +816,46 @@ private slots:
 
     void absentInitiatorCannotUseDictionaryHosts()
     {
-        QDeadlineTimer deadline(10000);
-        HttpFixture origin;
-        QVERIFY2(origin.start(QHostAddress("127.0.0.1")), qPrintable(origin.errorString()));
-        Browser b;
-        QWebEnginePage page(b.controller->profile());
-        b.publish(page, {"127.0.0.1"});
-        QSignalSpy finished(&page, &QWebEnginePage::loadFinished);
-        page.setHtml(QString("<img src='%1'>").arg(origin.url("/opaque.png").toString()));
-        WAIT_FOR(!finished.isEmpty());
-        QVERIFY(finished.constLast().at(0).toBool());
-        QCOMPARE(origin.requestCount("/opaque.png"), 0);
+        QDeadlineTimer deadline(15000);
+        RealArticleFixture f;
+        QVERIFY2(f.originA.start(QHostAddress("127.0.0.1")), qPrintable(f.originA.errorString()));
+        f.publishHost(f.firstConfig, "contributing", f.originA.url("/"));
+        QUrl const blockedUrl = f.originA.url("/opaque-blocked.png");
+        auto blocked = observe(blockedUrl);
+        QString const opaqueDocument = QStringLiteral(
+            "<img id='opaque-image' onload='window.opaqueDone=true' onerror='window.opaqueDone=true' src='%1'>")
+            .arg(blockedUrl.toString());
+        f.dictionary->setArticleBody((RealArticleFixture::entryBody() + QStringLiteral(
+            "<iframe name='opaque' sandbox='allow-scripts' srcdoc=\"%1\"></iframe>")
+            .arg(opaqueDocument.toHtmlEscaped())).toUtf8());
+        auto view = f.view(f.firstConfig);
+        auto *web = view->findChild<ArticleWebView *>();
+        QVERIFY(web);
+        QSignalSpy loaded(view.get(), &ArticleView::pageLoaded);
+        view->showDefinition("opaque-initiator", QStringList{"dict-a"}, FtsHighlightSpec{}, 17, false);
+        WAIT_FOR(realArticleLoaded(*view, loaded, 0, "opaque-initiator"));
+        QCOMPARE(view->getArticlesList(), QStringList{"dict-a"});
+        ArticleDomProbe opaque(web, "opaque");
+        WAIT_FOR(opaque.sample().value("opaqueDone").toBool());
+        QCOMPARE(opaque.sample().value("opaqueOrigin").toString(), "null");
+        QCOMPARE(opaque.sample().value("opaqueImage").toInt(), 0);
+        QCOMPARE(f.originA.requestCount("/opaque-blocked.png"), 0);
+        auto result = snapshot(blocked);
+        QCOMPARE(result.blocks, 1);
+        QVERIFY(result.initiators > 0);
+        QVERIFY(result.realInitiator.scheme().isEmpty());
+        QVERIFY(!result.substitute);
+
+        f.controllerConfig.preferences.disallowContentFromOtherSites = false;
+        f.controller->applyPreferences();
+        auto frame = web->page()->findFrameByName("opaque");
+        QVERIFY(frame && frame->isValid());
+        frame->runJavaScript(QStringLiteral(
+            "window.opaqueDone=false;document.getElementById('opaque-image').src='%1'")
+            .arg(f.originA.url("/opaque-allowed.png").toString()));
+        WAIT_FOR(opaque.sample().value("opaqueDone").toBool()
+                 && opaque.sample().value("opaqueImage").toInt() == 1);
+        QCOMPARE(f.originA.requestCount("/opaque-allowed.png"), 1);
     }
 
     void diagnosticsFollowSnapshotAndRedactCredentials()
@@ -838,6 +905,7 @@ private slots:
         local.flush();
         QUrl const emittedFile = QUrl::fromLocalFile('/' + QFileInfo(local.fileName()).fileName());
         f.dictionary->setArticleBody(f.articleBody(emittedFile));
+        auto unknown = observe(QUrl("unknown-fixture://example/blocked.png"));
 
         auto first = f.view(f.firstConfig);
         auto second = f.view(f.secondConfig);
@@ -897,48 +965,61 @@ private slots:
         QCOMPARE(firstState.value("data").toInt(), 1);
         QCOMPARE(firstState.value("blob").toInt(), 1);
         QCOMPARE(firstState.value("unknown").toInt(), 0);
+        QCOMPARE(snapshot(unknown).blocks, 2);
         QVERIFY(firstState.value("aboutDocument").toBool());
 
+        // Apply preferences to the current documents. Fresh URLs and image
+        // completion events make a missing controller refresh observable.
+        auto liveImages = [&](QWebEnginePage &page, QString const &token) {
+            page.runJavaScript(QStringLiteral(R"JS((() => {
+                window.livePolicyDone = false; window.livePolicyToken = '%1';
+                let remaining = 3;
+                for (const [id, src] of [['remote-a','%2'], ['remote-b','%3'], ['remote-c','%4']]) {
+                    const image = document.getElementById(id);
+                    image.onload = image.onerror = () => { if (--remaining === 0) window.livePolicyDone = true; };
+                    image.src = src + '?live-policy=%1';
+                }
+            })())JS").arg(token, f.originA.url("/external-a.png").toString(),
+                        f.originB.url("/external-b.png").toString(), f.originC.url("/external-c.png").toString()));
+        };
+        auto liveFinished = [](ArticleDomProbe &probe, QString const &token) {
+            auto const state = probe.sample();
+            return state.value("liveToken").toString() == token && state.value("liveDone").toBool();
+        };
         f.originA.clearRequests();
         f.originB.clearRequests();
         f.originC.clearRequests();
         f.controllerConfig.preferences.disallowContentFromOtherSites = false;
-        f.firstConfig.preferences.disallowContentFromOtherSites = false;
-        f.secondConfig.preferences.disallowContentFromOtherSites = false;
         f.controller->applyPreferences();
-        auto reload = [&](QWebEnginePage & page, QSignalSpy & finished) {
-            int const before = finished.size();
-            page.triggerAction(QWebEnginePage::ReloadAndBypassCache);
-            WAIT_FOR(finished.size() > before);
-        };
-        reload(*firstPage, firstPages);
-        reload(*secondPage, secondPages);
-        WAIT_FOR(f.originA.requestCount("/external-a.png") == 2
-                 && f.originB.requestCount("/external-b.png") == 2
-                 && f.originC.requestCount("/external-c.png") == 2
-                 && f.originA.requestCount("/article/style.css") == 2
-                 && f.originB.requestCount("/article/style.css") == 2
-                 && f.originC.requestCount("/article/style.css") == 2
-                 && f.originA.requestCount("/deny-frame") == 2
-                 && f.originB.requestCount("/deny-csp") == 2);
+        liveImages(*firstPage, "allowed");
+        liveImages(*secondPage, "allowed");
+        WAIT_FOR(liveFinished(firstDom, "allowed"));
+        WAIT_FOR(liveFinished(secondDom, "allowed"));
+        QCOMPARE(f.originA.requestCount("/external-a.png"), 2);
+        QCOMPARE(f.originB.requestCount("/external-b.png"), 2);
+        QCOMPARE(f.originC.requestCount("/external-c.png"), 2);
+        for (auto const &state : {firstDom.sample(), secondDom.sample()}) {
+            QCOMPARE(state.value("remoteA").toInt(), 1);
+            QCOMPARE(state.value("remoteB").toInt(), 1);
+            QCOMPARE(state.value("remoteC").toInt(), 1);
+        }
 
         f.originA.clearRequests();
         f.originB.clearRequests();
         f.originC.clearRequests();
         f.controllerConfig.preferences.disallowContentFromOtherSites = true;
-        f.firstConfig.preferences.disallowContentFromOtherSites = true;
-        f.secondConfig.preferences.disallowContentFromOtherSites = true;
         f.controller->applyPreferences();
-        reload(*firstPage, firstPages);
-        reload(*secondPage, secondPages);
-        WAIT_FOR(f.originA.requestCount("/external-a.png") == 1
-                 && f.originB.requestCount("/external-b.png") == 1
-                 && f.originC.requestCount("/external-c.png") == 0
-                 && f.originA.requestCount("/article/style.css") == 1
-                 && f.originB.requestCount("/article/style.css") == 1
-                 && f.originC.requestCount("/article/style.css") == 0
-                 && f.originA.requestCount("/deny-frame") == 1
-                 && f.originB.requestCount("/deny-csp") == 1);
+        liveImages(*firstPage, "restricted");
+        liveImages(*secondPage, "restricted");
+        WAIT_FOR(liveFinished(firstDom, "restricted"));
+        WAIT_FOR(liveFinished(secondDom, "restricted"));
+        QCOMPARE(f.originA.requestCount("/external-a.png"), 1);
+        QCOMPARE(f.originB.requestCount("/external-b.png"), 1);
+        QCOMPARE(f.originC.requestCount("/external-c.png"), 0);
+        QCOMPARE(firstDom.sample().value("remoteA").toInt(), 1);
+        QCOMPARE(firstDom.sample().value("remoteB").toInt(), 0);
+        QCOMPARE(secondDom.sample().value("remoteA").toInt(), 0);
+        QCOMPARE(secondDom.sample().value("remoteB").toInt(), 1);
 
         f.originA.clearRequests();
         f.originB.clearRequests();
@@ -958,6 +1039,23 @@ private slots:
         QCOMPARE(refreshed.value("remoteA").toInt(), 0);
         QCOMPARE(refreshed.value("remoteB").toInt(), 0);
         QCOMPARE(refreshed.value("remoteC").toInt(), 1);
+        liveImages(*secondPage, "after-other-navigation");
+        WAIT_FOR(liveFinished(secondDom, "after-other-navigation"));
+        QCOMPARE(f.originA.requestCount("/external-a.png"), 0);
+        QCOMPARE(f.originB.requestCount("/external-b.png"), 1);
+        QCOMPARE(f.originC.requestCount("/external-c.png"), 1);
+
+        QPointer<ArticleRequestInterceptor> retired(firstPolicy), survivor(secondPolicy);
+        QPointer<QWebEnginePage> retiredPage(firstPage);
+        first.reset();
+        QVERIFY(retired.isNull());
+        QVERIFY(retiredPage.isNull());
+        QCOMPARE(survivor.data(), secondPolicy);
+        liveImages(*secondPage, "after-other-destruction");
+        WAIT_FOR(liveFinished(secondDom, "after-other-destruction"));
+        QCOMPARE(f.originA.requestCount("/external-a.png"), 0);
+        QCOMPARE(f.originB.requestCount("/external-b.png"), 2);
+        QCOMPARE(f.originC.requestCount("/external-c.png"), 1);
     }
 
     void completeArticleFileMappingsArePageLocal()
@@ -972,8 +1070,14 @@ private slots:
         QCOMPARE(secondFile.write(HttpFixture::pixelPng()), qint64(HttpFixture::pixelPng().size()));
         firstFile.flush();
         secondFile.flush();
-        QUrl const firstEmitted = QUrl::fromLocalFile('/' + QFileInfo(firstFile.fileName()).fileName());
-        QUrl const secondEmitted = QUrl::fromLocalFile('/' + QFileInfo(secondFile.fileName()).fileName());
+        QUrl firstEmitted = QUrl::fromLocalFile('/' + QFileInfo(firstFile.fileName()).fileName());
+        QUrl secondEmitted = QUrl::fromLocalFile('/' + QFileInfo(secondFile.fileName()).fileName());
+        // A fresh URL avoids Blink's decoded-image cache. Contexts publish
+        // these aliases before navigation; the body exercises the GUI retry.
+        firstEmitted.setQuery("policy-probe=one");
+        secondEmitted.setQuery("policy-probe=two");
+        QUrl const firstFixed = QUrl::fromLocalFile(QFileInfo(firstFile.fileName()).canonicalFilePath());
+        QUrl const secondFixed = QUrl::fromLocalFile(QFileInfo(secondFile.fileName()).canonicalFilePath());
         QVERIFY(!QFile::exists(firstEmitted.toLocalFile()));
         QVERIFY(!QFile::exists(secondEmitted.toLocalFile()));
         f.firstConfig.webSites.clear();
@@ -981,7 +1085,7 @@ private slots:
 
         f.dictionary->setArticleBody(
             QStringLiteral("<h1 id='headword'>file-one</h1><img id='owned-file' src='%1'>")
-                .arg(firstEmitted.toString(QUrl::FullyEncoded)).toUtf8());
+                .arg(firstEmitted.adjusted(QUrl::RemoveQuery).toString(QUrl::FullyEncoded)).toUtf8());
         auto first = f.view(f.firstConfig);
         auto second = f.view(f.secondConfig);
         auto *firstWeb = first->findChild<ArticleWebView *>();
@@ -992,21 +1096,23 @@ private slots:
         ArticleDomProbe firstDom(firstWeb), secondDom(secondWeb);
         QSignalSpy firstPages(first.get(), &ArticleView::pageLoaded);
         QSignalSpy secondPages(second.get(), &ArticleView::pageLoaded);
-        first->showDefinition("file-one", QStringList{"dict-a"}, FtsHighlightSpec{}, 17, false);
+        first->showDefinition("file-one", 17, {}, {{"local-file", firstEmitted.toString(QUrl::FullyEncoded)}});
         WAIT_FOR(realArticleLoaded(*first, firstPages, 0, "file-one"));
-        WAIT_FOR(firstDom.sample().value("ownedFile").toInt() == 1);
+        WAIT_FOR(firstDom.sample().value("ownedFile").toInt() == 1
+                 && firstDom.sample().value("ownedFileSource").toString() == firstFixed.toString(QUrl::FullyEncoded));
 
         f.dictionary->setArticleBody(
             QStringLiteral("<h1 id='headword'>file-two</h1><img id='owned-file' src='%1'>")
-                .arg(secondEmitted.toString(QUrl::FullyEncoded)).toUtf8());
-        second->showDefinition("file-two", QStringList{"dict-a"}, FtsHighlightSpec{}, 17, false);
+                .arg(secondEmitted.adjusted(QUrl::RemoveQuery).toString(QUrl::FullyEncoded)).toUtf8());
+        second->showDefinition("file-two", 17, {}, {{"local-file", secondEmitted.toString(QUrl::FullyEncoded)}});
         WAIT_FOR(realArticleLoaded(*second, secondPages, 0, "file-two"));
-        WAIT_FOR(secondDom.sample().value("ownedFile").toInt() == 1);
+        WAIT_FOR(secondDom.sample().value("ownedFile").toInt() == 1
+                 && secondDom.sample().value("ownedFileSource").toString() == secondFixed.toString(QUrl::FullyEncoded));
 
         auto firstRedirect = observe(firstEmitted);
         auto secondRedirect = observe(secondEmitted);
-        firstRedirect->expectedRedirect = QUrl::fromLocalFile(firstFile.fileName());
-        secondRedirect->expectedRedirect = QUrl::fromLocalFile(secondFile.fileName());
+        firstRedirect->expectedRedirect = firstFixed;
+        secondRedirect->expectedRedirect = secondFixed;
         auto probeFiles = [](QWebEnginePage &page, QUrl const &own, QUrl const &foreign) {
             page.runJavaScript(QStringLiteral(
                 "window.fileProbeDone=false;var remaining=2;"
@@ -1048,41 +1154,78 @@ private slots:
     }
     void realFrameOwnOriginAndCrossOriginBarrier()
     {
-        QDeadlineTimer deadline(15000);
-        HttpFixture a, c, third;
+        QDeadlineTimer deadline(20000);
+        RealArticleFixture f;
+        auto &a = f.originA, &b = f.originB, &third = f.originC;
         QVERIFY2(a.start(QHostAddress("127.0.0.1")), qPrintable(a.errorString()));
-        QVERIFY2(c.start(QHostAddress("127.0.0.2")), qPrintable(c.errorString()));
+        QVERIFY2(b.start(QHostAddress("127.0.0.2")), qPrintable(b.errorString()));
         QVERIFY2(third.start(QHostAddress("127.0.0.3")), qPrintable(third.errorString()));
-        Browser b;
-        QWebEnginePage page(b.controller->profile());
-        b.publish(page, {"127.0.0.1", "127.0.0.2", "127.0.0.3"});
-        auto url = b.article(QString("<iframe name='remote' src='%1'></iframe><iframe src='%2'></iframe><iframe src='%3'></iframe>")
-            .arg(a.url("/redirect").toString(), third.url("/deny-frame").toString(), third.url("/deny-csp").toString()).toUtf8());
-        QSignalSpy done(&page, &QWebEnginePage::loadFinished);
-        page.load(url); WAIT_FOR(!done.isEmpty());
+        f.publishHost(f.firstConfig, "A", a.url("/"));
+        f.firstConfig.webSites.append(Config::WebSite("dict-b", "B", b.url("/").toString(), true, {}, true));
+        f.dictionary->setArticleBody((RealArticleFixture::entryBody() + QStringLiteral(
+            "<img id='application-b' src='%1'>"
+            "<iframe id='gdexpandframe-dict-a' name='gdexpandframe-dict-a' src='%2'></iframe>"
+            "<iframe name='xfo' src='%3'></iframe>"
+            "<iframe name='csp' src='%4'></iframe>")
+            .arg(b.url("/application-b.png").toString(), a.url("/redirect").toString(),
+                 a.url("/deny-frame").toString(), a.url("/deny-csp").toString())).toUtf8());
+        auto view = f.view(f.firstConfig);
+        auto *web = view->findChild<ArticleWebView *>();
+        QVERIFY(web);
+        auto *page = web->page();
+        QSignalSpy done(view.get(), &ArticleView::pageLoaded);
+        view->showDefinition("frame-policy", 17);
+        WAIT_FOR(realArticleLoaded(*view, done, 0, "frame-policy"));
+        QCOMPARE(view->getArticlesList(), (QStringList{"dict-a", "dict-b"}));
+        QCOMPARE(b.requestCount("/application-b.png"), 1);
         QCOMPARE(a.requestCount("/redirect"), 1);
         QCOMPARE(a.requestCount("/dir/first.html"), 1);
         QCOMPARE(a.requestCount("/dir/style.css"), 1);
-        // The fixture references the pixel from both HTML and CSS; with
-        // NoCache Chromium can legitimately issue two requests.
         QVERIFY(a.requestCount("/dir/pixel.png") >= 1);
         WAIT_FOR(a.requestCount("/dir/data.json") == 1);
-        QCOMPARE(third.requestCount("/deny-frame"), 1);
-        QCOMPARE(third.requestCount("/deny-csp"), 1);
-        auto frame = page.findFrameByName("remote"); QVERIFY(frame && frame->isValid());
-        QString const cross = c.url("/cross.png").toString();
-        frame->runJavaScript(QString("window.crossDone=false;let img=new Image;img.onload=img.onerror=()=>window.crossDone=true;img.src='%1';document.body.append(img)").arg(cross));
-        // The state is owned by the real remote frame, not an arbitrary delay.
-        auto remoteState = std::make_shared<bool>(false);
-        WAIT_FOR(([&] {
-            frame->runJavaScript("window.crossDone===true", [remoteState](QVariant const &v) { *remoteState = v.toBool(); });
-            return *remoteState;
-        })());
-        QCOMPARE(c.requestCount("/cross.png"), 0);
-        b.cfg.preferences.disallowContentFromOtherSites = false;
-        b.controller->applyPreferences();
-        frame->runJavaScript(QString("let img2=new Image;img2.src='%1';document.body.append(img2)").arg(c.url("/unblocked.png").toString()));
-        WAIT_FOR(c.requestCount("/unblocked.png") == 1);
+        QCOMPARE(a.requestCount("/deny-frame"), 1);
+        QCOMPARE(a.requestCount("/deny-csp"), 1);
+        ArticleDomProbe remote(web, "gdexpandframe-dict-a"), xfo(web, "xfo"), csp(web, "csp");
+        WAIT_FOR(remote.sample().value("fetchMarker").toString() == "real-origin-fetch");
+        QCOMPARE(remote.sample().value("firstMarker").toString(), "first page");
+        WAIT_FOR(xfo.sample().value("frameLocation").toString().startsWith("chrome-error:"));
+        WAIT_FOR(csp.sample().value("frameLocation").toString().startsWith("chrome-error:"));
+        QVERIFY(!xfo.sample().value("deniedMarker").toBool());
+        QVERIFY(!csp.sample().value("deniedMarker").toBool());
+
+        auto frame = page->findFrameByName("gdexpandframe-dict-a");
+        QVERIFY(frame && frame->isValid());
+        auto crossImages = [&](QString const &token) {
+            frame->runJavaScript(QStringLiteral(R"JS((() => {
+                window.crossDone=false; window.crossToken='%1'; let remaining=3;
+                for (const [id,src] of [['cross-b','%2'],['cross-c','%3'],['same-origin','%4']]) {
+                    document.getElementById(id)?.remove();
+                    const image=new Image(); image.id=id;
+                    image.onload=image.onerror=()=>{if (--remaining===0) window.crossDone=true;};
+                    image.src=src+'?phase=%1'; document.body.append(image);
+                }
+            })())JS").arg(token, b.url("/cross-b.png").toString(), third.url("/cross-c.png").toString(),
+                         a.url("/frame-own.png").toString()));
+        };
+        crossImages("blocked");
+        WAIT_FOR(remote.sample().value("crossToken").toString() == "blocked" && remote.sample().value("crossDone").toBool());
+        // B contributed to the real article, but the HTTP frame may not borrow
+        // the application's dictionary privilege. The unrelated third host
+        // must not receive any request either.
+        QCOMPARE(a.requestCount("/frame-own.png"), 1);
+        QCOMPARE(remote.sample().value("sameOrigin").toInt(), 1);
+        QCOMPARE(b.requestCount("/cross-b.png"), 0);
+        QCOMPARE(third.requests().size(), 0);
+        QCOMPARE(remote.sample().value("crossB").toInt(), 0);
+        QCOMPARE(remote.sample().value("crossC").toInt(), 0);
+        f.controllerConfig.preferences.disallowContentFromOtherSites = false;
+        f.controller->applyPreferences();
+        crossImages("allowed");
+        WAIT_FOR(remote.sample().value("crossToken").toString() == "allowed" && remote.sample().value("crossDone").toBool());
+        QCOMPARE(b.requestCount("/cross-b.png"), 1);
+        QCOMPARE(third.requestCount("/cross-c.png"), 1);
+        QCOMPARE(remote.sample().value("crossB").toInt(), 1);
+        QCOMPARE(remote.sample().value("crossC").toInt(), 1);
     }
 
     void precomputedFilesSurvivePreferenceReplacement()
@@ -1224,22 +1367,35 @@ private slots:
         QFETCH(bool, accept);
         QDeadlineTimer deadline(12000);
         HttpFixture origin; QVERIFY2(origin.start(QHostAddress("127.0.0.1")), qPrintable(origin.errorString()));
-        Browser b(false);
-        b.cfg.preferences.proxyServer.user = "preserve-proxy";
-        b.cfg.preferences.proxyServer.password = "preserve-proxy-secret";
-        QWebEnginePage page(b.controller->profile()); b.attach(page); b.controller->attachPage(&page);
-        QSignalSpy auth(&page, &QWebEnginePage::authenticationRequired), proxy(&page, &QWebEnginePage::proxyAuthenticationRequired);
+        RealArticleFixture f(false);
+        f.controllerConfig.preferences.proxyServer.user = "preserve-proxy";
+        f.controllerConfig.preferences.proxyServer.password = "preserve-proxy-secret";
+        f.dictionary->setArticleBody((RealArticleFixture::entryBody() + QStringLiteral("<iframe name='authenticated' src='%1'></iframe>")
+            .arg(origin.url("/auth").toString())).toUtf8());
+        auto view = f.view(f.firstConfig);
+        auto *web = view->findChild<ArticleWebView *>();
+        QVERIFY(web);
+        auto *page = web->page();
+        QSignalSpy auth(page, &QWebEnginePage::authenticationRequired), proxy(page, &QWebEnginePage::proxyAuthenticationRequired);
         DialogAnswer answer; answer.accept = accept;
         answer.user = HttpFixture::originUser(); answer.password = HttpFixture::originPassword();
-        QSignalSpy done(&page, &QWebEnginePage::loadFinished);
-        page.load(origin.url("/auth")); WAIT_FOR(!done.isEmpty());
+        QSignalSpy done(view.get(), &ArticleView::pageLoaded);
+        view->showDefinition("origin-authentication", 17);
+        WAIT_FOR(realArticleLoaded(*view, done, 0, "origin-authentication"));
         QCOMPARE(auth.size(), 1); QCOMPARE(proxy.size(), 0); QCOMPARE(answer.dialogs, 1);
         QVERIFY(answer.label.contains("http://127.0.0.1:" + QString::number(origin.port())));
         QVERIFY(answer.label.contains(HttpFixture::originRealm()));
-        QCOMPARE(b.cfg.preferences.proxyServer.user, "preserve-proxy");
-        QCOMPARE(b.cfg.preferences.proxyServer.password, "preserve-proxy-secret");
+        QCOMPARE(f.controllerConfig.preferences.proxyServer.user, "preserve-proxy");
+        QCOMPARE(f.controllerConfig.preferences.proxyServer.password, "preserve-proxy-secret");
         QCOMPARE(origin.requests().constLast().originAuthorized, accept);
-        if (accept) QVERIFY(javascript(page, "document.body.textContent", deadline).toString().contains("origin-authenticated"));
+        QVERIFY(!QApplication::activeModalWidget());
+        if (accept) {
+            ArticleDomProbe authenticated(web, "authenticated");
+            WAIT_FOR(authenticated.sample().value("bodyText").toString().contains("origin-authenticated"));
+        }
+        QPointer<QWebEnginePage> retired(page);
+        view.reset();
+        QVERIFY(retired.isNull());
     }
 
     void realProxyAuthentication_data()
@@ -1251,21 +1407,27 @@ private slots:
         HttpFixture origin, proxy;
         QVERIFY2(origin.start(QHostAddress("127.0.0.2")), qPrintable(origin.errorString()));
         QVERIFY2(proxy.start(QHostAddress("127.0.0.1")), qPrintable(proxy.errorString()));
-        Browser b(false, true);
-        auto &p = b.cfg.preferences.proxyServer;
+        RealArticleFixture f(false, true);
+        auto &p = f.controllerConfig.preferences.proxyServer;
         p.type = Config::ProxyServer::HttpConnect; p.host = "127.0.0.1"; p.port = proxy.port();
-        b.construct();
+        f.construct();
         // Deliberately configure saved fallback AFTER the proxy was applied.
-        // Chromium must receive a real 407 and signal the page, then use it.
+        // Chromium must receive a real 407 on this article's own page.
         if (accept) { p.user = HttpFixture::proxyUser(); p.password = HttpFixture::proxyPassword(); }
-        QWebEnginePage page(b.controller->profile()); b.attach(page);
-        QSignalSpy challenge(&page, &QWebEnginePage::proxyAuthenticationRequired), direct(&page, &QWebEnginePage::authenticationRequired);
-        DialogAnswer answer; answer.accept = false;
-        QSignalSpy done(&page, &QWebEnginePage::loadFinished);
-        int const resolutions = proxyTargetResolutions.load();
         auto target = origin.url("/");
         target.setHost("proxy-target.invalid");
-        page.load(target); WAIT_FOR(!done.isEmpty());
+        f.dictionary->setArticleBody((RealArticleFixture::entryBody() + QStringLiteral("<iframe name='proxied' src='%1'></iframe>")
+            .arg(target.toString())).toUtf8());
+        auto view = f.view(f.firstConfig);
+        auto *web = view->findChild<ArticleWebView *>();
+        QVERIFY(web);
+        auto *page = web->page();
+        QSignalSpy challenge(page, &QWebEnginePage::proxyAuthenticationRequired), direct(page, &QWebEnginePage::authenticationRequired);
+        DialogAnswer answer; answer.accept = false;
+        QSignalSpy done(view.get(), &ArticleView::pageLoaded);
+        int const resolutions = proxyTargetResolutions.load();
+        view->showDefinition("proxy-authentication", 17);
+        WAIT_FOR(realArticleLoaded(*view, done, 0, "proxy-authentication"));
         QVERIFY2(challenge.size() > 0, "a genuine HTTP proxy 407 must reach the attached page");
         QCOMPARE(direct.size(), 0);
         QVERIFY(!proxy.requests().isEmpty()); QVERIFY(proxy.requests().first().proxyRequest);
@@ -1277,12 +1439,17 @@ private slots:
             QCOMPARE(QNetworkProxy::applicationProxy().user(), HttpFixture::proxyUser());
             QCOMPARE(QNetworkProxy::applicationProxy().password(), HttpFixture::proxyPassword());
             QCOMPARE(origin.requestCount("/"), 1);
-            QVERIFY(javascript(page, "document.body.textContent", deadline).toString().contains("goldendict-http-fixture"));
+            ArticleDomProbe proxied(web, "proxied");
+            WAIT_FOR(proxied.sample().value("bodyText").toString().contains("goldendict-http-fixture"));
         } else {
             QCOMPARE(answer.dialogs, 1);
             QCOMPARE(origin.requestCount("/"), 0);
             QVERIFY(p.user.isEmpty()); QVERIFY(p.password.isEmpty());
         }
+        QVERIFY(!QApplication::activeModalWidget());
+        QPointer<QWebEnginePage> retired(page);
+        view.reset();
+        QVERIFY(retired.isNull());
     }
 
     void retainedNetworkAuthentication_data()
@@ -1368,8 +1535,16 @@ private slots:
     {
         QFETCH(int, mode);
         QDeadlineTimer deadline(8500);
-        Browser b(false);
-        QWebEnginePage page(b.controller->profile()); b.attach(page);
+        RealArticleFixture f(false);
+        f.dictionary->setArticleBody(RealArticleFixture::entryBody().toUtf8());
+        auto view = f.view(f.firstConfig);
+        QSignalSpy loaded(view.get(), &ArticleView::pageLoaded);
+        view->showDefinition("cache-exit", 17);
+        WAIT_FOR(realArticleLoaded(*view, loaded, 0, "cache-exit"));
+        auto &b = f;
+        auto *web = view->findChild<ArticleWebView *>();
+        QVERIFY(web);
+        auto *page = web->page();
         auto cache = new CountingCache(&b.resources);
         cache->setCacheDirectory(Config::getNetworkCacheDir());
         b.resources.setCache(cache);
@@ -1391,7 +1566,8 @@ private slots:
         b.controller->clearForExit();
         QCOMPARE(finished.size(), 1); QCOMPARE(cacheClearCalls, before + 1);
         // The barrier completed while the page and its interceptor remained live.
-        QVERIFY(b.attach(page)); QCOMPARE(page.profile(), b.controller->profile());
+        QVERIFY(dynamic_cast<ArticleRequestInterceptor *>(page->findChild<QObject *>("gdArticleRequestInterceptor")));
+        QCOMPARE(page->profile(), b.controller->profile());
     }
 
     void ownershipAndWrongOrder()
