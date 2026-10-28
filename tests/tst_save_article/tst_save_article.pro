@@ -30,6 +30,13 @@ GD_ARTICLE_EXTRA_FORMS = $$GD_REPO_ROOT/authentication.ui \
 include(../article-test.pri)
 SOURCES += tst_save_article.cc
 
+# Observe the actual Qt publication/capture calls; fault injection changes only
+# temporary filesystem paths and permissions, then calls Qt's real operation.
+QMAKE_LFLAGS += -Wl,--wrap=_ZN4QDir6renameERK7QStringS2_ \
+                -Wl,--wrap=_ZN9QSaveFile4openE6QFlagsIN13QIODeviceBase12OpenModeFlagEE \
+                -Wl,--wrap=_ZN9QSaveFile6commitEv \
+                -Wl,--wrap=_ZNK14QWebEnginePage6toHtmlERKSt8functionIFvRK7QStringEE
+
 GD_BRIDGE_QRC = $$GD_ARTICLE_RESOURCE_DIR/article-view-bridge-resources.qrc
 GD_BRIDGE_XML = <RCC> <qresource prefix=\"/scripts\">
 GD_BRIDGE_XML += <file alias=\"article-bootstrap.js\">$$GD_REPO_ROOT/scripts/article-bootstrap.js</file>

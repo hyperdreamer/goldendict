@@ -4,7 +4,8 @@
  *
  * The value module is WebEngine-free; this suite supplies a real QWebEnginePage
  * so every index it feeds the module is one the engine actually reported, and
- * every truncation the module has to survive is one the engine actually did.
+ * Coordinator probes below also observe ArticleView's own map calls while its
+ * real renderer captures and restores those entries.
  */
 
 #include <QtTest>
@@ -18,10 +19,24 @@
 #include <QWebEnginePage>
 #include <QWebEngineProfile>
 #include <QWebEngineSettings>
+#include <QWebEngineScript>
+#include <QWebEngineScriptCollection>
+#include <QTimer>
+#include <QPointer>
 
 #include <memory>
 
 #include "articlehistory.hh"
+#include "articlebridge.hh"
+#include "article_maker.hh"
+#include "article_netmgr.hh"
+#include "articleprofile.hh"
+#include "articleschemes.hh"
+#include "articleview.hh"
+#include "articlewebview.hh"
+#include "audioplayerinterface.hh"
+#include "support/dictionary_stub.hh"
+#include "support/http_fixture.hh"
 #include "articleurls.hh"
 #include "support/fixtures.hh"
 
@@ -84,7 +99,120 @@ QString liveTitle( QWebEnginePage & page )
   return answer->value;
 }
 
+QVariant evaluate( QWebEnginePage * page, QString const & script )
+{
+  struct Answer { bool done = false; QVariant value; };
+  auto answer = std::make_shared< Answer >();
+  page->runJavaScript( script, [answer]( QVariant const & value ) { answer->value = value; answer->done = true; } );
+  if( !QTest::qWaitFor( [answer] { return answer->done; }, StepBudgetMs ) )
+    QTest::qFail( "real history renderer did not return a JavaScript result", __FILE__, __LINE__ );
+  return answer->value;
+}
+
+class Player final: public AudioPlayerInterface
+{
+public:
+  QString play( const char *, int ) override { return {}; }
+  void stop() override {}
+};
+
+struct Fixture
+{
+  Config::Class config;
+  sptr< TestSupport::FixtureDictionary > a{ new TestSupport::FixtureDictionary };
+  sptr< TestSupport::FixtureDictionary > b{ new TestSupport::FixtureDictionary( "dict-b", "Dictionary B" ) };
+  std::vector< sptr< Dictionary::Class > > dictionaries{ a, b };
+  Instances::Groups groups;
+  ArticleMaker maker{ dictionaries, groups, {}, {} };
+  ArticleNetworkAccessManager resources{ nullptr, dictionaries, maker,
+    config.preferences.disallowContentFromOtherSites, config.preferences.hideGoldenDictHeader };
+  std::unique_ptr< ArticleProfileController > profile;
+  AudioPlayerPtr player{ new Player };
+  QAction search;
+  Fixture()
+  {
+    config.preferences.maxNetworkCacheSize = 0;
+    config.preferences.disallowContentFromOtherSites = false;
+    Instances::Group group( "Fixture group" );
+    group.id = 17; group.name = "Fixture group"; group.dictionaries = dictionaries; groups.push_back( group );
+    profile = std::make_unique< ArticleProfileController >( config, resources, nullptr );
+    a->setArticleBody( "<p id='fixture-headword'>fixture-headword</p><div style='height:2400px'></div>" );
+    b->setArticleBody( "<p>second dictionary</p><div style='height:2400px'></div>" );
+  }
+  std::unique_ptr< ArticleView > view()
+  {
+    auto result = std::make_unique< ArticleView >( nullptr, *profile->profile(), resources, player, dictionaries,
+                                                  groups, false, config, search, nullptr, nullptr );
+    QWebEngineScript observer;
+    observer.setName( "history-restore-observer" );
+    observer.setInjectionPoint( QWebEngineScript::DocumentCreation );
+    observer.setWorldId( QWebEngineScript::MainWorld );
+    observer.setSourceCode( "history.scrollRestoration='manual';window.__historyRestoreCalls=0;"
+      "const nativeHistoryScroll=window.scrollTo.bind(window);window.scrollTo=(...args)=>{"
+      "if(window.__gdViewRestoreGeneration===window.__gdDocumentGeneration)++window.__historyRestoreCalls;"
+      "return nativeHistoryScroll(...args)};" );
+    result->findChild< ArticleWebView * >()->page()->scripts().insert( observer );
+    result->resize( 800, 600 ); result->show(); return result;
+  }
+};
+
+bool loaded( ArticleView & view, QSignalSpy const & pages, int before, QString const & word )
+{
+  return pages.size() > before && view.getPhrase().phrase == word && !view.getArticlesList().isEmpty();
+}
+
+struct CapturedEntry { int index, engineIndex; ArticleState value; };
+struct CommittedEntry { int index; QUrl url; NavigationKind kind; };
+struct RestoredEntry { int index; bool present; ArticleState value; };
+QPointer< QWebEnginePage > watchedPage;
+QVector< CapturedEntry > capturedEntries;
+QVector< CommittedEntry > committedEntries;
+QVector< RestoredEntry > restoredEntries;
+bool holdCaptures = false;
+struct HeldCapture { std::function< void( QVariant const & ) > callback; QVariant value; };
+QVector< HeldCapture > heldCaptures;
+
 } // namespace
+
+void realSetCurrent( ArticleHistory *, int, ArticleState const & )
+  asm( "__real__ZN14ArticleHistory10setCurrentEiRK12ArticleState" );
+void wrapSetCurrent( ArticleHistory *, int, ArticleState const & )
+  asm( "__wrap__ZN14ArticleHistory10setCurrentEiRK12ArticleState" );
+void wrapSetCurrent( ArticleHistory * history, int index, ArticleState const & value )
+{
+  if( watchedPage ) capturedEntries.append( { index, watchedPage->history()->currentItemIndex(), value } );
+  realSetCurrent( history, index, value );
+}
+void realCommit( ArticleHistory *, QUrl const &, int, NavigationKind )
+  asm( "__real__ZN14ArticleHistory6commitERK4QUrli14NavigationKind" );
+void wrapCommit( ArticleHistory *, QUrl const &, int, NavigationKind )
+  asm( "__wrap__ZN14ArticleHistory6commitERK4QUrli14NavigationKind" );
+void wrapCommit( ArticleHistory * history, QUrl const & url, int index, NavigationKind kind )
+{
+  if( watchedPage ) committedEntries.append( { index, url, kind } );
+  realCommit( history, url, index, kind );
+}
+bool realStateFor( ArticleHistory const *, int, ArticleState * )
+  asm( "__real__ZNK14ArticleHistory8stateForEiP12ArticleState" );
+bool wrapStateFor( ArticleHistory const *, int, ArticleState * )
+  asm( "__wrap__ZNK14ArticleHistory8stateForEiP12ArticleState" );
+bool wrapStateFor( ArticleHistory const * history, int index, ArticleState * value )
+{
+  bool const present = realStateFor( history, index, value );
+  if( watchedPage ) restoredEntries.append( { index, present, present && value ? *value : ArticleState{} } );
+  return present;
+}
+void realJavaScript( QWebEnginePage *, QString const &, quint32, std::function< void( QVariant const & ) > const & )
+  asm( "__real__ZN14QWebEnginePage13runJavaScriptERK7QStringjRKSt8functionIFvRK8QVariantEE" );
+void wrapJavaScript( QWebEnginePage *, QString const &, quint32, std::function< void( QVariant const & ) > const & )
+  asm( "__wrap__ZN14QWebEnginePage13runJavaScriptERK7QStringjRKSt8functionIFvRK8QVariantEE" );
+void wrapJavaScript( QWebEnginePage * page, QString const & source, quint32 world,
+                     std::function< void( QVariant const & ) > const & callback )
+{
+  if( holdCaptures && page == watchedPage && source.contains( QLatin1String( "gdCaptureState()" ) ) )
+    realJavaScript( page, source, world, [callback]( QVariant const & value ) { heldCaptures.append( { callback, value } ); } );
+  else realJavaScript( page, source, world, callback );
+}
 
 class ArticleHistoryTest: public QObject
 {
@@ -98,6 +226,12 @@ private slots:
 
     QStringList reasons;
     QVERIFY2( TestSupport::requiredEnvironment( &reasons ), qPrintable( reasons.join( '\n' ) ) );
+  }
+
+  void cleanup()
+  {
+    watchedPage.clear(); holdCaptures = false; heldCaptures.clear();
+    capturedEntries.clear(); committedEntries.clear(); restoredEntries.clear();
   }
 
   void cleanupTestCase()
@@ -366,47 +500,212 @@ private slots:
     QVERIFY( !history.stateFor( 0, &out ) );
   }
 
-  /// Saving reads the outgoing document's engine item, not a URL-derived or dense
-  /// application counter. The real page supplies both the zero item and the
-  /// duplicate-URL successor used by the save/history boundary.
+  /// Observe the real coordinator's setCurrent and stateFor calls. No map is
+  /// populated by this test: all captures and restores come from ArticleView.
   void realPageSaveOutgoingIndexMatchesEngine()
   {
-    QWebEngineProfile profile;
-    QWebEnginePage page( &profile );
-    page.settings()->setAttribute( QWebEngineSettings::BackForwardCacheEnabled, false );
-    QSignalSpy finished( &page, &QWebEnginePage::loadFinished );
-
-    auto load = [&]( QString const & marker ) {
-      finished.clear();
-      page.setHtml( articleDocument( marker ), documentUrl );
-      if( !QTest::qWaitFor( [&] { return !finished.isEmpty(); }, StepBudgetMs ) ) return false;
-      return finished.constFirst().at( 0 ).toBool();
+    Fixture f;
+    auto view = f.view();
+    auto * page = view->findChild< ArticleWebView * >()->page();
+    watchedPage = page;
+    QSignalSpy pages( view.get(), &ArticleView::pageLoaded );
+    QCOMPARE( page->history()->currentItemIndex(), -1 );
+    QVERIFY( !page->settings()->testAttribute( QWebEngineSettings::BackForwardCacheEnabled ) );
+    auto wait = [&]( int before, QString const & word ) {
+      return QTest::qWaitFor( [&] { return loaded( *view, pages, before, word ); }, StepBudgetMs );
     };
+    auto scroll = [&]( int offset ) {
+      return QTest::qWaitFor( [&] {
+        QString const expression = restoredEntries.isEmpty() || !restoredEntries.last().present ?
+          QStringLiteral( "scrollY" ) : QStringLiteral( "window.__historyRestoreCalls>0?scrollY:-1" );
+        return evaluate( page, expression ).toInt() == offset;
+      }, StepBudgetMs );
+    };
+    view->showDefinition( "A", 17 ); QVERIFY( wait( 0, "A" ) );
+    int const firstA = page->history()->currentItemIndex();
+    QCOMPARE( firstA, 0 );
+    QUrl const aUrl = page->url();
+    evaluate( page, "history.scrollRestoration='manual';gdMakeArticleActive('dict-b');scrollTo(0,650)" );
+    QVERIFY( scroll( 650 ) );
+    int count = pages.size(); view->showDefinition( "B", 17 ); QVERIFY( wait( count, "B" ) );
+    QCOMPARE( capturedEntries.last().index, firstA );
+    QCOMPARE( capturedEntries.last().engineIndex, firstA );
+    QCOMPARE( capturedEntries.last().value.sy, 650.0 );
+    QCOMPARE( capturedEntries.last().value.currentArticle, QString( "gdfrom-dict-b" ) );
+    int const bIndex = page->history()->currentItemIndex();
+    QVERIFY( bIndex > firstA );
+    QCOMPARE( restoredEntries.last().index, bIndex );
+    QVERIFY( !restoredEntries.last().present );
+    QVERIFY( scroll( 0 ) );
+    evaluate( page, "history.scrollRestoration='manual'" );
+    count = pages.size(); view->showDefinition( "A", 17 ); QVERIFY( wait( count, "A" ) );
+    int const secondA = page->history()->currentItemIndex();
+    QCOMPARE( page->url(), aUrl );
+    QVERIFY( secondA > bIndex );
+    QCOMPARE( capturedEntries.last().index, bIndex );
+    QCOMPARE( capturedEntries.last().value.sy, 0.0 );
+    QVERIFY( !restoredEntries.last().present );
+    QVERIFY( scroll( 0 ) );
+    evaluate( page, "history.scrollRestoration='manual';scrollTo(0,340)" );
+    count = pages.size(); view->back(); QVERIFY( wait( count, "B" ) );
+    QCOMPARE( page->history()->currentItemIndex(), bIndex );
+    QVERIFY( restoredEntries.last().present );
+    QCOMPARE( restoredEntries.last().value.sy, 0.0 ); // Recorded zero differs from fresh B above.
+    QVERIFY( scroll( 0 ) );
+    evaluate( page, "history.scrollRestoration='manual';scrollTo(0,380)" );
+    count = pages.size(); view->back(); QVERIFY( wait( count, "A" ) );
+    QCOMPARE( page->history()->currentItemIndex(), firstA );
+    QVERIFY( scroll( 650 ) );
+    QCOMPARE( evaluate( page, "gdCurrentArticle" ).toString(), QString( "gdfrom-dict-b" ) );
+    count = pages.size(); view->forward(); QVERIFY( wait( count, "B" ) );
+    QVERIFY( scroll( 380 ) );
+    count = pages.size(); view->forward(); QVERIFY( wait( count, "A" ) );
+    QCOMPARE( page->history()->currentItemIndex(), secondA );
+    QVERIFY( scroll( 340 ) );
+    count = pages.size(); view->reload(); QVERIFY( wait( count, "A" ) );
+    QCOMPARE( page->history()->currentItemIndex(), secondA );
+    QVERIFY( scroll( 0 ) );
+    QVERIFY( !restoredEntries.last().value.restoreScroll );
+    count = pages.size(); view->back(); QVERIFY( wait( count, "B" ) );
+    QVERIFY( scroll( 380 ) );
+    count = pages.size(); view->showDefinition( "C", 17 ); QVERIFY( wait( count, "C" ) );
+    QVERIFY( !view->canGoForward() );
+    QVERIFY( scroll( 0 ) );
+    QVERIFY( !restoredEntries.last().present );
+    int const fragmentIndex = page->history()->currentItemIndex(), commits = committedEntries.size();
+    auto * bridge = view->findChild< ArticleBridge * >( "gdArticleBridge" );
+    int const generation = bridge->generation();
+    evaluate( page, "scrollTo(0,400)" );
+    QUrl fragment = page->url(); fragment.setFragment( "fixture-headword" );
+    view->openLink( fragment, page->url() );
+    QVERIFY( QTest::qWaitFor( [&] { return evaluate( page, "scrollY" ).toInt() < 400; }, StepBudgetMs ) );
+    QCOMPARE( page->history()->currentItemIndex(), fragmentIndex );
+    QCOMPARE( committedEntries.size(), commits );
+    QCOMPARE( bridge->generation(), generation );
+    for( auto const & capture : capturedEntries ) QCOMPARE( capture.index, capture.engineIndex );
+  }
 
-    ArticleHistory history;
-    ArticleState out;
-    QCOMPARE( page.history()->currentItemIndex(), -1 );
-    QVERIFY( !history.stateFor( -1, &out ) );
+  void realCoordinatorRedirectCommitsOneFinalItem()
+  {
+    TestSupport::HttpFixture server;
+    QVERIFY2( server.start( QHostAddress::LocalHost, 0 ), qPrintable( server.errorString() ) );
+    Fixture f; auto view = f.view(); auto * page = view->findChild< ArticleWebView * >()->page();
+    watchedPage = page;
+    QSignalSpy pages( view.get(), &ArticleView::pageLoaded );
+    view->showDefinition( "A", 17 );
+    QVERIFY( QTest::qWaitFor( [&] { return loaded( *view, pages, 0, "A" ); }, StepBudgetMs ) );
+    int const oldIndex = page->history()->currentItemIndex(), commits = committedEntries.size();
+    int const count = pages.size();
+    auto * bridge = view->findChild< ArticleBridge * >( "gdArticleBridge" );
+    int const generation = bridge->generation();
+    page->load( server.url( "/redirect" ) );
+    QVERIFY( QTest::qWaitFor( [&] { return pages.size() > count; }, StepBudgetMs ) );
+    QCOMPARE( page->url(), server.url( "/dir/first.html" ) );
+    QCOMPARE( page->history()->currentItemIndex(), oldIndex + 1 );
+    QCOMPARE( bridge->generation(), generation + 1 );
+    QCOMPARE( committedEntries.size(), commits + 1 );
+    QCOMPARE( committedEntries.last().url, page->url() );
+    QCOMPARE( committedEntries.last().index, page->history()->currentItemIndex() );
+    QVERIFY( !restoredEntries.last().present );
+  }
 
-    QVERIFY2( load( QStringLiteral( "save-a" ) ), "the save source document did not load" );
-    QCOMPARE( page.history()->currentItemIndex(), 0 );
-    int const saveOutgoing = page.history()->currentItemIndex();
-    history.commit( page.url(), saveOutgoing, NavigationKind::NewLookup );
-    history.setCurrent( saveOutgoing, state( QStringLiteral( "gdfrom-save-a" ), 0, 0 ) );
+  void realCoordinatorBoundsLayoutImageAndFrameGrowth()
+  {
+    QDeadlineTimer deadline( StepBudgetMs );
+    auto remaining = [&] { return int( qMax< qint64 >( 0, deadline.remainingTime() ) ); };
+    Fixture f; auto view = f.view(); auto * page = view->findChild< ArticleWebView * >()->page();
+    watchedPage = page;
+    QSignalSpy pages( view.get(), &ArticleView::pageLoaded );
+    view->showDefinition( "A", 17 );
+    QVERIFY( QTest::qWaitFor( [&] { return loaded( *view, pages, 0, "A" ); }, remaining() ) );
+    evaluate( page, "scrollTo(0,1650)" );
+    int count = pages.size(); view->showDefinition( "B", 17 );
+    QVERIFY( QTest::qWaitFor( [&] { return loaded( *view, pages, count, "B" ); }, remaining() ) );
+    f.a->setResources( { { "growth.png", TestSupport::HttpFixture::pixelPng() } } );
+    f.a->setArticleBody(
+      "<p>fixture-headword</p><div id='growth'></div>"
+      "<img id='growing-image' src='bres://dict-a/growth.png'>"
+      "<iframe id='growing-frame' src='about:blank' style='height:10px'></iframe><script>"
+      "window.__restores=0;window.__layoutFrames=0;"
+      "const originalScroll=window.scrollTo.bind(window);window.scrollTo=(x,y)=>{"
+      "if(y===1650)++window.__restores;originalScroll(x,y)};"
+      "addEventListener('gd-article-ready',()=>requestAnimationFrame(function grow(){"
+      "if(window.__gdViewRestoreGeneration&&!window.__restores)++window.__layoutFrames;"
+      "window.__growthFrames=(window.__growthFrames||0)+1;"
+      "document.getElementById('growth').style.height=(5000+window.__growthFrames*20)+'px';"
+      "document.getElementById('growing-image').height=240+window.__growthFrames;"
+      "document.getElementById('growing-frame').style.height=(320+window.__growthFrames)+'px';"
+      "if(window.__growthFrames<60)requestAnimationFrame(grow);}));</script>" );
+    f.b->setArticleBody( "<p>Second dictionary</p>" );
+    count = pages.size(); view->back();
+    QVERIFY( QTest::qWaitFor( [&] { return loaded( *view, pages, count, "A" ); }, remaining() ) );
+    QVERIFY( QTest::qWaitFor( [&] { return evaluate( page, "window.__restores" ).toInt() == 1; }, remaining() ) );
+    QCOMPARE( evaluate( page, "scrollY" ).toInt(), 1650 );
+    QVERIFY( evaluate( page, "window.__layoutFrames" ).toInt() <= 12 );
+    QVERIFY( evaluate( page, "document.getElementById('growing-image').height" ).toInt() > 240 );
+    QVERIFY( evaluate( page, "document.getElementById('growing-frame').offsetHeight" ).toInt() > 320 );
+    evaluate( page, "scrollTo(0,120);document.getElementById('growth').style.height='6000px';gdOnBridgeReady();"
+                    "setTimeout(()=>window.__laterLayoutTurn=true,600)" );
+    QVERIFY( QTest::qWaitFor( [&] { return evaluate( page, "window.__laterLayoutTurn===true" ).toBool(); }, remaining() ) );
+    QCOMPARE( evaluate( page, "window.__restores" ).toInt(), 1 );
+    QCOMPARE( evaluate( page, "scrollY" ).toInt(), 120 );
+    count = pages.size(); view->showDefinition( "C", 17 );
+    QVERIFY( QTest::qWaitFor( [&] { return loaded( *view, pages, count, "C" ); }, remaining() ) );
+    f.a->setArticleBody( "<div style='height:5000px'>fixture-headword</div><script>"
+      "window.__hiddenRestores=0;const nativeTimeout=window.setTimeout.bind(window);"
+      "window.setTimeout=(callback,ms,...args)=>nativeTimeout(callback,ms===500?5000:ms,...args);"
+      "const originalScroll=window.scrollTo.bind(window);window.scrollTo=(x,y)=>{"
+      "++window.__hiddenRestores;originalScroll(x,y)};"
+      "requestAnimationFrame(()=>window.__hiddenFrameRan=true);</script>" );
+    view->hide();
+    QVERIFY( QTest::qWaitFor( [&] { return !page->isVisible(); }, remaining() ) );
+    count = pages.size(); view->back();
+    QVERIFY( QTest::qWaitFor( [&] { return loaded( *view, pages, count, "A" ); }, remaining() ) );
+    QVERIFY( QTest::qWaitFor( [&] { return evaluate( page, "window.__hiddenRestores" ).toInt() == 1; },
+                            qMin( 1200, remaining() ) ) );
+    QVERIFY( !evaluate( page, "window.__hiddenFrameRan===true" ).toBool() );
+    QCOMPARE( evaluate( page, "scrollY" ).toInt(), 120 );
+  }
 
-    QVERIFY( history.stateFor( saveOutgoing, &out ) );
-    QCOMPARE( out.currentArticle, QStringLiteral( "gdfrom-save-a" ) );
-    QCOMPARE( out.sx, 0.0 );
-    QCOMPARE( out.sy, 0.0 );
-
-    QVERIFY2( load( QStringLiteral( "save-b" ) ), "the next document did not load" );
-    int const next = page.history()->currentItemIndex();
-    QCOMPARE( next, saveOutgoing + 1 );
-    QCOMPARE( page.url(), documentUrl );
-    history.commit( page.url(), next, NavigationKind::NewLookup );
-    QVERIFY( !history.stateFor( next, &out ) );
-    QVERIFY( history.stateFor( saveOutgoing, &out ) );
-    QCOMPARE( out.currentArticle, QStringLiteral( "gdfrom-save-a" ) );
+  void realCoordinatorDeadlineUsesLatestStateAndRetiresLateResult()
+  {
+    Fixture f; auto view = f.view(); auto * page = view->findChild< ArticleWebView * >()->page();
+    watchedPage = page;
+    QSignalSpy pages( view.get(), &ArticleView::pageLoaded );
+    view->showDefinition( "A", 17 );
+    QVERIFY( QTest::qWaitFor( [&] { return loaded( *view, pages, 0, "A" ); }, StepBudgetMs ) );
+    QCOMPARE( ArticleView::CaptureDeadlineMs, 500 );
+    QCOMPARE( ArticleView::CaptureDebounceMs, 100 );
+    auto * timer = view->findChild< QTimer * >( "gdCaptureDebounce" );
+    QVERIFY( timer ); QCOMPARE( timer->interval(), ArticleView::CaptureDebounceMs );
+    auto * bridge = view->findChild< ArticleBridge * >( "gdArticleBridge" );
+    QSignalSpy reading( bridge, &ArticleBridge::readingStateChanged );
+    evaluate( page, "history.scrollRestoration='manual';gdMakeArticleActive('dict-b');scrollTo(0,720)" );
+    QVERIFY( QTest::qWaitFor( [&] { return !reading.isEmpty() && reading.last().at( 0 ).toMap().value( "sy" ).toInt() == 720 &&
+                                         !timer->isActive(); }, StepBudgetMs ) );
+    int const outgoing = page->history()->currentItemIndex();
+    holdCaptures = true;
+    int const count = pages.size();
+    QElapsedTimer elapsed; elapsed.start();
+    view->showDefinition( "B", 17 );
+    QVERIFY( QTest::qWaitFor( [] { return heldCaptures.size() == 1; }, StepBudgetMs ) );
+    QVERIFY( QTest::qWaitFor( [&] { return loaded( *view, pages, count, "B" ); }, StepBudgetMs ) );
+    QVERIFY( elapsed.elapsed() >= ArticleView::CaptureDeadlineMs - 50 && elapsed.elapsed() < 2000 );
+    QCOMPARE( capturedEntries.last().index, outgoing );
+    QCOMPARE( capturedEntries.last().engineIndex, outgoing );
+    QCOMPARE( capturedEntries.last().value.sy, 720.0 );
+    QCOMPARE( capturedEntries.last().value.currentArticle, QString( "gdfrom-dict-b" ) );
+    auto late = heldCaptures.takeFirst();
+    auto fresh = std::make_shared< bool >( false );
+    view->captureState( [fresh]( ArticleState const & ) { *fresh = true; } );
+    QVERIFY( QTest::qWaitFor( [] { return heldCaptures.size() == 1; }, StepBudgetMs ) );
+    bool tail = false;
+    bridge->run( "42", [&]( QVariant const & value ) { tail = value.toInt() == 42; } );
+    late.callback( late.value );
+    QVERIFY( !*fresh && !tail );
+    auto current = heldCaptures.takeFirst();
+    current.callback( current.value );
+    QVERIFY( QTest::qWaitFor( [&] { return *fresh && tail; }, StepBudgetMs ) );
   }
 
   /// A controlled real page: every index, count and truncation the module sees
@@ -589,6 +888,7 @@ int main( int argc, char ** argv )
   qputenv( "XDG_CACHE_HOME", sandbox.path().toUtf8() );
   qputenv( "XDG_DATA_HOME", sandbox.path().toUtf8() );
 
+  registerArticleSchemes();
   QApplication app( argc, argv );
   QCoreApplication::setApplicationName( QStringLiteral( "GoldenDict" ) );
   QNetworkProxy::setApplicationProxy( QNetworkProxy::NoProxy );

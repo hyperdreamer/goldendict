@@ -3,22 +3,25 @@
 #include "savearticle.hh"
 
 #include "articlebridge.hh"
+#include "article_netmgr.hh"
 #include "articleview.hh"
 
 #include <QDir>
 #include <QFileInfo>
+#include <QMap>
+#include <QPointer>
+#include <QNetworkReply>
 #include <QSaveFile>
+#include <QSet>
 #include <QUuid>
 #include <QWebEnginePage>
-
-#include <algorithm>
 
 namespace
 {
 QString canonicalResourceKey( QUrl url )
 {
-  // A fragment selects content inside a resource; it does not select another
-  // byte stream. Query parameters remain part of the key and the filename.
+  // Fragments identify content inside one byte stream. Queries identify
+  // different streams and remain part of both the key and the local filename.
   url.setFragment( QString() );
   return QString::fromLatin1( url.toEncoded( QUrl::FullyEncoded ) );
 }
@@ -28,10 +31,8 @@ QString resourceRelativePath( QUrl const & url, int & queryNumber )
   QString path = url.path( QUrl::FullyDecoded );
   while( path.startsWith( QLatin1Char( '/' ) ) ) path.remove( 0, 1 );
   if( path.isEmpty() ) path = QStringLiteral( "resource" );
-
-  QString relative = url.host();
-  if( !relative.isEmpty() ) relative += QLatin1Char( '/' );
-  relative += path;
+  QString const host = url.host();
+  QString relative = host.isEmpty() ? path : host + QLatin1Char( '/' ) + path;
   if( url.hasQuery() ) relative += QStringLiteral( "_q%1" ).arg( queryNumber++ );
   return relative;
 }
@@ -39,10 +40,10 @@ QString resourceRelativePath( QUrl const & url, int & queryNumber )
 bool pathIsInside( QString const & root, QString const & candidate )
 {
   QString const cleanRoot = QDir::cleanPath( QDir( root ).absolutePath() );
-  QString const cleanCandidate = QDir::cleanPath( QDir( candidate ).absolutePath() );
-  return cleanCandidate == cleanRoot || cleanCandidate.startsWith( cleanRoot + QLatin1Char( '/' ) );
+  QString const cleanCandidate = QDir::cleanPath( QFileInfo( candidate ).absoluteFilePath() );
+  return !candidate.contains( QChar::Null ) &&
+         cleanCandidate.startsWith( cleanRoot + QLatin1Char( '/' ) );
 }
-
 } // namespace
 
 struct SaveArticle::Private
@@ -52,440 +53,367 @@ struct SaveArticle::Private
     QUrl url;
     QString path;
     QPointer< ResourceToSaveHandler > handler;
+    QPointer< QNetworkReply > reply;
     bool done = false;
   };
 
   SaveArticle * const owner;
   ArticleNetworkAccessManager & resources;
   QPointer< ArticleView > view;
+  QPointer< QWebEnginePage > page;
   QPointer< ArticleBridge > bridge;
-  QMetaObject::Connection generationConnection;
-  QMetaObject::Connection bridgeDestroyedConnection;
-  QMetaObject::Connection viewDestroyedConnection;
-
+  QVector< QMetaObject::Connection > guards;
   State currentState = State::Idle;
   quint64 operation = 0;
   int generation = 0;
-  bool active = false;
-  bool complete = false;
-  bool assetsPublished = false;
-  bool htmlPublished = false;
-
-  QString destination;
-  QString snapshot;
-  QString rewritten;
+  bool active = false, complete = false, assetsPublished = false, htmlPublished = false;
+  QString destination, rewritten, destinationParent, staging, stagedAssets, finalAssets;
   QUrl baseUrl;
-  QString destinationParent;
-  QString staging;
-  QString stagedAssets;
-  QString finalAssets;
   QVector< Download > downloads;
 
   Private( SaveArticle * owner_, ArticleView * view_, ArticleNetworkAccessManager & resources_ ):
-    owner( owner_ ), resources( resources_ ), view( view_ )
-  {
-  }
+    owner( owner_ ), resources( resources_ ), view( view_ ) {}
 
   bool valid( quint64 token ) const noexcept
   {
-    return active && operation == token;
+    return active && operation == token && view && page && bridge && bridge->generation() == generation;
   }
 
   void disconnectGuards()
   {
-    QObject::disconnect( generationConnection );
-    QObject::disconnect( bridgeDestroyedConnection );
-    QObject::disconnect( viewDestroyedConnection );
-    generationConnection = {};
-    bridgeDestroyedConnection = {};
-    viewDestroyedConnection = {};
+    for( auto const & connection : guards ) QObject::disconnect( connection );
+    guards.clear();
+  }
+
+  void releaseHandlers( ResourceToSaveHandler * emittingHandler = nullptr )
+  {
+    auto handles = std::move( downloads );
+    downloads.clear();
+    QPointer< SaveArticle > guard( owner );
+    for( auto const & download : handles )
+    {
+      if( download.reply )
+      {
+        if( guard ) QObject::disconnect( download.reply, nullptr, guard, nullptr );
+        if( download.reply->isRunning() ) download.reply->abort();
+        if( download.reply ) download.reply->deleteLater();
+      }
+      if( !download.handler ) continue;
+      if( guard ) QObject::disconnect( download.handler, nullptr, guard, nullptr );
+      // ResourceToSaveHandler continues executing after its done signal.
+      if( download.handler == emittingHandler ) download.handler->deleteLater();
+      else delete download.handler.data();
+    }
   }
 
   void removeOwnedPaths()
   {
-    if( assetsPublished && !htmlPublished && !finalAssets.isEmpty() )
-      QDir( finalAssets ).removeRecursively();
-    if( !staging.isEmpty() )
-      QDir( staging ).removeRecursively();
+    // A successful rename is the only way we acquire the final directory.
+    // Merely choosing its name (including a failed rename collision) is not
+    // ownership. The HTML destination is never removed during rollback.
+    if( assetsPublished && !htmlPublished ) QDir( finalAssets ).removeRecursively();
+    if( !staging.isEmpty() ) QDir( staging ).removeRecursively();
     assetsPublished = false;
-    staging.clear();
-    stagedAssets.clear();
-    finalAssets.clear();
+    staging.clear(); stagedAssets.clear(); finalAssets.clear();
   }
 
-  void releaseHandlers( ResourceToSaveHandler * protectedHandler = nullptr, bool immediate = true )
+  void finishFailure( QString const & message, ResourceToSaveHandler * emittingHandler = nullptr )
   {
-    for( Download & download : downloads )
-    {
-      if( !download.handler ) continue;
-      if( download.handler.data() == protectedHandler || !immediate )
-        download.handler->deleteLater();
-      else
-        delete download.handler.data();
-      download.handler.clear();
-    }
-    downloads.clear();
-  }
-
-  void finishFailure( QString const & message, ResourceToSaveHandler * protectedHandler = nullptr )
-  {
-    if( !active || currentState == State::Complete ) return;
-    active = false; // Invalidate every queued HTML/resource continuation first.
+    if( !active ) return;
+    active = false;
     disconnectGuards();
-    releaseHandlers( protectedHandler );
+    QPointer< SaveArticle > guard( owner );
+    releaseHandlers( emittingHandler );
+    if( !guard ) return;
     removeOwnedPaths();
     currentState = State::Failed;
     emit owner->failed( message );
   }
 
-  void finishCancelled( QString const & message )
+  void resourceFailure( int index, QString const & reason, ResourceToSaveHandler * handler = nullptr )
   {
-    if( !active || currentState == State::Complete ) return;
+    QString const url = downloads.at( index ).url.toString( QUrl::RemovePassword );
+    finishFailure( QStringLiteral( "Unable to save resource %1: %2" ).arg( url, reason ), handler );
+  }
+
+  void finishCancelled()
+  {
+    if( !active ) return;
+    active = false; // Retire all continuations before cancelling their producers.
+    disconnectGuards();
+    QPointer< SaveArticle > guard( owner );
+    releaseHandlers();
+    if( !guard ) return;
+    removeOwnedPaths();
+    currentState = State::Cancelled;
+    emit owner->cancelled( QStringLiteral( "Save cancelled because the article changed/closed." ) );
+  }
+
+  void publish( quint64 token )
+  {
+    if( !valid( token ) ) return;
+    if( complete )
+    {
+      QDir parent( destinationParent );
+      if( !parent.rename( stagedAssets, finalAssets ) )
+      {
+        finishFailure( QStringLiteral( "Unable to publish the saved asset directory." ) );
+        return;
+      }
+      assetsPublished = true;
+    }
+
+    QSaveFile file( destination );
+    file.setDirectWriteFallback( false );
+    if( !file.open( QIODevice::WriteOnly ) )
+    {
+      finishFailure( QStringLiteral( "Unable to open the HTML destination: %1" ).arg( file.errorString() ) );
+      return;
+    }
+    QByteArray const bytes = rewritten.toUtf8();
+    if( file.write( bytes ) != bytes.size() || !file.commit() )
+    {
+      finishFailure( QStringLiteral( "Unable to commit the HTML destination: %1" ).arg( file.errorString() ) );
+      return;
+    }
+    // HTML publication is the commit point: cancellation can no longer retract
+    // either this HTML or the immutable directory it references.
+    htmlPublished = true;
     active = false;
     disconnectGuards();
     releaseHandlers();
-    removeOwnedPaths();
-    currentState = State::Cancelled;
-    emit owner->cancelled( message );
-  }
-
-  void finishSuccess()
-  {
-    if( !active ) return;
-    active = false;
-    disconnectGuards();
-    releaseHandlers( nullptr, false );
     if( !staging.isEmpty() ) QDir( staging ).removeRecursively();
-    staging.clear();
-    stagedAssets.clear();
+    staging.clear(); stagedAssets.clear();
     currentState = State::Complete;
     emit owner->saved( destination );
   }
-};
 
-SaveArticle::SaveArticle( ArticleView * view, ArticleNetworkAccessManager & resources, QObject * parent ):
-  QObject( parent ), d( std::make_unique< Private >( this, view, resources ) )
-{
-  if( view )
+  void maybePublish( quint64 token )
   {
-    d->viewDestroyedConnection = connect( view, &QObject::destroyed, this, [this] {
-      if( d->active ) d->finishCancelled( QStringLiteral( "Save cancelled because the article changed or closed." ) );
-    } );
-  }
-}
-
-SaveArticle::~SaveArticle()
-{
-  if( d->active )
-  {
-    d->active = false;
-    d->disconnectGuards();
-    d->releaseHandlers();
-    d->removeOwnedPaths();
-  }
-}
-
-SaveArticle::State SaveArticle::state() const noexcept
-{
-  return d->currentState;
-}
-
-void SaveArticle::cancel() noexcept
-{
-  if( d->active )
-    d->finishCancelled( QStringLiteral( "Save cancelled because the article changed or closed." ) );
-}
-
-void SaveArticle::start( QString const & htmlDestination, bool complete )
-{
-  if( d->active )
-    d->finishCancelled( QStringLiteral( "Save cancelled because a newer save was started." ) );
-
-  ++d->operation;
-  quint64 const token = d->operation;
-  d->active = true;
-  d->complete = complete;
-  d->assetsPublished = false;
-  d->htmlPublished = false;
-  d->destination = htmlDestination;
-  d->snapshot.clear();
-  d->rewritten.clear();
-  d->downloads.clear();
-  d->staging.clear();
-  d->stagedAssets.clear();
-  d->finalAssets.clear();
-  d->currentState = State::Capturing;
-
-  if( !d->view )
-  {
-    d->finishFailure( QStringLiteral( "Cannot save an article after its view was closed." ) );
-    return;
+    if( !valid( token ) || currentState != State::Downloading ) return;
+    if( !std::all_of( downloads.cbegin(), downloads.cend(), []( Download const & item ) { return item.done; } ) )
+      return;
+    currentState = State::Publishing;
+    QMetaObject::invokeMethod( owner, [this, token] { publish( token ); }, Qt::QueuedConnection );
   }
 
-  auto * page = d->view->findChild< QWebEnginePage * >();
-  d->baseUrl = page ? page->url() : QUrl();
-  d->bridge = d->view->findChild< ArticleBridge * >( QStringLiteral( "gdArticleBridge" ),
-                                                       Qt::FindChildrenRecursively );
-  if( !d->bridge )
+  void downloaded( quint64 token, int index )
   {
-    d->finishFailure( QStringLiteral( "Cannot save an article without its live renderer bridge." ) );
-    return;
-  }
-  d->generation = d->bridge->generation();
-
-  QObject::disconnect( d->generationConnection );
-  QObject::disconnect( d->bridgeDestroyedConnection );
-  d->generationConnection = connect( d->bridge, &ArticleBridge::generationChanged, this,
-    [this, token]( int generation ) {
-      if( !d->valid( token ) || generation == d->generation ) return;
-      d->finishCancelled( QStringLiteral( "Save cancelled because the article changed or closed." ) );
-    } );
-  d->bridgeDestroyedConnection = connect( d->bridge, &QObject::destroyed, this, [this, token] {
-    if( d->valid( token ) )
-      d->finishCancelled( QStringLiteral( "Save cancelled because the article changed or closed." ) );
-  } );
-
-  // Keep the supplied manager as part of the controller's ownership boundary;
-  // ArticleView::saveResource uses this same manager for every real request.
-  Q_UNUSED( d->resources );
-  d->view->toHtml( [this, token]( QString const & html ) {
-    if( !d->valid( token ) ) return;
-    d->snapshot = html;
-    d->currentState = State::Collecting;
-
-    QVector< SaveArticleDetail::ResourceSpan > const spans =
-      d->complete ? SaveArticleDetail::collectResourceSpans( d->snapshot, d->baseUrl ) :
-                    QVector< SaveArticleDetail::ResourceSpan >();
-
-    QFileInfo const destinationInfo( d->destination );
-    d->destinationParent = destinationInfo.absoluteDir().absolutePath();
-    if( !QDir( d->destinationParent ).exists() )
+    if( !valid( token ) || index >= downloads.size() ) return;
+    Download & download = downloads[ index ];
+    QFileInfo const file( download.path );
+    if( !file.isFile() || file.isSymLink() )
     {
-      d->finishFailure( QStringLiteral( "The destination directory does not exist." ) );
+      resourceFailure( index, QStringLiteral( "The download or resource write failed." ), download.handler );
       return;
     }
+    download.done = true; // A successfully committed zero-byte resource is valid.
+    maybePublish( token );
+  }
 
-    if( d->complete )
+  void captured( quint64 token, QString const & html )
+  {
+    if( !valid( token ) ) return;
+    currentState = State::Collecting;
+    auto const spans = complete ? SaveArticleDetail::collectResourceSpans( html, baseUrl ) :
+                                 QVector< SaveArticleDetail::ResourceSpan >();
+    QFileInfo const destinationInfo( destination );
+    destinationParent = destinationInfo.absolutePath();
+    if( !QDir( destinationParent ).exists() )
     {
-      QDir const parent( d->destinationParent );
-      QString const stem = destinationInfo.completeBaseName().isEmpty() ?
-                           QStringLiteral( "article" ) : destinationInfo.completeBaseName();
-      QString const operationSuffix = QStringLiteral( ".goldendict-save-%1" ).arg( d->operation );
-      bool madeStaging = false;
-      for( int attempt = 0; attempt != 32; ++attempt )
+      finishFailure( QStringLiteral( "The destination directory does not exist." ) );
+      return;
+    }
+    rewritten = html;
+    if( complete )
+    {
+      QDir const parent( destinationParent );
+      QString const stem = destinationInfo.completeBaseName().isEmpty() ? QStringLiteral( "article" ) :
+                                                                         destinationInfo.completeBaseName();
+      QString const id = QUuid::createUuid().toString( QUuid::WithoutBraces );
+      QString const stagingName = QStringLiteral( ".%1.goldendict-save-%2" ).arg( stem, id );
+      // mkdir succeeds only for a newly created directory. Do not remember a
+      // colliding path as ours, even if its name looks like a save operation.
+      if( !parent.mkdir( stagingName ) )
       {
-        QString const name = QStringLiteral( ".%1%2-%3" ).arg( stem, operationSuffix,
-                                                               QUuid::createUuid().toString( QUuid::WithoutBraces ) );
-        if( parent.exists( name ) ) continue;
-        if( parent.mkdir( name ) )
-        {
-          d->staging = parent.filePath( name );
-          madeStaging = true;
-          break;
-        }
-      }
-      if( !madeStaging )
-      {
-        d->finishFailure( QStringLiteral( "Unable to create a unique save staging directory." ) );
+        finishFailure( QStringLiteral( "Unable to create a unique save staging directory." ) );
         return;
       }
+      staging = parent.filePath( stagingName );
+      stagedAssets = QDir( staging ).filePath( QStringLiteral( "assets" ) );
+      if( !QDir().mkdir( stagedAssets ) )
+      {
+        finishFailure( QStringLiteral( "Unable to create the save asset directory." ) );
+        return;
+      }
+      finalAssets = parent.filePath( QStringLiteral( "%1_files-%2" ).arg( stem, id ) );
 
-      d->stagedAssets = QDir( d->staging ).filePath( QStringLiteral( "assets" ) );
-      if( !QDir().mkpath( d->stagedAssets ) )
-      {
-        d->finishFailure( QStringLiteral( "Unable to create the save asset directory." ) );
-        return;
-      }
-      d->finalAssets = parent.filePath( QStringLiteral( "%1_files-%2" ).arg(
-        stem, QUuid::createUuid().toString( QUuid::WithoutBraces ) ) );
-      if( QFileInfo::exists( d->finalAssets ) )
-      {
-        d->finishFailure( QStringLiteral( "The unique save asset directory already exists." ) );
-        return;
-      }
-
-      struct Replacement { qsizetype offset; qsizetype length; QString text; };
+      struct Replacement { qsizetype offset, length; QString text; };
       QVector< Replacement > replacements;
       QMap< QString, int > jobsByUrl;
+      QSet< QString > usedPaths;
       int queryNumber = 1;
-      for( SaveArticleDetail::ResourceSpan const & span : spans )
+      for( auto const & span : spans )
       {
         QString const key = canonicalResourceKey( span.url );
         int index = jobsByUrl.value( key, -1 );
         if( index < 0 )
         {
           QString const relative = resourceRelativePath( span.url, queryNumber );
-          QString const resourcePath = QDir( d->stagedAssets ).filePath( relative );
-          if( !pathIsInside( d->stagedAssets, resourcePath ) )
+          QString path = QDir( stagedAssets ).filePath( relative );
+          if( !pathIsInside( stagedAssets, path ) )
           {
-            d->finishFailure( QStringLiteral( "A resource path escapes the save staging directory." ) );
+            finishFailure( QStringLiteral( "A resource path escapes the save staging directory: %1" )
+                             .arg( span.url.toString( QUrl::RemovePassword ) ) );
             return;
           }
-          index = d->downloads.size();
+          QString const original = path;
+          for( int suffix = 1; usedPaths.contains( QDir::cleanPath( path ) ); ++suffix )
+            path = original + QStringLiteral( "_r%1" ).arg( suffix );
+          usedPaths.insert( QDir::cleanPath( path ) );
+          index = downloads.size();
           jobsByUrl.insert( key, index );
-          d->downloads.append( { span.url, resourcePath, nullptr, false } );
+          downloads.append( { span.url, path, nullptr, nullptr, false } );
         }
-
-        QString const relative = QDir( d->stagedAssets ).relativeFilePath( d->downloads.at( index ).path );
-        QString const encoded = QString::fromLatin1( QUrl::toPercentEncoding(
-          QDir( d->finalAssets ).dirName() + QLatin1Char( '/' ) + relative, "/" ) );
+        QString const relative = QDir( stagedAssets ).relativeFilePath( downloads.at( index ).path );
+        QString encoded = QString::fromLatin1( QUrl::toPercentEncoding(
+          QDir( finalAssets ).dirName() + QLatin1Char( '/' ) + relative, "/" ) );
+        if( span.url.hasFragment() ) encoded += QLatin1Char( '#' ) + span.url.fragment( QUrl::FullyEncoded );
         replacements.append( { span.offset, span.length, encoded } );
       }
-
-      d->rewritten = d->snapshot;
-      std::sort( replacements.begin(), replacements.end(), []( Replacement const & left, Replacement const & right ) {
-        return left.offset > right.offset;
+      std::sort( replacements.begin(), replacements.end(), []( Replacement const & a, Replacement const & b ) {
+        return a.offset > b.offset;
       } );
-      for( Replacement const & replacement : replacements )
-        d->rewritten.replace( replacement.offset, replacement.length, replacement.text );
+      for( auto const & replacement : replacements )
+        rewritten.replace( replacement.offset, replacement.length, replacement.text );
     }
-    else
-      d->rewritten = d->snapshot;
 
-    d->currentState = State::Downloading;
-    for( int index = 0; index < d->downloads.size(); ++index )
+    currentState = State::Downloading;
+    QPointer< SaveArticle > guard( owner );
+    for( int index = 0; index < downloads.size(); ++index )
     {
-      if( !d->valid( token ) ) return;
-      Private::Download & download = d->downloads[ index ];
-      ResourceToSaveHandler * handler = d->view->saveResource( download.url, d->baseUrl, download.path );
+      QUrl const url = downloads.at( index ).url;
+      QString const path = downloads.at( index ).path;
+      if( url.scheme() == QLatin1String( "http" ) || url.scheme() == QLatin1String( "https" ) )
+      {
+        QNetworkRequest request( url );
+        request.setMaximumRedirectsAllowed( 10 );
+        auto * reply = resources.get( request );
+        if( !guard ) { reply->abort(); reply->deleteLater(); return; }
+        if( !valid( token ) ) { reply->abort(); reply->deleteLater(); return; }
+        downloads[ index ].reply = reply;
+        QObject::connect( reply, &QNetworkReply::finished, owner, [this, token, index] {
+          if( !valid( token ) || index >= downloads.size() ) return;
+          auto reply = downloads.at( index ).reply;
+          if( !reply || reply->error() != QNetworkReply::NoError )
+          {
+            resourceFailure( index, reply ? reply->errorString() : QStringLiteral( "Download interrupted." ) );
+            return;
+          }
+          QSaveFile file( downloads.at( index ).path );
+          file.setDirectWriteFallback( false );
+          QByteArray const bytes = reply->readAll();
+          if( !QDir().mkpath( QFileInfo( file.fileName() ).absolutePath() ) ||
+              !file.open( QIODevice::WriteOnly ) || file.write( bytes ) != bytes.size() || !file.commit() )
+          {
+            resourceFailure( index, QStringLiteral( "Resource write failed: %1" ).arg( file.errorString() ) );
+            return;
+          }
+          downloaded( token, index );
+        } );
+        QObject::connect( reply, &QObject::destroyed, owner, [this, token, index] {
+          if( valid( token ) && index < downloads.size() && !downloads.at( index ).done )
+            resourceFailure( index, QStringLiteral( "The HTTP download was interrupted." ) );
+        } );
+        continue;
+      }
+      // Keep the view's real dictionary/group-search routing; the controller
+      // owns every resulting handler until its transaction terminates.
+      auto * handler = view->saveResource( url, baseUrl, path );
+      if( !guard ) { if( handler ) handler->deleteLater(); return; }
+      if( !valid( token ) ) { delete handler; return; }
       if( !handler )
       {
-        d->finishFailure( QStringLiteral( "Unable to create a resource download handler." ) );
+        resourceFailure( index, QStringLiteral( "Unable to create a download handler." ) );
         return;
       }
-      download.handler = handler;
-      QObject::connect( handler, &ResourceToSaveHandler::done, this, [this, token, index] {
-        if( !d->valid( token ) || index < 0 || index >= d->downloads.size() ) return;
-        Private::Download & download = d->downloads[ index ];
-        if( !QFileInfo::exists( download.path ) )
-        {
-          d->finishFailure( QStringLiteral( "The referenced resource failed to download." ),
-                            download.handler.data() );
-          return;
-        }
-        download.done = true;
-        bool allDone = std::all_of( d->downloads.cbegin(), d->downloads.cend(),
-                                    []( Private::Download const & item ) { return item.done; } );
-        if( allDone )
-        {
-          d->currentState = State::Publishing;
-          QMetaObject::invokeMethod( this, [this, token] {
-            if( d->valid( token ) )
-            {
-              // The asset rename is the publication step immediately before
-              // the QSaveFile commit below; it never overwrites a sibling.
-              QDir parent( d->destinationParent );
-              if( !parent.rename( d->stagedAssets, d->finalAssets ) )
-              {
-                d->finishFailure( QStringLiteral( "Unable to publish the saved asset directory." ) );
-                return;
-              }
-              d->assetsPublished = true;
-
-              QSaveFile file( d->destination );
-              file.setDirectWriteFallback( false );
-              if( !file.open( QIODevice::WriteOnly ) )
-              {
-                d->finishFailure( QStringLiteral( "Unable to open the HTML destination: %1" ).arg( file.errorString() ) );
-                return;
-              }
-              QByteArray const bytes = d->rewritten.toUtf8();
-              if( file.write( bytes ) != bytes.size() || !file.commit() )
-              {
-                d->finishFailure( QStringLiteral( "Unable to commit the HTML destination: %1" ).arg( file.errorString() ) );
-                return;
-              }
-              d->htmlPublished = true;
-              d->finishSuccess();
-            }
-          }, Qt::QueuedConnection );
-        }
+      handler->setParent( owner );
+      downloads[ index ].handler = handler;
+      QObject::connect( handler, &ResourceToSaveHandler::done, owner, [this, token, index] {
+        downloaded( token, index );
       } );
-      QObject::connect( handler, &QObject::destroyed, this, [this, token, index] {
-        if( !d->valid( token ) || index < 0 || index >= d->downloads.size() ) return;
-        if( !d->downloads.at( index ).done )
-          d->finishFailure( QStringLiteral( "The referenced resource download was interrupted." ) );
+      QObject::connect( handler, &QObject::destroyed, owner, [this, token, index] {
+        if( valid( token ) && index < downloads.size() && !downloads.at( index ).done )
+          resourceFailure( index, QStringLiteral( "The resource download was interrupted." ) );
       } );
-
-      // Instant DataRequests finish inside saveResource(), before the signal
-      // connection above can be installed. The committed file is the durable
-      // completion marker and also accepts valid zero-byte resources.
+      // Instant requests finish inside saveResource, before connections can be
+      // installed. Their committed file is the same success marker used above.
       if( handler->isEmpty() )
       {
-        if( !QFileInfo::exists( download.path ) )
-        {
-          d->finishFailure( QStringLiteral( "The referenced resource failed to download." ), handler );
-          return;
-        }
-        download.done = true;
+        downloaded( token, index );
+        if( !guard || !valid( token ) ) return;
       }
     }
+    maybePublish( token );
+  }
+};
 
-    if( d->downloads.isEmpty() )
-    {
-      d->currentState = State::Publishing;
-      QMetaObject::invokeMethod( this, [this, token] {
-        if( !d->valid( token ) ) return;
-        if( d->complete )
-        {
-          QDir parent( d->destinationParent );
-          if( !parent.rename( d->stagedAssets, d->finalAssets ) )
-          {
-            d->finishFailure( QStringLiteral( "Unable to publish the saved asset directory." ) );
-            return;
-          }
-          d->assetsPublished = true;
-        }
-        QSaveFile file( d->destination );
-        file.setDirectWriteFallback( false );
-        if( !file.open( QIODevice::WriteOnly ) )
-        {
-          d->finishFailure( QStringLiteral( "Unable to open the HTML destination: %1" ).arg( file.errorString() ) );
-          return;
-        }
-        QByteArray const bytes = d->rewritten.toUtf8();
-        if( file.write( bytes ) != bytes.size() || !file.commit() )
-        {
-          d->finishFailure( QStringLiteral( "Unable to commit the HTML destination: %1" ).arg( file.errorString() ) );
-          return;
-        }
-        d->htmlPublished = true;
-        d->finishSuccess();
-      }, Qt::QueuedConnection );
-    }
-    else
-    {
-      bool allDone = std::all_of( d->downloads.cbegin(), d->downloads.cend(),
-                                  []( Private::Download const & item ) { return item.done; } );
-      if( allDone )
-      {
-        d->currentState = State::Publishing;
-        QMetaObject::invokeMethod( this, [this, token] {
-          if( !d->valid( token ) ) return;
-          QDir parent( d->destinationParent );
-          if( !parent.rename( d->stagedAssets, d->finalAssets ) )
-          {
-            d->finishFailure( QStringLiteral( "Unable to publish the saved asset directory." ) );
-            return;
-          }
-          d->assetsPublished = true;
-          QSaveFile file( d->destination );
-          file.setDirectWriteFallback( false );
-          if( !file.open( QIODevice::WriteOnly ) )
-          {
-            d->finishFailure( QStringLiteral( "Unable to open the HTML destination: %1" ).arg( file.errorString() ) );
-            return;
-          }
-          QByteArray const bytes = d->rewritten.toUtf8();
-          if( file.write( bytes ) != bytes.size() || !file.commit() )
-          {
-            d->finishFailure( QStringLiteral( "Unable to commit the HTML destination: %1" ).arg( file.errorString() ) );
-            return;
-          }
-          d->htmlPublished = true;
-          d->finishSuccess();
-        }, Qt::QueuedConnection );
-      }
-    }
+SaveArticle::SaveArticle( ArticleView * view, ArticleNetworkAccessManager & resources, QObject * parent ):
+  QObject( parent ), d( std::make_unique< Private >( this, view, resources ) ) {}
+
+SaveArticle::~SaveArticle()
+{
+  d->active = false;
+  d->disconnectGuards();
+  d->releaseHandlers();
+  d->removeOwnedPaths();
+}
+
+SaveArticle::State SaveArticle::state() const noexcept { return d->currentState; }
+void SaveArticle::cancel() noexcept { d->finishCancelled(); }
+
+void SaveArticle::start( QString const & htmlDestination, bool complete )
+{
+  QPointer< SaveArticle > guard( this );
+  quint64 const previous = d->operation;
+  if( d->active )
+  {
+    d->finishCancelled();
+    // A cancellation observer may destroy us or start a replacement itself.
+    if( !guard || d->operation != previous || d->active ) return;
+  }
+  quint64 const token = ++d->operation;
+  d->active = true;
+  d->complete = complete;
+  d->assetsPublished = d->htmlPublished = false;
+  d->destination = htmlDestination;
+  d->currentState = State::Capturing;
+  if( !d->view )
+  {
+    d->finishFailure( QStringLiteral( "Cannot save an article after its view was closed." ) );
+    return;
+  }
+  d->page = d->view->findChild< QWebEnginePage * >();
+  d->bridge = d->view->findChild< ArticleBridge * >( QStringLiteral( "gdArticleBridge" ) );
+  if( !d->page || !d->bridge )
+  {
+    d->finishFailure( QStringLiteral( "Cannot save an article without its live renderer bridge." ) );
+    return;
+  }
+  d->baseUrl = d->page->url();
+  d->generation = d->bridge->generation();
+  auto cancel = [guard, token] {
+    if( guard && guard->d->active && guard->d->operation == token ) guard->cancel();
+  };
+  d->guards.append( connect( d->view, &QObject::destroyed, this, cancel ) );
+  d->guards.append( connect( d->page, &QObject::destroyed, this, cancel ) );
+  d->guards.append( connect( d->bridge, &QObject::destroyed, this, cancel ) );
+  d->guards.append( connect( d->bridge, &ArticleBridge::generationChanged, this,
+    [guard, token]( int generation ) {
+      if( guard && guard->d->active && guard->d->operation == token && generation != guard->d->generation )
+        guard->cancel();
+    } ) );
+  d->view->toHtml( [guard, token]( QString const & html ) {
+    if( guard ) guard->d->captured( token, html );
   } );
 }
