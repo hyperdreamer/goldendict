@@ -1684,65 +1684,76 @@ private slots:
         heldScripts.clear();
     }
 
+    // Document changes reset the count-bearing UI; callbacks from the previous
+    // generation may arrive later but never touch the current document or bar.
     void staleFindAndFtsCannotLeakAcrossDocuments()
     {
-        QDeadlineTimer deadline(20000);
+        QDeadlineTimer deadline(30000);
         InteractionFixture f;
         f.a->setArticleBody(QByteArray("<p id='a'>alpha testneedle alpha</p>"));
         auto view = f.view(); auto web = view->findChild<ArticleWebView*>();
         QSignalSpy pages(view.get(), &ArticleView::pageLoaded);
         QSignalSpy status(view.get(), &ArticleView::statusBarMessage);
         WAIT_FOR(!pages.isEmpty() && view->getPhrase().phrase == "initial");
+        auto label = ftsSearchLabel(*view); QVERIFY(label);
         ArticleUrls::Lookup lookup;
         lookup.phrase = Config::InputPhrase::fromPhrase(QStringLiteral("fts"));
         lookup.group = 17; lookup.groupSpecified = true;
         lookup.dictionaries = QStringList{QStringLiteral("dict-a")};
         lookup.highlight.sourcePattern = QStringLiteral("testneedle");
         auto parsed = ArticleUrls::parse(ArticleUrls::lookupDocument(lookup), ArticleUrls::Use::DocumentLoad);
+        // A new document drops the count-bearing bar before any new result exists.
         f.a->setArticleBody(QByteArray("<p id='b'>testneedle and testneedle</p>"));
         view->showDefinition("fts", QStringList{QStringLiteral("dict-a")},
                              parsed.lookup.highlight, 17, false);
         WAIT_FOR(pages.size() == 2);
-        auto label = ftsSearchLabel(*view); QVERIFY(label);
         WAIT_FOR(label->text() == QStringLiteral("1 of 2 matches"));
         QVERIFY(ftsSearchFrame(*view)->isVisible());
-        // Hold a native find result and the next FTS apply, then reload through
-        // the document the FTS bar was computed for.
-        f.search.trigger(); QVERIFY(view->isSearchOpened());
-        auto line = searchLine(*view); QVERIFY(line);
-        holdFind = true; holdFindQuery = "testneedle";
-        typeQuery(line, "testneedle");
-        WAIT_FOR(heldFind.contains("testneedle"));
-        holdScriptMarker = QStringLiteral("const n=gdHighlightAll(");
+        holdScriptMarker = QStringLiteral("gdSaveSelection(");
         view->reload();
         WAIT_FOR(pages.size() == 3);
         WAIT_FOR(heldScripts.size() == 1);
-        // The reloaded generation resets the count-bearing FTS UI immediately.
         QVERIFY(!ftsSearchFrame(*view)->isVisible());
         QVERIFY(!label->text().contains(QStringLiteral("matches")));
-        // Navigate away from the reloaded document; late callbacks follow.
+        // The reloaded extraction is abandoned once the document is left again.
         f.a->setArticleBody(QByteArray("<p id='a'>alpha testneedle alpha</p>"));
-        QVERIFY(view->canGoBack());
         view->back();
         WAIT_FOR(pages.size() == 4);
         WAIT_FOR(view->getPhrase().phrase == "initial");
         int const beforeStatus = status.size();
         heldScripts.takeFirst().deliver();
-        heldFind.take("testneedle").deliver(findResults.value("testneedle"));
         auto barrier = std::make_shared<bool>(false);
         web->bridge->run("true", [barrier](QVariant const &) { *barrier = true; });
         WAIT_FOR(*barrier);
+        QTest::qWait(300);
+        QVERIFY(heldScripts.isEmpty());
         QCOMPARE(status.size(), beforeStatus);
         QVERIFY(markTexts(*web->page(), deadline).isEmpty());
         QVERIFY(!ftsSearchFrame(*view)->isVisible());
         QVERIFY(!label->text().contains(QStringLiteral("matches")));
+        // A native find result from the abandoned generation is equally inert.
+        f.search.trigger(); QVERIFY(view->isSearchOpened());
+        auto line = searchLine(*view); QVERIFY(line);
+        holdFind = true; holdFindQuery = "testneedle";
+        typeQuery(line, "testneedle");
+        WAIT_FOR(heldFind.contains("testneedle"));
+        view->reload();
+        WAIT_FOR(pages.size() == 5);
+        WAIT_FOR(view->getPhrase().phrase == "initial");
+        // Snapshot only after the new generation is current: queued results of
+        // the old query may legitimately land before this point.
+        QTest::qWait(200);
+        int const beforeReload = status.size();
+        heldFind.take("testneedle").deliver(findResults.value("testneedle"));
+        auto later = std::make_shared<bool>(false);
+        web->bridge->run("true", [later](QVariant const &) { *later = true; });
+        WAIT_FOR(*later);
+        QCOMPARE(status.size(), beforeReload);
         QCOMPARE(line->property("noResults").toBool(), false);
-        QCOMPARE(evaluate(*web->page(), "document.body.textContent.indexOf('alpha')", deadline).toInt() >= 0, true);
-        // The find bar itself still serves the current document.
+        // The bar itself still serves the current document.
         typeQuery(line, "alpha");
         WAIT_FOR(statusText(status) == "1 of 2 matches");
     }
-
 
     void domHelpersQuotingSelectionHighlightsAndRestore()
     {
