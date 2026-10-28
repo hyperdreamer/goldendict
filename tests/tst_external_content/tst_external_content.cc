@@ -3,10 +3,14 @@
 #include <QtTest>
 #include <QApplication>
 #include <QAuthenticator>
+#include <QAction>
 #include <QDeadlineTimer>
 #include <QDialog>
+#include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QFileInfo>
+#include <QHostAddress>
 #include <QLabel>
 #include <QLineEdit>
 #include <QNetworkDiskCache>
@@ -15,6 +19,7 @@
 #include <QNetworkReply>
 #include <QPointer>
 #include <QTemporaryDir>
+#include <QTemporaryFile>
 #include <QTimer>
 #include <QWebEngineFrame>
 #include <QWebEnginePage>
@@ -29,10 +34,13 @@
 #include <optional>
 #include <thread>
 
+#include "articlebridge.hh"
 #include "articleprofile.hh"
 #include "articleschemes.hh"
 #include "article_netmgr.hh"
 #include "articleurls.hh"
+#include "articleview.hh"
+#include "articlewebview.hh"
 #include "config.hh"
 #include "support/dictionary_stub.hh"
 #include "support/fixtures.hh"
@@ -369,6 +377,176 @@ public:
     using QNetworkDiskCache::QNetworkDiskCache;
     void clear() override { ++clears; QNetworkDiskCache::clear(); }
 };
+
+struct ArticlePlayer final : AudioPlayerInterface
+{
+    QString play(char const *, int) override { return {}; }
+    void stop() override {}
+};
+
+struct RealArticleFixture
+{
+    Config::Class controllerConfig;
+    Config::Class firstConfig;
+    Config::Class secondConfig;
+    sptr<TestSupport::FixtureDictionary> dictionary{new TestSupport::FixtureDictionary};
+    std::vector<sptr<Dictionary::Class>> dictionaries{dictionary};
+    Instances::Groups groups;
+    ArticleMaker maker{dictionaries, groups, {}, {}};
+    ArticleNetworkAccessManager resources{nullptr, dictionaries, maker,
+        controllerConfig.preferences.disallowContentFromOtherSites,
+        controllerConfig.preferences.hideGoldenDictHeader};
+    std::unique_ptr<ArticleProfileController> controller;
+    AudioPlayerPtr player{new ArticlePlayer};
+    QAction search;
+    HttpFixture originA, originB, originC;
+
+    RealArticleFixture()
+    {
+        controllerConfig.preferences.maxNetworkCacheSize = 0;
+        controllerConfig.preferences.disallowContentFromOtherSites = true;
+        firstConfig = controllerConfig;
+        secondConfig = controllerConfig;
+
+        Instances::Group group(QStringLiteral("Fixture group"));
+        group.id = 17;
+        group.dictionaries = dictionaries;
+        groups.push_back(group);
+
+        dictionary->setResources({{QStringLiteral("fixture-image.png"), HttpFixture::pixelPng()}});
+        controller = std::make_unique<ArticleProfileController>(controllerConfig, resources, nullptr);
+    }
+
+    void publishHost(Config::Class & config, QString const & name, QUrl const & origin)
+    {
+        config.webSites.clear();
+        config.webSites.append(Config::WebSite(
+            QStringLiteral("dict-a"), name, origin.toString(), true, {}, true));
+    }
+
+    std::unique_ptr<ArticleView> view(Config::Class & config)
+    {
+        auto result = std::make_unique<ArticleView>(nullptr, *controller->profile(), resources, player,
+                                                    dictionaries, groups, false, config, search,
+                                                    nullptr, nullptr);
+        result->resize(800, 600);
+        result->show();
+        return result;
+    }
+
+    QByteArray articleBody(QUrl const & fileUrl) const
+    {
+        QString const a = originA.url("/").toString();
+        QString const b = originB.url("/").toString();
+        QString const c = originC.url("/").toString();
+        QString const pixel = QString::fromLatin1(HttpFixture::pixelPng().toBase64());
+        // ArticleMaker supplies the real document header, dictionary wrappers,
+        // bootstrap and footer. Keep the backend body substantial and avoid
+        // nesting the standalone HTTP fixture's duplicate dictionary IDs.
+        QString const body = QStringLiteral(
+            "<h1 id='headword'>fixture-headword</h1>"
+            "<p id='multilingual'>Привет 中文 العربية 😀 é</p>"
+            "<p id='long-text'>%1</p>"
+            "<div class='dsl_opt'>Optional dictionary material</div>")
+            .arg(QStringLiteral("A complete dictionary entry with pronunciation, meaning and usage. ").repeated(100));
+        QString const probes = QStringLiteral(
+            "<section id='external-policy-probes'>"
+            "<style id='remote-import'>"
+            "@import url('%1article/style.css');"
+            "@import url('%2article/style.css');"
+            "@import url('%3article/style.css');"
+            "</style>"
+            "<p id='remote-style-marker' class='gd-fixture-marker'>external stylesheet marker</p>"
+            "<img id='remote-a' src='%1external-a.png'>"
+            "<img id='remote-b' src='%2external-b.png'>"
+            "<img id='remote-c' src='%3external-c.png'>"
+            "<iframe name='frame-a' src='%1deny-frame'></iframe>"
+            "<iframe name='frame-b' src='%2deny-csp'></iframe>"
+            "<img id='file-image' src='%4'>"
+            "<img id='data-image' src='data:image/png;base64,%5'>"
+            "<img id='internal-image' src='bres://dict-a/fixture-image.png'>"
+            "<img id='unknown-image' src='unknown-fixture://example/blocked.png'>"
+            "<iframe id='about-frame' src='about:blank'></iframe>"
+            "<img id='blob-image' alt='blob image'>"
+            "<script>(function () {"
+            "var image = document.getElementById('blob-image');"
+            "var blob = new Blob(['<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1\" height=\"1\"><rect width=\"1\" height=\"1\" fill=\"red\"/></svg>'], {type:'image/svg+xml'});"
+            "image.src = URL.createObjectURL(blob);"
+            "})();</script>"
+            "</section>")
+            .arg(a, b, c, fileUrl.toString(QUrl::FullyEncoded), pixel);
+        return (body + probes).toUtf8();
+    }
+};
+
+// Poll Chromium asynchronously. Results belong to this view, native page and
+// bridge generation; no late callback may update the next document's evidence.
+class ArticleDomProbe
+{
+    struct State {
+        QVariantMap value;
+        int generation = 0;
+        bool pending = false;
+    };
+    QPointer<ArticleWebView> view;
+    std::shared_ptr<State> state = std::make_shared<State>();
+public:
+    explicit ArticleDomProbe(ArticleWebView *owner): view(owner) {}
+    QVariantMap sample()
+    {
+        if (!view) return {};
+        QPointer<QWebEnginePage> page(view->page());
+        QPointer<ArticleBridge> bridge(view->findChild<ArticleBridge *>());
+        if (!page || !bridge) return {};
+        int const generation = bridge->generation();
+        if (generation != state->generation) {
+            state = std::make_shared<State>();
+            state->generation = generation;
+        }
+        if (state->pending) return state->value;
+        state->pending = true;
+        page->runJavaScript(QStringLiteral(R"JS(
+        (function () {
+            function width(id) {
+                var element = document.getElementById(id);
+                return element ? element.naturalWidth : -1;
+            }
+            var marker = document.getElementById('remote-style-marker');
+            var about = document.getElementById('about-frame');
+            return {
+                headword: document.getElementById('headword') && document.getElementById('headword').textContent,
+                remoteA: width('remote-a'),
+                remoteB: width('remote-b'),
+                remoteC: width('remote-c'),
+                file: width('file-image'),
+                data: width('data-image'),
+                internal: width('internal-image'),
+                unknown: width('unknown-image'),
+                blob: width('blob-image'),
+                stylesheetColor: marker ? getComputedStyle(marker).color : '',
+                aboutDocument: !!(about && about.contentDocument),
+                bodyLength: document.getElementById('long-text')?.textContent.length || 0,
+                wrappers: document.querySelectorAll('#gdfrom-dict-a').length,
+                ownedFile: width('owned-file'),
+                ownedAgain: width('owned-again'),
+                foreignFile: width('foreign-file'),
+                fileProbeDone: window.fileProbeDone === true,
+                foreignFileDone: window.foreignFileDone === true
+            };
+        })()
+    )JS"), [owner = view, page, bridge, generation, result = state](QVariant const &value) {
+            if (!owner || !page || owner->page() != page || !bridge || bridge->generation() != generation) return;
+            result->value = value.toMap();
+            result->pending = false;
+        });
+        return state->value;
+    }
+};
+
+bool realArticleLoaded(ArticleView & view, QSignalSpy const & pages, int before, QString const & word)
+{
+    return pages.size() > before && view.getPhrase().phrase == word && !view.getArticlesList().isEmpty();
+}
 }
 
 class ExternalContent : public QObject
@@ -641,6 +819,233 @@ private slots:
         }
     }
 
+    void completeArticlePolicyIsPageLocal()
+    {
+        QDeadlineTimer deadline(30000);
+        RealArticleFixture f;
+        QVERIFY2(f.originA.start(QHostAddress("127.0.0.1")), qPrintable(f.originA.errorString()));
+        QVERIFY2(f.originB.start(QHostAddress("127.0.0.2")), qPrintable(f.originB.errorString()));
+        QVERIFY2(f.originC.start(QHostAddress("127.0.0.3")), qPrintable(f.originC.errorString()));
+
+        f.publishHost(f.firstConfig, QStringLiteral("A"), f.originA.url("/"));
+        f.publishHost(f.secondConfig, QStringLiteral("B"), f.originB.url("/"));
+        // This configured website did not contribute to either lookup.
+        f.firstConfig.webSites.append(Config::WebSite("dict-b", "unrelated", f.originC.url("/").toString(), true, {}, true));
+        f.secondConfig.webSites.append(f.firstConfig.webSites.constLast());
+        QTemporaryFile local(QDir(Config::getConfigDir()).filePath("t26-article-XXXXXX.png"));
+        QVERIFY(local.open());
+        QCOMPARE(local.write(HttpFixture::pixelPng()), qint64(HttpFixture::pixelPng().size()));
+        local.flush();
+        QUrl const emittedFile = QUrl::fromLocalFile('/' + QFileInfo(local.fileName()).fileName());
+        f.dictionary->setArticleBody(f.articleBody(emittedFile));
+
+        auto first = f.view(f.firstConfig);
+        auto second = f.view(f.secondConfig);
+        auto *firstWeb = first->findChild<ArticleWebView *>();
+        auto *secondWeb = second->findChild<ArticleWebView *>();
+        QVERIFY(firstWeb && secondWeb);
+        QWebEnginePage *firstPage = firstWeb->page();
+        QWebEnginePage *secondPage = secondWeb->page();
+        QVERIFY(firstPage && secondPage);
+        QSignalSpy firstPages(first.get(), &ArticleView::pageLoaded);
+        QSignalSpy secondPages(second.get(), &ArticleView::pageLoaded);
+
+        first->showDefinition("policy", QStringList{"dict-a"}, FtsHighlightSpec{}, 17, false);
+        second->showDefinition("policy", QStringList{"dict-a"}, FtsHighlightSpec{}, 17, false);
+        WAIT_FOR(realArticleLoaded(*first, firstPages, 0, "policy"));
+        WAIT_FOR(realArticleLoaded(*second, secondPages, 0, "policy"));
+
+        QCOMPARE(firstPage->profile(), secondPage->profile());
+        QCOMPARE(firstPage->url(), secondPage->url());
+        auto *firstPolicy = dynamic_cast<ArticleRequestInterceptor *>(
+            firstPage->findChild<QObject *>("gdArticleRequestInterceptor"));
+        auto *secondPolicy = dynamic_cast<ArticleRequestInterceptor *>(
+            secondPage->findChild<QObject *>("gdArticleRequestInterceptor"));
+        QVERIFY(firstPolicy && secondPolicy && firstPolicy != secondPolicy);
+        QCOMPARE(firstPolicy->parent(), firstPage);
+        QCOMPARE(secondPolicy->parent(), secondPage);
+
+        WAIT_FOR(f.originA.requestCount("/external-a.png") == 1
+                 && f.originB.requestCount("/external-b.png") == 1
+                 && f.originC.requestCount("/external-c.png") == 0
+                 && f.originA.requestCount("/article/style.css") == 1
+                 && f.originB.requestCount("/article/style.css") == 1
+                 && f.originC.requestCount("/article/style.css") == 0
+                 && f.originA.requestCount("/deny-frame") == 1
+                 && f.originB.requestCount("/deny-csp") == 1);
+        ArticleDomProbe firstDom(firstWeb), secondDom(secondWeb);
+        WAIT_FOR(firstDom.sample().value("file").toInt() == 1);
+        WAIT_FOR(secondDom.sample().value("file").toInt() == 1);
+        auto firstState = firstDom.sample();
+        auto secondState = secondDom.sample();
+        QVERIFY(firstState.value("bodyLength").toInt() > 4096);
+        QCOMPARE(firstState.value("wrappers").toInt(), 1);
+        QCOMPARE(first->getArticlesList(), QStringList{"dict-a"});
+        QCOMPARE(second->getArticlesList(), QStringList{"dict-a"});
+        QCOMPARE(firstState.value("headword").toString(), QStringLiteral("fixture-headword"));
+        QCOMPARE(secondState.value("headword").toString(), QStringLiteral("fixture-headword"));
+        QCOMPARE(firstState.value("remoteA").toInt(), 1);
+        QCOMPARE(firstState.value("remoteB").toInt(), 0);
+        QCOMPARE(firstState.value("remoteC").toInt(), 0);
+        QCOMPARE(secondState.value("remoteA").toInt(), 0);
+        QCOMPARE(secondState.value("remoteB").toInt(), 1);
+        QCOMPARE(secondState.value("remoteC").toInt(), 0);
+        QCOMPARE(firstState.value("stylesheetColor").toString(), QStringLiteral("rgb(1, 2, 3)"));
+        QCOMPARE(secondState.value("stylesheetColor").toString(), QStringLiteral("rgb(1, 2, 3)"));
+        QCOMPARE(firstState.value("file").toInt(), 1);
+        QCOMPARE(firstState.value("internal").toInt(), 1);
+        QCOMPARE(firstState.value("data").toInt(), 1);
+        QCOMPARE(firstState.value("blob").toInt(), 1);
+        QCOMPARE(firstState.value("unknown").toInt(), 0);
+        QVERIFY(firstState.value("aboutDocument").toBool());
+
+        f.originA.clearRequests();
+        f.originB.clearRequests();
+        f.originC.clearRequests();
+        f.controllerConfig.preferences.disallowContentFromOtherSites = false;
+        f.firstConfig.preferences.disallowContentFromOtherSites = false;
+        f.secondConfig.preferences.disallowContentFromOtherSites = false;
+        f.controller->applyPreferences();
+        auto reload = [&](QWebEnginePage & page, QSignalSpy & finished) {
+            int const before = finished.size();
+            page.triggerAction(QWebEnginePage::ReloadAndBypassCache);
+            WAIT_FOR(finished.size() > before);
+        };
+        reload(*firstPage, firstPages);
+        reload(*secondPage, secondPages);
+        WAIT_FOR(f.originA.requestCount("/external-a.png") == 2
+                 && f.originB.requestCount("/external-b.png") == 2
+                 && f.originC.requestCount("/external-c.png") == 2
+                 && f.originA.requestCount("/article/style.css") == 2
+                 && f.originB.requestCount("/article/style.css") == 2
+                 && f.originC.requestCount("/article/style.css") == 2
+                 && f.originA.requestCount("/deny-frame") == 2
+                 && f.originB.requestCount("/deny-csp") == 2);
+
+        f.originA.clearRequests();
+        f.originB.clearRequests();
+        f.originC.clearRequests();
+        f.controllerConfig.preferences.disallowContentFromOtherSites = true;
+        f.firstConfig.preferences.disallowContentFromOtherSites = true;
+        f.secondConfig.preferences.disallowContentFromOtherSites = true;
+        f.controller->applyPreferences();
+        reload(*firstPage, firstPages);
+        reload(*secondPage, secondPages);
+        WAIT_FOR(f.originA.requestCount("/external-a.png") == 1
+                 && f.originB.requestCount("/external-b.png") == 1
+                 && f.originC.requestCount("/external-c.png") == 0
+                 && f.originA.requestCount("/article/style.css") == 1
+                 && f.originB.requestCount("/article/style.css") == 1
+                 && f.originC.requestCount("/article/style.css") == 0
+                 && f.originA.requestCount("/deny-frame") == 1
+                 && f.originB.requestCount("/deny-csp") == 1);
+
+        f.originA.clearRequests();
+        f.originB.clearRequests();
+        f.originC.clearRequests();
+        f.firstConfig.webSites[0].url = f.originC.url("/").toString();
+        int const beforeRefresh = firstPages.size();
+        first->showDefinition("policy-refresh", QStringList{"dict-a"}, FtsHighlightSpec{}, 17, false);
+        WAIT_FOR(realArticleLoaded(*first, firstPages, beforeRefresh, "policy-refresh"));
+        WAIT_FOR(f.originA.requestCount("/external-a.png") == 0
+                 && f.originB.requestCount("/external-b.png") == 0
+                 && f.originC.requestCount("/external-c.png") == 1
+                 && f.originA.requestCount("/article/style.css") == 0
+                 && f.originB.requestCount("/article/style.css") == 0
+                 && f.originC.requestCount("/article/style.css") == 1);
+        WAIT_FOR(firstDom.sample().value("remoteC").toInt() == 1);
+        auto refreshed = firstDom.sample();
+        QCOMPARE(refreshed.value("remoteA").toInt(), 0);
+        QCOMPARE(refreshed.value("remoteB").toInt(), 0);
+        QCOMPARE(refreshed.value("remoteC").toInt(), 1);
+    }
+
+    void completeArticleFileMappingsArePageLocal()
+    {
+        QDeadlineTimer deadline(20000);
+        RealArticleFixture f;
+        QTemporaryFile firstFile(QDir(Config::getConfigDir()).filePath("t26-first-XXXXXX.png"));
+        QTemporaryFile secondFile(QDir(Config::getConfigDir()).filePath("t26-second-XXXXXX.png"));
+        QVERIFY(firstFile.open());
+        QVERIFY(secondFile.open());
+        QCOMPARE(firstFile.write(HttpFixture::pixelPng()), qint64(HttpFixture::pixelPng().size()));
+        QCOMPARE(secondFile.write(HttpFixture::pixelPng()), qint64(HttpFixture::pixelPng().size()));
+        firstFile.flush();
+        secondFile.flush();
+        QUrl const firstEmitted = QUrl::fromLocalFile('/' + QFileInfo(firstFile.fileName()).fileName());
+        QUrl const secondEmitted = QUrl::fromLocalFile('/' + QFileInfo(secondFile.fileName()).fileName());
+        QVERIFY(!QFile::exists(firstEmitted.toLocalFile()));
+        QVERIFY(!QFile::exists(secondEmitted.toLocalFile()));
+        f.firstConfig.webSites.clear();
+        f.secondConfig.webSites.clear();
+
+        f.dictionary->setArticleBody(
+            QStringLiteral("<h1 id='headword'>file-one</h1><img id='owned-file' src='%1'>")
+                .arg(firstEmitted.toString(QUrl::FullyEncoded)).toUtf8());
+        auto first = f.view(f.firstConfig);
+        auto second = f.view(f.secondConfig);
+        auto *firstWeb = first->findChild<ArticleWebView *>();
+        auto *secondWeb = second->findChild<ArticleWebView *>();
+        QVERIFY(firstWeb && secondWeb);
+        auto *firstPage = firstWeb->page();
+        auto *secondPage = secondWeb->page();
+        ArticleDomProbe firstDom(firstWeb), secondDom(secondWeb);
+        QSignalSpy firstPages(first.get(), &ArticleView::pageLoaded);
+        QSignalSpy secondPages(second.get(), &ArticleView::pageLoaded);
+        first->showDefinition("file-one", QStringList{"dict-a"}, FtsHighlightSpec{}, 17, false);
+        WAIT_FOR(realArticleLoaded(*first, firstPages, 0, "file-one"));
+        WAIT_FOR(firstDom.sample().value("ownedFile").toInt() == 1);
+
+        f.dictionary->setArticleBody(
+            QStringLiteral("<h1 id='headword'>file-two</h1><img id='owned-file' src='%1'>")
+                .arg(secondEmitted.toString(QUrl::FullyEncoded)).toUtf8());
+        second->showDefinition("file-two", QStringList{"dict-a"}, FtsHighlightSpec{}, 17, false);
+        WAIT_FOR(realArticleLoaded(*second, secondPages, 0, "file-two"));
+        WAIT_FOR(secondDom.sample().value("ownedFile").toInt() == 1);
+
+        auto firstRedirect = observe(firstEmitted);
+        auto secondRedirect = observe(secondEmitted);
+        firstRedirect->expectedRedirect = QUrl::fromLocalFile(firstFile.fileName());
+        secondRedirect->expectedRedirect = QUrl::fromLocalFile(secondFile.fileName());
+        auto probeFiles = [](QWebEnginePage &page, QUrl const &own, QUrl const &foreign) {
+            page.runJavaScript(QStringLiteral(
+                "window.fileProbeDone=false;var remaining=2;"
+                "for (const [id,src] of [['owned-again','%1'],['foreign-file','%2']]) {"
+                "document.getElementById(id)?.remove();"
+                "const image=new Image();image.id=id;"
+                "image.onload=image.onerror=()=>{if (--remaining===0) window.fileProbeDone=true;};"
+                "image.src=src;document.body.appendChild(image);}")
+                .arg(own.toString(QUrl::FullyEncoded), foreign.toString(QUrl::FullyEncoded)));
+        };
+        f.controllerConfig.preferences.disallowContentFromOtherSites = false;
+        f.controller->applyPreferences();
+        probeFiles(*firstPage, firstEmitted, secondEmitted);
+        probeFiles(*secondPage, secondEmitted, firstEmitted);
+        WAIT_FOR(firstDom.sample().value("fileProbeDone").toBool());
+        WAIT_FOR(secondDom.sample().value("fileProbeDone").toBool());
+        QCOMPARE(snapshot(firstRedirect).redirects, 1);
+        QCOMPARE(snapshot(secondRedirect).redirects, 1);
+        QCOMPARE(firstDom.sample().value("ownedAgain").toInt(), 1);
+        QCOMPARE(secondDom.sample().value("ownedAgain").toInt(), 1);
+        QCOMPARE(firstDom.sample().value("foreignFile").toInt(), 0);
+        QCOMPARE(secondDom.sample().value("foreignFile").toInt(), 0);
+        QVERIFY(snapshot(firstRedirect).refused.isEmpty());
+        QVERIFY(snapshot(secondRedirect).refused.isEmpty());
+
+        // Navigation must replace, rather than union, the retired document's
+        // mappings. The other page retains its own current map.
+        f.dictionary->setArticleBody("<h1 id='headword'>no files</h1><p>Next dictionary entry</p>");
+        int const before = firstPages.size();
+        first->showDefinition("no-files", QStringList{"dict-a"}, FtsHighlightSpec{}, 17, false);
+        WAIT_FOR(realArticleLoaded(*first, firstPages, before, "no-files"));
+        probeFiles(*firstPage, firstEmitted, secondEmitted);
+        WAIT_FOR(firstDom.sample().value("fileProbeDone").toBool());
+        QCOMPARE(firstDom.sample().value("ownedAgain").toInt(), 0);
+        QCOMPARE(firstDom.sample().value("foreignFile").toInt(), 0);
+        QCOMPARE(snapshot(firstRedirect).redirects, 1);
+        QCOMPARE(snapshot(secondRedirect).redirects, 1);
+        QCOMPARE(secondDom.sample().value("ownedFile").toInt(), 1);
+    }
     void realFrameOwnOriginAndCrossOriginBarrier()
     {
         QDeadlineTimer deadline(15000);
