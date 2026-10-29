@@ -17,7 +17,7 @@
 #include "epwing_charmap.hh"
 
 namespace {
-/// The Qt5 branch of the old Qt4x5 shim: the path is made absolute-ish for a
+/// The legacy branch of the old compatibility shim: the path is made absolute-ish
 /// hosted URL, which Qt6's setPath() no longer does on its own.
 inline QString ensureLeadingSlash( QString const & path )
 {
