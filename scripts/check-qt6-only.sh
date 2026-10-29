@@ -22,6 +22,14 @@ def reject(message):
 
 counts = {'raw': 0, 'token-stream': 0}
 
+legacy_ledger_path = pathlib.Path('tests/tst_regex/tst_regex.cc')
+legacy_ledger_literal = 'QLatin1String( "QRegExp" )'
+legacy_ledger_line = ('        if ( oldEngine != QLatin1String( "QRegExp" ) && '
+                      'oldEngine != QLatin1String( "QRegularExpression" ) &&')
+print('EXCEPTION legacy-pattern-ledger-vocabulary: ' + str(legacy_ledger_path) +
+      ':619; reason=legacy-pattern ledger vocabulary, spec §6.5; literal=' +
+      legacy_ledger_literal, flush=True)
+
 def strip_comments(text, path):
     """Keep literals and line numbers; replace each comment with whitespace."""
     cpp = path.suffix not in {'.pro', '.pri', '.ui', '.qrc'}
@@ -84,7 +92,14 @@ def search(label, pattern, paths, flags=0):
             if stream == 'token-stream':
                 text = strip_comments(text, path)
             for n, line in enumerate(text.splitlines(), 1):
-                if rx.search(line):
+                checked_line = line
+                # Excuse only this fixed ledger comparison, never another literal
+                # or code token, even in the same file or on the same line.
+                if (stream == 'token-stream' and path == legacy_ledger_path
+                        and n == 619 and line == legacy_ledger_line):
+                    checked_line = line.replace(legacy_ledger_literal,
+                                                ' ' * len(legacy_ledger_literal), 1)
+                if rx.search(checked_line):
                     finding(stream, f'{path}:{n}: {line}')
 
 extensions = {'.pro', '.pri', '.cc', '.hh', '.c', '.h', '.cpp', '.mm', '.ui', '.qrc'}

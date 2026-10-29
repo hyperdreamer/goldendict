@@ -8,17 +8,19 @@ command -v python3 >/dev/null
 command -v qmake6 >/dev/null
 [ -x "$wrapper" ] || { echo 'FAIL: missing executable wrapper' >&2; exit 1; }
 
-# This returns failure for an unwrapped run even when make check itself passed.
+# A failed gate or an unwrapped run fails observation, even with other markers.
 observe() {
-    python3 - "$1" <<'PY'
+    python3 - "$1" "$2" <<'PY'
 import pathlib, sys
 p = pathlib.Path(sys.argv[1])
 lines = p.read_text().splitlines() if p.is_file() else []
 base = '"-f" "Makefile.tests"'
 build = any(base in line and '"check"' not in line for line in lines)
 run = any(base + ' "check"' in line for line in lines)
+for line in lines:
+    print('wrapped argv: ' + line, flush=True)
 print(f'markers: build={int(build)} run={int(run)}', flush=True)
-sys.exit(0 if build and run else 1)
+sys.exit(0 if int(sys.argv[2]) == 0 and build and run else 1)
 PY
 }
 
@@ -61,29 +63,30 @@ PY
         echo "$name FAIL: root configuration failed before probe"
         exit 1
     fi
-    export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-xcb}"
+    export QT_QPA_PLATFORM=xcb
     export GD_TEST_WRAPPER="$wrapper" GD_TEST_WRAPPER_LOG="$copy/wrapper.log"
     case $name in
         P1) export GD_TEST_FORCE_FAILURE=1 ;;
         P2) export GD_TEST_FORCE_ENV_UNAVAILABLE=1 ;;
     esac
-    echo "$name command: QT_QPA_PLATFORM=$QT_QPA_PLATFORM GD_TEST_WRAPPER=$wrapper GD_TEST_WRAPPER_LOG=$copy/wrapper.log xvfb-run -a timeout 900 make check (recursive argv: -f Makefile.tests check)"
+    echo "$name command: QT_QPA_PLATFORM=$QT_QPA_PLATFORM GD_TEST_WRAPPER=$wrapper GD_TEST_WRAPPER_LOG=$copy/wrapper.log xvfb-run -a timeout 1800 make check (recursive argv: -f Makefile.tests check)"
     set +e
     # The outer display keeps P4's unwrapped run environment identical. Only
     # test-wrapper writes markers, never this environment provisioner.
-    xvfb-run -a timeout 900 make check > gate.log 2>&1
+    xvfb-run -a timeout 1800 make check > gate.log 2>&1
     status=$?
-    observe "$copy/wrapper.log" > markers.log
+    observe "$copy/wrapper.log" "$status" > markers.log
     observation=$?
     set -e
     printf '%s exit=%s observation=%s ' "$name" "$status" "$observation"
     while IFS= read -r line; do printf '%s\n' "$line"; done < markers.log
     case $name in
         P1)
-            [ "$status" -ne 0 ] && [ "$status" -ne 124 ] &&
+            [ "$status" -eq 2 ] &&
             grep -E 'FAIL!.*TstUtf8Wstring::initTestCase' gate.log >/dev/null &&
             grep -F 'T35 intentional binary assertion' gate.log >/dev/null &&
-            [ "$observation" -eq 0 ] || {
+            grep -Fx 'markers: build=1 run=1' markers.log >/dev/null &&
+            [ "$observation" -eq 1 ] || {
                 tail -n 45 gate.log; echo 'P1 FAIL: not the executed intentional assertion'; exit 1;
             } ;;
         P2)
@@ -92,7 +95,8 @@ PY
             grep -F 'requiredEnvironment' gate.log >/dev/null &&
             grep -F 'GD_TEST_FORCE_ENV_UNAVAILABLE=1' gate.log >/dev/null &&
             ! grep -E 'SKIP.*requiredEnvironment' gate.log >/dev/null &&
-            [ "$observation" -eq 0 ] || {
+            grep -Fx 'markers: build=1 run=1' markers.log >/dev/null &&
+            [ "$observation" -eq 1 ] || {
                 tail -n 45 gate.log; echo 'P2 FAIL: not a RequiredEnvironment assertion'; exit 1;
             } ;;
         P3)
