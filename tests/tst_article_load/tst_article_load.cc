@@ -36,9 +36,8 @@
  * 32 2945 expand word selection             WebsiteFrames wordAtPoint/DOM word helper
  * 33 3013 select word range                 same asynchronous word/selection workflow
  *
- * Navigation capture always precedes Back/Forward/Reload/new actions. The old
- * WebKit save/print renderer plumbing is removed; completed async pipelines are
- * integrated by T29 before root consumers switch.
+ * Navigation capture always precedes Back/Forward/Reload/new actions. Save and
+ * print use their completed asynchronous pipelines through the real view.
  */
 #include <QtTest>
 #include <QApplication>
@@ -49,6 +48,10 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QNetworkProxy>
+#include <QPdfDocument>
+#include <QPdfSelection>
+#include <QPrinter>
+#include <QPrintPreviewDialog>
 #include <QTemporaryFile>
 #include <QTemporaryDir>
 #include <QTimer>
@@ -68,6 +71,9 @@
 #include "articlebridge.hh"
 #include "articlewebview.hh"
 #include "articleprofile.hh"
+#include "articleinspector.hh"
+#include "printpipeline.hh"
+#include "savearticle.hh"
 #include "article_maker.hh"
 #include "article_netmgr.hh"
 #include "websiteframes.hh"
@@ -87,6 +93,46 @@ struct Completion
 QList<Completion> captures;
 bool holdCapture = false;
 int captureCalls = 0;
+struct HtmlCompletion { std::function<void(QString const &)> callback; QString html; };
+struct PdfCompletion { std::function<void(QByteArray const &)> callback; QByteArray bytes; };
+QList<HtmlCompletion> htmlCompletions;
+QList<PdfCompletion> pdfCompletions;
+bool holdHtml = false, holdPdf = false;
+int htmlCalls = 0, pdfCalls = 0;
+QWebEngineView *pdfView = nullptr;
+bool stays(std::function<bool()> const &condition, int milliseconds = 400)
+{
+    QDeadlineTimer window(milliseconds);
+    while (!window.hasExpired()) {
+        if (!condition()) return false;
+        QTest::qWait(10);
+    }
+    return condition();
+}
+QByteArray readFile(QString const &path)
+{
+    QFile file(path);
+    return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray();
+}
+QPageLayout printLayout()
+{
+    return {QPageSize(QPageSize::A4), QPageLayout::Portrait, QMarginsF(10, 10, 10, 10)};
+}
+void configurePrinter(QPrinter &printer, QString const &destination)
+{
+    printer.setOutputFormat(QPrinter::PdfFormat);
+    printer.setOutputFileName(destination);
+    printer.setResolution(96);
+    printer.setPageLayout(printLayout());
+}
+QString pdfText(QString const &path)
+{
+    QPdfDocument pdf;
+    if (pdf.load(path) != QPdfDocument::Error::None) return {};
+    QString text;
+    for (int page = 0; page < pdf.pageCount(); ++page) text += pdf.getAllText(page).text();
+    return text;
+}
 QVariant evaluate(QWebEnginePage *page, QString const &script)
 {
     struct Result { bool done = false; QVariant value; };
@@ -188,6 +234,36 @@ extern "C" void wrapPageRun(QWebEnginePage *page, QString const &script, quint32
     realPageRun(page, script, world, callback);
 }
 
+extern "C" void realHtml(QWebEnginePage const *, std::function<void(QString const &)> const &)
+    asm("__real__ZNK14QWebEnginePage6toHtmlERKSt8functionIFvRK7QStringEE");
+extern "C" void wrapHtml(QWebEnginePage const *, std::function<void(QString const &)> const &)
+    asm("__wrap__ZNK14QWebEnginePage6toHtmlERKSt8functionIFvRK7QStringEE");
+extern "C" void wrapHtml(QWebEnginePage const *page, std::function<void(QString const &)> const &callback)
+{
+    ++htmlCalls;
+    bool const hold = holdHtml;
+    realHtml(page, [hold, callback](QString const &html) {
+        if (hold) htmlCompletions.append({callback, html});
+        else callback(html);
+    });
+}
+extern "C" void realPdf(QWebEngineView *, std::function<void(QByteArray const &)> const &,
+                         QPageLayout const &, QPageRanges const &)
+    asm("__real__ZN14QWebEngineView10printToPdfERKSt8functionIFvRK10QByteArrayEERK11QPageLayoutRK11QPageRanges");
+extern "C" void wrapPdf(QWebEngineView *, std::function<void(QByteArray const &)> const &,
+                         QPageLayout const &, QPageRanges const &)
+    asm("__wrap__ZN14QWebEngineView10printToPdfERKSt8functionIFvRK10QByteArrayEERK11QPageLayoutRK11QPageRanges");
+extern "C" void wrapPdf(QWebEngineView *view, std::function<void(QByteArray const &)> const &callback,
+                         QPageLayout const &layout, QPageRanges const &ranges)
+{
+    ++pdfCalls; pdfView = view;
+    bool const hold = holdPdf;
+    realPdf(view, [hold, callback](QByteArray const &bytes) {
+        if (hold) pdfCompletions.append({callback, bytes});
+        else callback(bytes);
+    }, layout, ranges);
+}
+
 class ArticleLoadTest : public QObject
 {
     Q_OBJECT
@@ -202,11 +278,212 @@ private slots:
     void cleanup()
     {
         holdCapture = false; captures.clear(); captureCalls = 0;
+        holdHtml = holdPdf = false; htmlCompletions.clear(); pdfCompletions.clear();
+        htmlCalls = pdfCalls = 0; pdfView = nullptr;
         // Desktop-services targets are per-test objects; never leave one behind.
         QDesktopServices::unsetUrlHandler("https");
         QDesktopServices::unsetUrlHandler("file");
     }
     void cleanupTestCase() { TestSupport::clearWatchdog(); }
+
+    // Break: wrappers missing, bypass SaveArticle, discard complete mode or admit a duplicate.
+    void saveWrappersPublishOnceAndForwardOutcomes()
+    {
+        QDeadlineTimer deadline(15000);
+        Fixture f; auto view = f.view(); auto web = view->findChild<ArticleWebView*>();
+        QTemporaryDir output; QVERIFY(output.isValid());
+        QSignalSpy pages(view.get(), &ArticleView::pageLoaded);
+        view->showDefinition("save-wrapper", 17); WAIT_FOR(loaded(*view, pages, 0, "save-wrapper"));
+        evaluate(web->page(), "document.querySelectorAll('head style,.gddicticon,script').forEach(e=>e.remove());"
+                              "document.body.removeAttribute('onload');true");
+        QSignalSpy status(view.get(), &ArticleView::statusBarMessage);
+        auto plain = output.filePath("plain.html"), complete = output.filePath("complete.html");
+        holdHtml = true;
+        view->saveArticle(plain, false);
+        auto save = view->findChild<SaveArticle*>(); QVERIFY(save);
+        QSignalSpy saved(save, &SaveArticle::saved), failed(save, &SaveArticle::failed), cancelled(save, &SaveArticle::cancelled);
+        WAIT_FOR(!htmlCompletions.isEmpty());
+        int const calls = htmlCalls;
+        view->saveArticle(output.filePath("duplicate.html"), true);
+        QVERIFY(stays([&] { return htmlCalls == calls; }));
+        holdHtml = false;
+        auto html = htmlCompletions.takeFirst(); html.callback(html.html);
+        WAIT_FOR(saved.size() == 1);
+        QVERIFY(readFile(plain).contains("fixture-headword"));
+        QVERIFY(!QFile::exists(output.filePath("duplicate.html")));
+        QVERIFY(reported(status).contains("saved", Qt::CaseInsensitive));
+        f.a->setResources({{"asset.bin", "complete-asset"}});
+        evaluate(web->page(), "const i=document.createElement('object');i.data='bres://dict-a/asset.bin';document.body.append(i)");
+        status.clear(); view->saveArticle(complete, true);
+        WAIT_FOR(saved.size() == 2);
+        auto directories = QDir(output.path()).entryList({"complete_files-*"}, QDir::Dirs);
+        QCOMPARE(directories.size(), 1);
+        auto assets = QDir(output.filePath(directories.first())).entryList(QDir::Files);
+        QVERIFY(!assets.isEmpty());
+        bool assetFound = false;
+        for (auto const &asset : assets)
+            assetFound |= readFile(output.filePath(directories.first() + '/' + asset)) == "complete-asset";
+        QVERIFY(assetFound);
+        QVERIFY(!readFile(complete).contains("bres://dict-a/asset.bin"));
+        QVERIFY(!reported(status).isEmpty());
+        status.clear(); view->saveArticle(output.filePath("missing/destination.html"), false);
+        WAIT_FOR(!failed.isEmpty()); QVERIFY(reported(status).contains(failed.last()[0].toString()));
+        holdHtml = true; status.clear();
+        view->saveArticle(output.filePath("cancelled.html"), false); WAIT_FOR(!htmlCompletions.isEmpty());
+        int const count = pages.size(); view->showDefinition("changed", 17);
+        WAIT_FOR(!cancelled.isEmpty());
+        QVERIFY(reported(status).contains(cancelled.last()[0].toString()));
+        holdHtml = false; html = htmlCompletions.takeFirst(); html.callback(html.html);
+        WAIT_FOR(loaded(*view, pages, count, "changed"));
+        QVERIFY(stays([&] { return !QFile::exists(output.filePath("cancelled.html")); }));
+        QCOMPARE(view->findChildren<SaveArticle*>().size(), 1);
+    }
+
+    // Break: wrong selected renderer, duplicate PDF generation or missing error/cancel forwarding.
+    void exportWrapperUsesSelectedViewAndForwardsOutcomes()
+    {
+        QDeadlineTimer deadline(18000);
+        Fixture f; auto first = f.view(), selected = f.view();
+        QSignalSpy firstPages(first.get(), &ArticleView::pageLoaded), pages(selected.get(), &ArticleView::pageLoaded);
+        first->showDefinition("wrong-view", 17); selected->showDefinition("selected-view", 17);
+        WAIT_FOR(loaded(*first, firstPages, 0, "wrong-view") && loaded(*selected, pages, 0, "selected-view"));
+        QTemporaryDir output; QVERIFY(output.isValid());
+        auto path = output.filePath("selected.pdf");
+        QSignalSpy status(selected.get(), &ArticleView::statusBarMessage);
+        holdPdf = true;
+        selected->exportPdf(path, printLayout());
+        auto pipeline = selected->findChild<PrintPipeline*>(); QVERIFY(pipeline);
+        QSignalSpy ready(pipeline, &PrintPipeline::ready), failed(pipeline, &PrintPipeline::failed), cancelled(pipeline, &PrintPipeline::cancelled);
+        WAIT_FOR(!pdfCompletions.isEmpty());
+        QCOMPARE(pdfView, selected->findChild<ArticleWebView*>());
+        QCOMPARE(pdfCalls, 1);
+        selected->exportPdf(output.filePath("duplicate.pdf"), printLayout());
+        QPrinter printer; configurePrinter(printer, output.filePath("duplicate-print.pdf"));
+        selected->print(&printer); selected->printPreview(&printer);
+        QVERIFY(stays([&] { return pdfCalls == 1; }));
+        holdPdf = false;
+        auto pdf = pdfCompletions.takeFirst(); QVERIFY(pdf.bytes.startsWith("%PDF-")); pdf.callback(pdf.bytes);
+        WAIT_FOR(QFileInfo(path).size() > 0);
+        QCOMPARE(ready.size(), 1);
+        QVERIFY(pdfText(path).contains("selected-view")); QVERIFY(!pdfText(path).contains("wrong-view"));
+        QVERIFY(!reported(status).isEmpty());
+        QVERIFY(!QFile::exists(output.filePath("duplicate.pdf")));
+        status.clear(); selected->exportPdf(output.filePath("missing/file.pdf"), printLayout());
+        WAIT_FOR(!failed.isEmpty()); QVERIFY(reported(status).contains(failed.last()[0].toString()));
+        holdPdf = true; status.clear();
+        selected->exportPdf(output.filePath("cancelled.pdf"), printLayout()); WAIT_FOR(!pdfCompletions.isEmpty());
+        int const count = pages.size(); selected->showDefinition("new-generation", 17);
+        WAIT_FOR(!cancelled.isEmpty()); QVERIFY(reported(status).contains(cancelled.last()[0].toString()));
+        holdPdf = false; pdf = pdfCompletions.takeFirst(); pdf.callback(pdf.bytes);
+        WAIT_FOR(loaded(*selected, pages, count, "new-generation"));
+        QVERIFY(stays([&] { return !QFile::exists(output.filePath("cancelled.pdf")); }));
+        QCOMPARE(selected->findChildren<PrintPipeline*>().size(), 1);
+    }
+
+    // Break: blocking preview, retained caller printer, preview bypass or no direct painting.
+    void previewAndDirectPrintUseOneReadySnapshot()
+    {
+        QDeadlineTimer deadline(16000);
+        Fixture f; auto view = f.view(); QSignalSpy pages(view.get(), &ArticleView::pageLoaded);
+        view->showDefinition("preview-wrapper", 17); WAIT_FOR(loaded(*view, pages, 0, "preview-wrapper"));
+        QTemporaryDir output; QVERIFY(output.isValid());
+        holdPdf = true;
+        {
+            QPrinter borrowed; configurePrinter(borrowed, output.filePath("preview.pdf"));
+            view->printPreview(&borrowed);
+        }
+        auto pipeline = view->findChild<PrintPipeline*>(); QVERIFY(pipeline);
+        WAIT_FOR(!pdfCompletions.isEmpty());
+        QCOMPARE(pipeline->state(), PrintPipeline::State::Generating);
+        QVERIFY(!view->findChild<QPrintPreviewDialog*>());
+        holdPdf = false; auto pdf = pdfCompletions.takeFirst(); pdf.callback(pdf.bytes);
+        WAIT_FOR(view->findChild<QPrintPreviewDialog*>());
+        QPointer<QPrintPreviewDialog> preview = view->findChild<QPrintPreviewDialog*>();
+        WAIT_FOR(preview->isVisible()); QCOMPARE(pipeline->state(), PrintPipeline::State::Previewing);
+        preview->close(); WAIT_FOR(!preview);
+        QCOMPARE(pipeline->state(), PrintPipeline::State::Ready);
+        QPrinter direct; auto painted = output.filePath("painted.pdf"); configurePrinter(direct, painted);
+        QSignalSpy status(view.get(), &ArticleView::statusBarMessage);
+        view->print(&direct);
+        QVERIFY(readFile(painted).startsWith("%PDF-"));
+        QCOMPARE(pdfCalls, 1); QVERIFY(!reported(status).isEmpty());
+        status.clear(); QSignalSpy failed(pipeline, &PrintPipeline::failed);
+        view->print(nullptr);
+        QVERIFY(!reported(status).isEmpty());
+        // A fresh direct action must also finish after its borrowed printer has gone.
+        auto fresh = f.view(); QSignalSpy freshPages(fresh.get(), &ArticleView::pageLoaded);
+        fresh->showDefinition("async-direct", 17); WAIT_FOR(loaded(*fresh, freshPages, 0, "async-direct"));
+        auto asynchronous = output.filePath("asynchronous.pdf");
+        {
+            QPrinter temporary; configurePrinter(temporary, asynchronous);
+            fresh->print(&temporary);
+        }
+        WAIT_FOR(QFileInfo(asynchronous).size() > 0);
+        QVERIFY(readFile(asynchronous).startsWith("%PDF-"));
+    }
+
+    // Break: inspector/page outlives profile, page outlives bridge or pending producers publish after close.
+    void teardownDestroysInspectorThenPageThenBridgeBeforeProfile()
+    {
+        QDeadlineTimer deadline(16000);
+        Fixture f; auto viewOwner = f.view(); auto renderer = viewOwner->findChild<ArticleWebView*>();
+        auto bridge = viewOwner->findChild<ArticleBridge*>();
+        QSignalSpy pages(viewOwner.get(), &ArticleView::pageLoaded);
+        viewOwner->showDefinition("closing", 17); WAIT_FOR(loaded(*viewOwner, pages, 0, "closing"));
+        QTemporaryDir output; QVERIFY(output.isValid());
+        holdHtml = holdPdf = true;
+        viewOwner->saveArticle(output.filePath("late.html"), false);
+        viewOwner->exportPdf(output.filePath("late.pdf"), printLayout());
+        WAIT_FOR(!htmlCompletions.isEmpty() && !pdfCompletions.isEmpty());
+        holdCapture = true;
+        auto deliveries = std::make_shared<int>(0);
+        viewOwner->captureState([deliveries](ArticleState const &) { ++*deliveries; });
+        WAIT_FOR(!captures.isEmpty());
+        bridge->run("42", [deliveries](QVariant const &) { ++*deliveries; });
+        QVERIFY(QMetaObject::invokeMethod(viewOwner.get(), "inspect", Qt::DirectConnection));
+        auto inspector = viewOwner->findChild<ArticleInspector*>(); QVERIFY(inspector);
+        QPointer<QWebEnginePage> inspectorPage(renderer->page()->devToolsPage()); QVERIFY(inspectorPage);
+        QCOMPARE(inspectorPage->profile(), renderer->page()->profile());
+        QPointer<QWebEnginePage> pageGuard(renderer->page());
+        QPointer<ArticleBridge> bridgeGuard(bridge);
+        QPointer<QWebEngineProfile> profileGuard(f.controller->profile());
+        QPointer<ArticleInspector> inspectorGuard(inspector);
+        QPointer<WebsiteFrames> frameGuard(viewOwner->findChild<WebsiteFrames*>());
+        QPointer<SaveArticle> saveGuard(viewOwner->findChild<SaveArticle*>());
+        QPointer<PrintPipeline> printGuard(viewOwner->findChild<PrintPipeline*>());
+        auto destruction = std::make_shared<QStringList>();
+        auto validOrder = std::make_shared<bool>(true);
+        connect(inspectorPage, &QObject::destroyed, [=] {
+            *validOrder &= bool(profileGuard) && bool(pageGuard) && bool(bridgeGuard) && !frameGuard;
+            destruction->append("inspector-page");
+        });
+        connect(inspector, &QObject::destroyed, [=] { destruction->append("inspector"); });
+        connect(pageGuard, &QObject::destroyed, [=] {
+            *validOrder &= !inspectorPage && !inspectorGuard && bool(profileGuard) && bool(bridgeGuard);
+            destruction->append("page");
+        });
+        connect(bridgeGuard, &QObject::destroyed, [=] {
+            *validOrder &= !pageGuard && bool(profileGuard); destruction->append("bridge");
+        });
+        connect(profileGuard, &QObject::destroyed, [=] {
+            *validOrder &= !inspectorPage && !pageGuard && !bridgeGuard;
+            destruction->append("profile");
+        });
+        viewOwner.reset();
+        QVERIFY(inspectorPage.isNull()); QVERIFY(inspectorGuard.isNull());
+        QVERIFY(pageGuard.isNull()); QVERIFY(bridgeGuard.isNull());
+        QVERIFY(saveGuard.isNull()); QVERIFY(printGuard.isNull()); QVERIFY(profileGuard);
+        QCOMPARE(*destruction, (QStringList{"inspector-page", "inspector", "page", "bridge"}));
+        captures.takeFirst().deliver();
+        auto html = htmlCompletions.takeFirst(); html.callback(html.html);
+        auto pdf = pdfCompletions.takeFirst(); pdf.callback(pdf.bytes);
+        f.controller.reset();
+        WAIT_FOR(!profileGuard);
+        QCOMPARE(*destruction, (QStringList{"inspector-page", "inspector", "page", "bridge", "profile"}));
+        QVERIFY(*validOrder);
+        QVERIFY(stays([&] { return *deliveries == 0 && !QFile::exists(output.filePath("late.html")) &&
+                                                   !QFile::exists(output.filePath("late.pdf")); }));
+    }
 
     // Break: default-profile page, missing attachPage or missing initial scripts.
     void realViewLoadsDictionaryAndPublishesCaches()
