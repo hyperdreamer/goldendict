@@ -1,5 +1,5 @@
 #!/bin/sh
-# Audit compiled-input text, the compiled vendor closure, and a real app link.
+# Audit literal-aware input tokens, the compiled vendor closure, and a real app link.
 set -eu
 if [ "$#" -ne 2 ]; then
     echo 'usage: check-qt6-only.sh <Makefile> <application-link-log>' >&2
@@ -20,14 +20,72 @@ def reject(message):
     print('FAIL: ' + message, flush=True)
     failed = True
 
+counts = {'raw': 0, 'token-stream': 0}
+
+def strip_comments(text, path):
+    """Keep literals and line numbers; replace each comment with whitespace."""
+    cpp = path.suffix not in {'.pro', '.pri', '.ui', '.qrc'}
+    out = []
+    i = 0
+    while i < len(text):
+        start = i
+        # Raw strings may contain quotes, slashes, hashes and physical newlines.
+        raw = re.match(r'(?:u8|u|U|L)?R"([^ ()\\\t\r\n]{0,16})\(', text[i:]) if cpp and text[i] in 'uULR' else None
+        if raw:
+            end = text.find(')' + raw[1] + '"', i + raw.end())
+            i = len(text) if end < 0 else end + len(raw[1]) + 2
+        elif cpp and text[i].isdigit():
+            # An apostrophe in a numeric literal is a digit separator, not a quote.
+            number = re.match(r"[0-9][\w.']*", text[i:])
+            i += number.end()
+        elif text[i] in ('"', "'"):
+            quote = text[i]
+            i += 1
+            while i < len(text):
+                if text[i] == '\\':
+                    i = min(i + 2, len(text))
+                elif text[i] == quote:
+                    i += 1
+                    break
+                else:
+                    i += 1
+        elif (cpp and text.startswith('//', i)) or (not cpp and text[i] == '#'):
+            end = text.find('\n', i)
+            # C++ splices escaped newlines before recognizing line comments.
+            while cpp and end >= 0 and text[i:end].rstrip('\r').endswith('\\'):
+                end = text.find('\n', end + 1)
+            i = len(text) if end < 0 else end
+            out.append(''.join('\n' if c == '\n' else ' ' for c in text[start:i]))
+            continue
+        elif cpp and text.startswith('/*', i):
+            end = text.find('*/', i + 2)
+            i = len(text) if end < 0 else end + 2
+            out.append(''.join('\n' if c == '\n' else ' ' for c in text[start:i]))
+            continue
+        else:
+            i += 1
+        out.append(text[start:i])
+    return ''.join(out)
+
+def finding(stream, message):
+    counts[stream] += 1
+    if stream == 'raw':
+        print('RAW: ' + message, flush=True)
+    else:
+        reject('TOKEN-STREAM: ' + message)
+
 def search(label, pattern, paths, flags=0):
-    print('SEARCH ' + label + ': grep -nE ' + shlex.quote(pattern) + ' ' +
-          ' '.join(shlex.quote(str(p)) for p in paths), flush=True)
     rx = re.compile(pattern, flags)
-    for path in paths:
-        for n, line in enumerate(path.read_text(errors='replace').splitlines(), 1):
-            if rx.search(line):
-                reject(f'{path}:{n}: {line}')
+    for stream in counts:
+        print('SEARCH ' + stream + ' ' + label + ': python-re ' + shlex.quote(pattern) + ' ' +
+              ' '.join(shlex.quote(str(p)) for p in paths), flush=True)
+        for path in paths:
+            text = path.read_text(errors='replace')
+            if stream == 'token-stream':
+                text = strip_comments(text, path)
+            for n, line in enumerate(text.splitlines(), 1):
+                if rx.search(line):
+                    finding(stream, f'{path}:{n}: {line}')
 
 extensions = {'.pro', '.pri', '.cc', '.hh', '.c', '.h', '.cpp', '.mm', '.ui', '.qrc'}
 excluded = {'docs', 'help', 'locale', 'qtsingleapplication', 'winlibs', 'maclibs', 'opencc',
@@ -46,12 +104,15 @@ banned = (r'QRegExp|QTextCodec|QDesktopWidget|QX11Info|QWebView|QWebPage|QWebFra
 branch = (r'(?s)(?:^\s*#\s*(?:if|elif)[^\n]*(?:\\\n[^\n]*)*|'
           r'^\s*[^#\n]*(?:lessThan|greaterThan|equals|contains)\([^\n]*)'
           r'(?:QT_VERSION|QT_MAJOR_VERSION|QT_MINOR_VERSION)')
-search('first-party banned APIs (literal text, including comments)', banned, paths)
-for path in paths:
-    print('SEARCH version-branch: python-re ' + shlex.quote(branch) + ' ' + shlex.quote(str(path)), flush=True)
-    text = path.read_text(errors='replace')
-    for match in re.finditer(branch, text, re.MULTILINE):
-        reject(f'{path}:{text.count(chr(10), 0, match.start()) + 1}: version branching: {match.group()}')
+search('first-party banned APIs', banned, paths)
+for stream in counts:
+    for path in paths:
+        print('SEARCH ' + stream + ' version-branch: python-re ' + shlex.quote(branch) + ' ' + shlex.quote(str(path)), flush=True)
+        text = path.read_text(errors='replace')
+        if stream == 'token-stream':
+            text = strip_comments(text, path)
+        for match in re.finditer(branch, text, re.MULTILINE):
+            finding(stream, f'{path}:{text.count(chr(10), 0, match.start()) + 1}: version branching: {match.group()}')
 vendors = [pathlib.Path('qtsingleapplication/src') / name for name in
            ('qtsingleapplication.pri', 'qtsingleapplication.h', 'qtsingleapplication.cpp', 'qtlocalpeer.cpp')]
 for path in vendors:
@@ -101,6 +162,9 @@ else:
     for command in commands:
         if 'Qt6Core' not in command:
             reject('application linker command has no Qt6Core linkage: ' + command)
+print(f'AUDIT: raw={counts["raw"]} token-stream={counts["token-stream"]} '
+      f'scope={len(paths) + sum(p.is_file() for p in vendors)} files '
+      f'({len(paths)} first-party + {sum(p.is_file() for p in vendors)} vendor)', flush=True)
 print('Qt6-only audit: ' + ('FAIL' if failed else 'PASS'), flush=True)
 sys.exit(1 if failed else 0)
 PY
