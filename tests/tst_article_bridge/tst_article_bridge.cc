@@ -27,6 +27,7 @@
 #include "articlebridge.hh"
 #include "articleprofile.hh"
 #include "articlewebview.hh"
+#include "articleinspector.hh"
 #include "articleview.hh"
 #include "websiteframes.hh"
 #include "articleschemes.hh"
@@ -1167,6 +1168,63 @@ private slots:
         QCOMPARE(standalone.generation(), std::numeric_limits<int>::max());
         QCOMPARE(standalone.state, ArticleBridge::State::Closed);
         QVERIFY(!page.webChannel());
+    }
+
+    // Break: anonymous DevTools widget, lost geometry, second page or deferred reopen leak.
+    void inspectorReopenKeepsOneAttachedPageAndGeometry()
+    {
+        QDeadlineTimer deadline(12000);
+        Browser b;
+        QWidget geometrySource;
+        geometrySource.show(); QVERIFY(QTest::qWaitForWindowExposed(&geometrySource));
+        geometrySource.setGeometry(70, 80, 640, 480);
+        b.cfg.inspectorGeometry = geometrySource.saveGeometry();
+        auto const initialGeometry = b.cfg.inspectorGeometry;
+        QWidget geometryReference;
+        QVERIFY(geometryReference.restoreGeometry(initialGeometry));
+        ArticleWebView view; view.configure(b.controller->profile(), &b.cfg);
+        QSignalSpy ready(view.bridge, &ArticleBridge::bridgeReady);
+        view.load(b.article()); WAIT_FOR(ready.size() == 1);
+        auto pageCount = [&] {
+            return view.findChildren<QWebEnginePage*>().size() + b.controller->findChildren<QWebEnginePage*>().size();
+        };
+        auto countStays = [&](int expected) {
+            QDeadlineTimer observation(400);
+            while (!observation.hasExpired()) {
+                if (pageCount() != expected) return false;
+                QTest::qWait(10);
+            }
+            return pageCount() == expected;
+        };
+        QVERIFY(countStays(1));
+        view.triggerPageAction(QWebEnginePage::InspectElement);
+        auto inspector = view.findChild<QWidget*>("gdArticleInspector"); QVERIFY(inspector);
+        QCOMPARE(QString::fromLatin1(inspector->metaObject()->className()), QStringLiteral("ArticleInspector"));
+        // Qt's geometry codec accounts for decorations; Xvfb has no window manager.
+        WAIT_FOR(inspector->isVisible()); QCOMPARE(inspector->size(), geometryReference.size());
+        QPointer<QWebEnginePage> tools(view.page()->devToolsPage()); QVERIFY(tools);
+        QCOMPARE(tools->profile(), view.page()->profile());
+        QVERIFY(tools->findChild<QObject*>("gdArticleRequestInterceptor", Qt::FindDirectChildrenOnly));
+        QVERIFY(!tools->settings()->testAttribute(QWebEngineSettings::BackForwardCacheEnabled));
+        for (int i = 0; i < 3; ++i) view.triggerPageAction(QWebEnginePage::InspectElement);
+        QCOMPARE(view.page()->devToolsPage(), tools.data());
+        QVERIFY(countStays(2));
+        inspector->resize(720, 520);
+        QPointer<QWidget> oldInspector(inspector);
+        inspector->close();
+        QVERIFY(b.cfg.inspectorGeometry != initialGeometry);
+        QVERIFY(geometryReference.restoreGeometry(b.cfg.inspectorGeometry));
+        // Reopen before WA_DeleteOnClose's DeferredDelete gets processed.
+        view.triggerPageAction(QWebEnginePage::InspectElement);
+        WAIT_FOR(!oldInspector && !tools);
+        inspector = view.findChild<QWidget*>("gdArticleInspector"); QVERIFY(inspector);
+        WAIT_FOR(inspector->isVisible()); QCOMPARE(inspector->size(), geometryReference.size());
+        QVERIFY(countStays(2));
+        QPointer<QWebEnginePage> reopened(view.page()->devToolsPage()); QVERIFY(reopened);
+        QPointer<QWidget> reopenedWidget(inspector);
+        inspector->close(); WAIT_FOR(!reopenedWidget && !reopened);
+        QVERIFY(!view.page()->devToolsPage()); QVERIFY(countStays(1));
+        QVERIFY(!b.cfg.inspectorGeometry.isEmpty());
     }
 
     void controlledNavigationAndPopupAttachment()

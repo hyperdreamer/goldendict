@@ -1,6 +1,10 @@
 TARGET = tst_article_load
 include(../testsupport.pri)
-GD_ARTICLE_EXTRA_SOURCES = $$GD_REPO_ROOT/articleprofile.cc \
+QT += pdf pdfwidgets
+GD_ARTICLE_EXTRA_SOURCES = $$GD_REPO_ROOT/savearticle.cc \
+                           $$GD_REPO_ROOT/printpipeline.cc \
+                           $$GD_REPO_ROOT/articleinspector.cc \
+                           $$GD_REPO_ROOT/articleprofile.cc \
                            $$GD_REPO_ROOT/articlebridge.cc \
                            $$GD_REPO_ROOT/articlewebview.cc \
                            $$GD_REPO_ROOT/articlehistory.cc \
@@ -12,7 +16,10 @@ GD_ARTICLE_EXTRA_SOURCES = $$GD_REPO_ROOT/articleprofile.cc \
                            $$GD_REPO_ROOT/programs.cc \
                            $$GD_REPO_ROOT/filetype.cc \
                            $$GD_REPO_ROOT/parsecmdline.cc
-GD_ARTICLE_EXTRA_HEADERS = $$GD_REPO_ROOT/articleprofile.hh \
+GD_ARTICLE_EXTRA_HEADERS = $$GD_REPO_ROOT/savearticle.hh \
+                           $$GD_REPO_ROOT/printpipeline.hh \
+                           $$GD_REPO_ROOT/articleinspector.hh \
+                           $$GD_REPO_ROOT/articleprofile.hh \
                            $$GD_REPO_ROOT/articlebridge.hh \
                            $$GD_REPO_ROOT/articlewebview.hh \
                            $$GD_REPO_ROOT/articlehistory.hh \
@@ -27,7 +34,9 @@ GD_ARTICLE_EXTRA_FORMS = $$GD_REPO_ROOT/authentication.ui \
                          $$GD_REPO_ROOT/articleview.ui
 include(../article-test.pri)
 SOURCES += tst_article_load.cc
-QMAKE_LFLAGS += -Wl,--wrap=_ZN14QWebEnginePage13runJavaScriptERK7QStringjRKSt8functionIFvRK8QVariantEE
+QMAKE_LFLAGS += -Wl,--wrap=_ZN14QWebEnginePage13runJavaScriptERK7QStringjRKSt8functionIFvRK8QVariantEE \
+                -Wl,--wrap=_ZNK14QWebEnginePage6toHtmlERKSt8functionIFvRK7QStringEE \
+                -Wl,--wrap=_ZN14QWebEngineView10printToPdfERKSt8functionIFvRK10QByteArrayEERK11QPageLayoutRK11QPageRanges
 
 GD_BRIDGE_QRC = $$GD_ARTICLE_RESOURCE_DIR/article-view-bridge-resources.qrc
 GD_BRIDGE_XML = <RCC> <qresource prefix=\"/scripts\">

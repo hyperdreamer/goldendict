@@ -19,6 +19,8 @@
 #include "ui_articleview.h"
 
 class QWebEngineProfile;
+class QPrinter;
+class QPageLayout;
 class ArticleBridge;
 class ResourceToSaveHandler;
 
@@ -58,6 +60,10 @@ public:
   void playSound();
   void setZoomFactor( qreal factor ) { ui.definition->setZoomFactor( factor ); }
   void toHtml( std::function<void(QString const &)> callback );
+  void saveArticle( QString const & fileName, bool complete );
+  void printPreview( QPrinter * );
+  void print( QPrinter * );
+  void exportPdf( QString const &, QPageLayout const & );
   void captureState( std::function<void(ArticleState const &)> callback );
   QString getTitle();
   Config::InputPhrase getPhrase() const;
@@ -154,6 +160,10 @@ private:
   QString getMutedForGroup( unsigned );
   bool setCurrentArticle( QString const &, bool moveToIt = false );
   void bindDocument();
+  void bindPipelines();
+  void beginPrint( QPrinter *, bool preview );
+  bool printBusy() const;
+  void updateArticleActions();
   void requestNavigation( QUrl const &, NavigationKind );
   void performNavigation();
   void finishLoad();

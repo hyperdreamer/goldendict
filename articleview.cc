@@ -2,6 +2,8 @@
  * Part of GoldenDict. Licensed under GPLv3 or later, see the LICENSE file */
 #include "articleview.hh"
 #include "articlebridge.hh"
+#include "savearticle.hh"
+#include "printpipeline.hh"
 #include "articlewebview.hh"
 #include "articleschemes.hh"
 #include "websiteframes.hh"
@@ -21,6 +23,7 @@
 #include <QMenu>
 #include <QMessageBox>
 #include <QPointer>
+#include <QPrinter>
 #include <QSaveFile>
 #include <QShowEvent>
 #include <QTemporaryFile>
@@ -32,6 +35,7 @@
 #include <algorithm>
 #include <cmath>
 #include <optional>
+#include <utility>
 
 namespace {
 constexpr int RestoreDeadlineMs = 500;
@@ -65,6 +69,34 @@ void cancelRequests( std::list<sptr<Dictionary::DataRequest>> & requests, QObjec
     try { if( !request->isFinished() ) request->cancel(); }
     catch( std::exception const & e ) { qWarning( "Article resource cancellation: %s", e.what() ); }
   }
+}
+std::shared_ptr<QPrinter> copyPrinter( QPrinter const & source )
+{
+  // QPrinter is not a QObject: copy its settings while it is borrowed instead of
+  // retaining a caller's pointer across PDF generation or a preview dialog.
+  auto target = std::make_shared<QPrinter>();
+  target->setPrinterName( source.printerName() );
+  target->setOutputFormat( source.outputFormat() );
+  target->setOutputFileName( source.outputFileName() );
+  target->setPdfVersion( source.pdfVersion() );
+  target->setResolution( source.resolution() );
+  target->setPageLayout( source.pageLayout() );
+  target->setFullPage( source.fullPage() );
+  target->setDocName( source.docName() );
+  target->setCreator( source.creator() );
+  target->setColorMode( source.colorMode() );
+  target->setDuplex( source.duplex() );
+  target->setCopyCount( source.copyCount() );
+  target->setCollateCopies( source.collateCopies() );
+  target->setPageOrder( source.pageOrder() );
+  target->setPaperSource( source.paperSource() );
+  target->setPrintRange( source.printRange() );
+  target->setFromTo( source.fromPage(), source.toPage() );
+  target->setPageRanges( source.pageRanges() );
+  target->setFontEmbeddingEnabled( source.fontEmbeddingEnabled() );
+  target->setPrintProgram( source.printProgram() );
+  target->setPrinterSelectionOption( source.printerSelectionOption() );
+  return target;
 }
 QString host( QString const & url )
 {
@@ -125,6 +157,13 @@ struct ArticleView::State
   QPointer<QWebEnginePage> page;
   QPointer<ArticleBridge> bridge;
   QPointer<WebsiteFrames> frames;
+  QPointer<SaveArticle> save;
+  QPointer<PrintPipeline> print;
+  enum class PrintAction { None, Preview, Paint, Export };
+  PrintAction printAction = PrintAction::None;
+  std::shared_ptr<QPrinter> printer;
+  QString pdfDestination;
+  quint64 printSequence = 0;
   ArticleHistory history;
   std::optional<Intent> pending;
   std::shared_ptr<Capture> capture;
@@ -177,6 +216,7 @@ ArticleView::ArticleView( QWidget * parent, QWebEngineProfile & profile, Article
   action( selectCurrentArticleAction, tr( "Select Current Article" ), QKeySequence( "Ctrl+Shift+A" ), &ArticleView::selectCurrentArticle );
   action( copyAsTextAction, tr( "Copy as text" ), QKeySequence( "Ctrl+Shift+C" ), &ArticleView::copyAsText );
   action( inspectAction, tr( "Inspect" ), QKeySequence( Qt::Key_F12 ), &ArticleView::inspect );
+  updateArticleActions();
   ui.definition->addAction( &openSearchAction );
   connect( &openSearchAction, &QAction::triggered, this, &ArticleView::openSearch );
   ui.definition->pageAction( QWebEnginePage::Copy )->setShortcut( QKeySequence::Copy );
@@ -215,9 +255,15 @@ ArticleView::~ArticleView()
   ++d->navigation; ++d->findQuery; ++d->contextQuery;
   d->pending.reset(); d->capture.reset(); d->debounce->stop();
   cancelRequests( resourceDownloadRequests, this );
-  // Stop frame callbacks first. ArticleWebView retires the bridge, destroys its
-  // page while the closed bridge still lives, then destroys the bridge.
+  // Stop frame timers and all producers before retiring either renderer page.
   delete d->frames.data();
+  disconnect( d->save, nullptr, this, nullptr );
+  disconnect( d->print, nullptr, this, nullptr );
+  d->save->cancel(); d->print->cancel();
+  delete d->save.data(); delete d->print.data();
+  d->printer.reset();
+  // ArticleWebView retires bridge work, closes DevTools, then destroys its page
+  // and bridge. All pages still borrow the live controller profile.
   delete ui.definition;
   cleanupTemp();
   try { audioPlayer->stop(); } catch( std::exception const & e ) { qWarning( "Audio stop: %s", e.what() ); }
@@ -239,6 +285,7 @@ void ArticleView::bindDocument()
     clearDocumentCaches();
     resetFtsResults();
     if( searchIsOpened ) { ui.searchText->setProperty( "noResults", false ); reloadStyleSheet(); }
+    if( d->print ) d->print->cancel();
   } );
   connect( d->bridge, &ArticleBridge::readingStateChanged, this, &ArticleView::updateReadingState );
   connect( d->bridge, &ArticleBridge::activeArticleChanged, this, [this]( QString const & id ) {
@@ -256,7 +303,109 @@ void ArticleView::bindDocument()
     else d->frameLinks[ id ] = {text, QStringLiteral( "click" )};
     setCurrentArticle( scrollToFromDictionaryId( id ) );
   } );
+  bindPipelines();
 }
+void ArticleView::bindPipelines()
+{
+  auto report = [this]( QString const & message ) {
+    if( !d->closing ) emit statusBarMessage( message, 10000 );
+  };
+  if( !d->save )
+  {
+    d->save = new SaveArticle( this, articleNetMgr, this );
+    connect( d->save, &SaveArticle::saved, this, [this]( QString const & destination ) {
+      if( !d->closing ) emit statusBarMessage( tr( "Article saved: %1" ).arg( destination ), 10000 );
+    } );
+    connect( d->save, &SaveArticle::failed, this, report );
+    connect( d->save, &SaveArticle::cancelled, this, report );
+  }
+  if( d->print ) { d->print->cancel(); delete d->print.data(); }
+  d->printAction = State::PrintAction::None;
+  d->printer.reset();
+  d->print = new PrintPipeline( ui.definition, d->bridge, this );
+  auto terminal = [this, report]( QString const & message ) {
+    d->printAction = State::PrintAction::None;
+    report( message );
+  };
+  connect( d->print, &PrintPipeline::failed, this, terminal );
+  connect( d->print, &PrintPipeline::cancelled, this, terminal );
+  connect( d->print, &PrintPipeline::ready, this, [this]( int ) {
+    if( d->closing ) return;
+    auto action = std::exchange( d->printAction, State::PrintAction::None );
+    auto printer = d->printer;
+    auto pipeline = d->print;
+    QPointer<ArticleView> guard( this );
+    if( action == State::PrintAction::Preview )
+    {
+      pipeline->preview( printer.get() );
+      if( guard && pipeline && pipeline->state() == PrintPipeline::State::Previewing )
+        emit statusBarMessage( tr( "Print preview ready." ), 10000 );
+    }
+    else if( action == State::PrintAction::Paint )
+    {
+      bool const painted = pipeline->paint( printer.get() );
+      if( guard && painted ) emit statusBarMessage( tr( "Article printed." ), 10000 );
+    }
+    else if( action == State::PrintAction::Export )
+    {
+      auto const destination = d->pdfDestination;
+      auto const sequence = d->printSequence;
+      int const generation = d->generation;
+      // ready precedes atomic publication inside PrintPipeline. Report success
+      // only after that stack has returned without a publication failure.
+      QTimer::singleShot( 0, this, [this, pipeline, generation, sequence, destination] {
+        if( !d->closing && d->print == pipeline && d->generation == generation &&
+            d->printSequence == sequence && pipeline && pipeline->state() == PrintPipeline::State::Ready )
+          emit statusBarMessage( tr( "PDF exported: %1" ).arg( destination ), 10000 );
+      } );
+    }
+  } );
+}
+bool ArticleView::printBusy() const
+{
+  auto state = d->print->state();
+  return state == PrintPipeline::State::Generating || state == PrintPipeline::State::LoadingPdf ||
+         state == PrintPipeline::State::Previewing || state == PrintPipeline::State::Printing;
+}
+void ArticleView::saveArticle( QString const & destination, bool complete )
+{
+  if( d->closing || !d->page ) return;
+  auto state = d->save->state();
+  if( state == SaveArticle::State::Capturing || state == SaveArticle::State::Collecting ||
+      state == SaveArticle::State::Downloading || state == SaveArticle::State::Publishing ) return;
+  d->save->start( destination, complete );
+}
+void ArticleView::exportPdf( QString const & destination, QPageLayout const & layout )
+{
+  if( d->closing || !d->page || printBusy() ) return;
+  ++d->printSequence;
+  d->printAction = State::PrintAction::Export;
+  d->pdfDestination = destination;
+  d->print->exportPdf( destination, layout );
+}
+void ArticleView::beginPrint( QPrinter * printer, bool preview )
+{
+  if( d->closing || !d->page || printBusy() ) return;
+  if( !printer ) { emit statusBarMessage( tr( "No printer was supplied." ), 10000 ); return; }
+  ++d->printSequence;
+  if( !preview && d->print->state() == PrintPipeline::State::Ready )
+  {
+    QPointer<ArticleView> guard( this );
+    bool const painted = d->print->paint( printer ); // Borrowed only for synchronous painting.
+    if( guard && painted ) emit statusBarMessage( tr( "Article printed." ), 10000 );
+    return;
+  }
+  d->printer = copyPrinter( *printer );
+  if( preview && d->print->state() == PrintPipeline::State::Ready )
+  {
+    d->print->preview( d->printer.get() );
+    return;
+  }
+  d->printAction = preview ? State::PrintAction::Preview : State::PrintAction::Paint;
+  d->print->snapshot( d->printer->pageLayout() );
+}
+void ArticleView::printPreview( QPrinter * printer ) { beginPrint( printer, true ); }
+void ArticleView::print( QPrinter * printer ) { beginPrint( printer, false ); }
 void ArticleView::run( QString const & script, std::function<void(QVariant const &)> callback )
 {
   if( d->closing || !d->bridge || !d->page ) return;
@@ -280,7 +429,7 @@ void ArticleView::updateReadingState( QVariantMap const & value )
   for( auto const & id : value.value( "framedArticles" ).toStringList() )
     if( articles.contains( id ) ) d->framedArticles.insert( id );
   QPointer<ArticleView> guard( this ); int generation = d->generation;
-  if( articles != d->articles ) { d->articles = articles; emit articlesChanged( articles ); }
+  if( articles != d->articles ) { d->articles = articles; updateArticleActions(); emit articlesChanged( articles ); }
   if( !guard || d->generation != generation ) return;
   if( audio != d->audio ) { d->audio = audio; emit soundAvailabilityChanged( audio ); }
 }
@@ -291,9 +440,15 @@ void ArticleView::clearDocumentCaches()
   d->articles.clear(); d->current.clear(); d->audio = false; d->frameLinks.clear();
   d->frameContextText.clear(); d->framedArticles.clear(); d->ready = false;
   if( d->hit ) { d->hit->done = true; d->hit->callback = {}; d->hit.reset(); }
-  if( hadArticles ) emit articlesChanged( {} );
+  if( hadArticles ) { updateArticleActions(); emit articlesChanged( {} ); }
   if( !guard || d->generation != generation ) return;
   if( hadAudio ) emit soundAvailabilityChanged( false );
+}
+void ArticleView::updateArticleActions()
+{
+  selectCurrentArticleAction.setEnabled( !d->articles.isEmpty() );
+  articleUpAction.setEnabled( d->articles.size() > 1 );
+  articleDownAction.setEnabled( d->articles.size() > 1 );
 }
 void ArticleView::captureState( std::function<void(ArticleState const &)> callback )
 {

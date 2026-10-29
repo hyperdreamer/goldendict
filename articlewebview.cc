@@ -1,6 +1,7 @@
 /* Part of GoldenDict. Licensed under GPLv3 or later, see LICENSE. */
 #include "articlewebview.hh"
 #include "articlebridge.hh"
+#include "articleinspector.hh"
 #include "articleprofile.hh"
 #include <QApplication>
 #include <QChildEvent>
@@ -127,9 +128,8 @@ ArticleWebView::ArticleWebView( QWidget * parent ): QWebEngineView( parent )
 
 ArticleWebView::~ArticleWebView()
 {
-  if( inspector && config ) config->inspectorGeometry = inspector->saveGeometry();
-  delete inspector.data();
   if( bridge ) bridge->retire();
+  delete inspector.data();
   // WebEngine can run final JS callbacks here. The bridge is still present,
   // Closed, and only deleted once those callbacks can no longer reach the page.
   delete ownedPage.data();
@@ -228,18 +228,12 @@ void ArticleWebView::triggerPageAction( QWebEnginePage::WebAction action, bool c
   if( !ownedPage ) return;
   if( action == QWebEnginePage::InspectElement )
   {
+    // A close may have retired its page while DeferredDelete is still queued.
+    if( inspector && !inspector->page() ) delete inspector.data();
     if( !inspector )
     {
-      // Keep the Qt6 DevTools page on this controller's shared profile. The
-      // legacy ArticleInspector widget is migrated with the ArticleView consumer.
-      inspector = new QWebEngineView( this );
-      inspector->setWindowFlag( Qt::Window );
-      inspector->setAttribute( Qt::WA_DeleteOnClose );
-      auto toolsPage = new QWebEnginePage( ownedPage->profile(), inspector );
-      attach( toolsPage );
-      inspector->setPage( toolsPage );
-      ownedPage->setDevToolsPage( toolsPage );
-      if( config ) inspector->restoreGeometry( config->inspectorGeometry );
+      if( !config ) return;
+      inspector = new ArticleInspector( ownedPage, config, this );
     }
     inspector->show(); inspector->raise(); inspector->activateWindow();
   }

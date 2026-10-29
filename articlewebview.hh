@@ -8,6 +8,7 @@
 #include "articleurls.hh"
 
 class ArticleBridge;
+class ArticleInspector;
 class QContextMenuEvent;
 class QMouseEvent;
 namespace Config { struct Class; }
@@ -65,7 +66,7 @@ private:
   friend class ArticleBridgeTest;
   QPointer<ArticleWebPage> ownedPage;
   QPointer<ArticleBridge> bridge;
-  QPointer<QWebEngineView> inspector;
+  QPointer<ArticleInspector> inspector;
   Config::Class * config = nullptr;
   bool midButtonPressed = false, selectionBySingleClick = false, navigated = false;
   bool syntheticClick = false, selectionReady = false;

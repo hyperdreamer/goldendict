@@ -25,6 +25,9 @@ GD_ARTICLE_EXTRA_HEADERS = $$GD_REPO_ROOT/articleprofile.hh \
                            $$GD_REPO_ROOT/audioplayerinterface.hh
 GD_ARTICLE_EXTRA_FORMS = $$GD_REPO_ROOT/authentication.ui \
                          $$GD_REPO_ROOT/articleview.ui
+QT += pdf pdfwidgets
+SOURCES += $$GD_REPO_ROOT/savearticle.cc $$GD_REPO_ROOT/printpipeline.cc $$GD_REPO_ROOT/articleinspector.cc
+HEADERS += $$GD_REPO_ROOT/savearticle.hh $$GD_REPO_ROOT/printpipeline.hh $$GD_REPO_ROOT/articleinspector.hh
 include(../article-test.pri)
 SOURCES += tst_article_history.cc
 # Observe production's integer-keyed state calls and retain real renderer

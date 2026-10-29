@@ -27,6 +27,9 @@ GD_ARTICLE_EXTRA_HEADERS = $$GD_REPO_ROOT/articleprofile.hh \
                            $$GD_REPO_ROOT/savearticle.hh
 GD_ARTICLE_EXTRA_FORMS = $$GD_REPO_ROOT/authentication.ui \
                          $$GD_REPO_ROOT/articleview.ui
+QT += pdf pdfwidgets
+SOURCES += $$GD_REPO_ROOT/printpipeline.cc $$GD_REPO_ROOT/articleinspector.cc
+HEADERS += $$GD_REPO_ROOT/printpipeline.hh $$GD_REPO_ROOT/articleinspector.hh
 include(../article-test.pri)
 SOURCES += tst_save_article.cc
 
