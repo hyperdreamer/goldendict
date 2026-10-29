@@ -1,0 +1,106 @@
+#!/bin/sh
+# Audit compiled-input text, the compiled vendor closure, and a real app link.
+set -eu
+if [ "$#" -ne 2 ]; then
+    echo 'usage: check-qt6-only.sh <Makefile> <application-link-log>' >&2
+    exit 2
+fi
+cd "$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
+exec python3 - "$@" <<'PY'
+import pathlib
+import re
+import shlex
+import sys
+
+makefile, log = map(pathlib.Path, sys.argv[1:])
+failed = False
+
+def reject(message):
+    global failed
+    print('FAIL: ' + message, flush=True)
+    failed = True
+
+def search(label, pattern, paths, flags=0):
+    print('SEARCH ' + label + ': grep -nE ' + shlex.quote(pattern) + ' ' +
+          ' '.join(shlex.quote(str(p)) for p in paths), flush=True)
+    rx = re.compile(pattern, flags)
+    for path in paths:
+        for n, line in enumerate(path.read_text(errors='replace').splitlines(), 1):
+            if rx.search(line):
+                reject(f'{path}:{n}: {line}')
+
+extensions = {'.pro', '.pri', '.cc', '.hh', '.c', '.h', '.cpp', '.mm', '.ui', '.qrc'}
+excluded = {'docs', 'help', 'locale', 'qtsingleapplication', 'winlibs', 'maclibs', 'opencc',
+            '.git', '.superpowers', 'build'}
+paths = sorted(p for p in pathlib.Path('.').rglob('*')
+               if p.is_file() and p.suffix in extensions
+               and not excluded.intersection(p.parts)
+               and not str(p).startswith('tests/fixtures/'))
+print('SCOPE: extensions=' + ','.join(sorted(extensions)) +
+      '; excluded=docs,help,locale,tests/fixtures,qtsingleapplication,winlibs,maclibs,opencc'
+      '; generated build and agent/git metadata are not compiled inputs', flush=True)
+banned = (r'QRegExp|QTextCodec|QDesktopWidget|QX11Info|QWebView|QWebPage|QWebFrame|'
+          r'QWebElement|QWebSecurityOrigin|QWebInspector|QMediaContent|MAKE_QTMULTIMEDIA_PLAYER|'
+          r'IS_QT_5|Qt4x5|qt4x5[.]hh|webkit|qt6-5compat|Qt5Compat')
+# Version identifiers in a conditional, including continued preprocessor guards.
+branch = (r'(?s)(?:^\s*#\s*(?:if|elif)[^\n]*(?:\\\n[^\n]*)*|'
+          r'^\s*[^#\n]*(?:lessThan|greaterThan|equals|contains)\([^\n]*)'
+          r'(?:QT_VERSION|QT_MAJOR_VERSION|QT_MINOR_VERSION)')
+search('first-party banned APIs (literal text, including comments)', banned, paths)
+for path in paths:
+    print('SEARCH version-branch: python-re ' + shlex.quote(branch) + ' ' + shlex.quote(str(path)), flush=True)
+    text = path.read_text(errors='replace')
+    for match in re.finditer(branch, text, re.MULTILINE):
+        reject(f'{path}:{text.count(chr(10), 0, match.start()) + 1}: version branching: {match.group()}')
+vendors = [pathlib.Path('qtsingleapplication/src') / name for name in
+           ('qtsingleapplication.pri', 'qtsingleapplication.h', 'qtsingleapplication.cpp', 'qtlocalpeer.cpp')]
+for path in vendors:
+    if not path.is_file():
+        reject(f'missing compiled vendor input: {path}')
+        continue
+    search('compiled vendor (separate input)', banned, [path])
+    search('compiled vendor version identifiers', r'QT_VERSION|QT_MAJOR_VERSION|QT_MINOR_VERSION', [path])
+    search('compiled vendor removed checksum overload', r'qChecksum\((?!\s*QByteArrayView\b)', [path])
+if not makefile.is_file() or makefile.stat().st_size == 0:
+    reject(f'missing/empty application Makefile: {makefile}')
+if not log.is_file() or log.stat().st_size == 0:
+    reject(f'missing/empty application link log: {log}')
+else:
+    # Identify the target from the generated application Makefile, not a test link
+    # or arbitrary text mentioning Qt. Require a compiler-driver link, not echo.
+    target = re.search(r'^TARGET\s*=\s*(\S+)', makefile.read_text(), re.MULTILINE) if makefile.is_file() else None
+    if not target or pathlib.Path(target[1]).name != 'goldendict':
+        reject('Makefile is not the goldendict application Makefile')
+    commands = []
+    for line in log.read_text(errors='replace').replace('\\\n', ' ').splitlines():
+        try:
+            argv = shlex.split(line)
+        except ValueError:
+            continue
+        if not argv:
+            continue
+        compiler = pathlib.Path(argv[0]).name
+        if compiler in ('ccache', 'sccache') and len(argv) > 1:
+            argv = argv[1:]
+            compiler = pathlib.Path(argv[0]).name
+        if not re.fullmatch(r'(?:[\w.+-]*-)?(?:g\+\+|clang\+\+|c\+\+)(?:-[0-9.]+)?', compiler):
+            continue
+        if '-c' in argv or '-o' not in argv:
+            continue
+        i = argv.index('-o')
+        if i + 1 < len(argv) and pathlib.Path(argv[i + 1]).name == 'goldendict':
+            commands.append(line)
+    print('SEARCH actual-link: compiler driver, -o goldendict, not -c in ' + shlex.quote(str(log)), flush=True)
+    if not commands:
+        reject('missing actual application linker command in verbose log')
+    for token in ('Qt5', 'Qt6Compat', 'Qt6Core5Compat', 'QtMultimedia', 'Qt6Multimedia', 'QtWebKit', 'X11Extras'):
+        print('SEARCH actual-link: grep -nF ' + shlex.quote(token), flush=True)
+        for command in commands:
+            if token in command:
+                reject('banned application link token ' + token + ': ' + command)
+    for command in commands:
+        if 'Qt6Core' not in command:
+            reject('application linker command has no Qt6Core linkage: ' + command)
+print('Qt6-only audit: ' + ('FAIL' if failed else 'PASS'), flush=True)
+sys.exit(1 if failed else 0)
+PY

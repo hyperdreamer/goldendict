@@ -32,7 +32,9 @@ QT += testlib
 # endpoint (X11 unix socket/TCP port or the Wayland compositor socket), so the
 # shared support needs QtNetwork in every target. QtDBus is needed by the private
 # portal-bus fixture; linking it does not connect to any bus by itself.
-QT += network dbus
+QT += network dbus widgets webenginecore webenginewidgets
+# RequiredEnvironment drives a real renderer/JS for QApplication suites. Pure
+# QCoreApplication suites remain renderer-free at runtime (60 s watchdog).
 
 INCLUDEPATH += $$GD_REPO_ROOT $$GD_TESTS_ROOT $$GD_TESTS_ROOT/support
 
