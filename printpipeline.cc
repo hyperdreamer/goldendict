@@ -24,6 +24,7 @@ struct FrameState
 {
   QWebEngineFrame frame;
   QVector<int> path;
+  QString nonce;
 };
 QWebEngineFrame atPath( QWebEnginePage * page, QVector<int> const & path )
 {
@@ -56,7 +57,14 @@ PrintPipeline::PrintPipeline( QWebEngineView * target, ArticleBridge * channel, 
         cancelWithReason( QStringLiteral( "The article changed while generating its PDF." ) );
     } );
     connect( bridge, &ArticleBridge::bridgeReady, this, [this] { checkReadiness(); } );
-    connect( bridge, &ArticleBridge::frameEvent, this, [this] { checkReadiness(); } );
+    connect( bridge, &ArticleBridge::frameEvent, this, [this]( QVariantMap const & event ) {
+      // A child navigation does not increment the top document generation.
+      // Retire checks that may still contain that child's previous document.
+      if( event.value( "gdFrameEvent" ).toString() == QLatin1String( "ready" ) &&
+          currentState == State::Generating && !snapshotRequested )
+      { ++readinessOperation; checking = false; }
+      checkReadiness();
+    } );
     connect( bridge, &QObject::destroyed, this, [this] {
       cancelWithReason( QStringLiteral( "The article was closed." ) );
     } );
@@ -112,6 +120,18 @@ void PrintPipeline::fail( QString const & reason, bool retainSnapshot )
   checking = false;
   exportDestination.clear();
   currentState = State::Failed;
+  if( retainSnapshot && dialog && previous == State::Printing )
+  {
+    // paintRequested is on Qt's preview rendering stack. Its dialog must not
+    // be destroyed from inside that stack, including by a failed-signal slot.
+    auto const token = operation;
+    QMetaObject::invokeMethod( this, [this, token, reason] {
+      if( token != operation || currentState != State::Failed ) return;
+      delete dialog.data(); dialog.clear();
+      emit failed( reason );
+    }, Qt::QueuedConnection );
+    return;
+  }
   if( retainSnapshot ) { delete dialog.data(); dialog.clear(); }
   else clearSnapshot();
   qWarning().noquote() << "PrintPipeline: failed state=" << int( previous ) << ": " << reason;
@@ -146,6 +166,7 @@ void PrintPipeline::exportPdf( QString const & destination, QPageLayout const & 
   // A new export replaces its predecessor. Neither old PDF callbacks nor a
   // reentrant ready handler can publish the replaced destination.
   beginSnapshot( layout, destination );
+  if( destination.isEmpty() ) fail( QStringLiteral( "No PDF destination was supplied." ) );
 }
 void PrintPipeline::beginSnapshot( QPageLayout const & layout, QString const & destination )
 {
@@ -180,7 +201,7 @@ void PrintPipeline::checkReadiness()
   auto check = std::make_shared<Check>();
   std::function<bool(QWebEngineFrame, QVector<int>)> collect = [&]( QWebEngineFrame frame, QVector<int> path ) {
     if( !frame.isValid() || path.size() > 32 || check->frames.size() >= 1024 ) return false;
-    check->frames.append( {frame, path} );
+    check->frames.append( {frame, path, {}} );
     auto children = frame.children();
     for( int index = 0; index < children.size(); ++index )
     {
@@ -193,9 +214,11 @@ void PrintPipeline::checkReadiness()
   checking = true;
   check->remaining = check->frames.size();
   auto const token = operation;
+  auto const checkToken = ++readinessOperation;
   QPointer<PrintPipeline> guard( this );
-  for( auto const & node : check->frames )
+  for( int index = 0; index < check->frames.size(); ++index )
   {
+    auto const & node = check->frames.at( index );
     // Read the DOM in each native frame's own world, including cross-origin
     // frames. WebsiteFrames' nonce/ready state and applied root height are
     // observed rather than trusting an unverified postMessage as a barrier.
@@ -212,17 +235,56 @@ void PrintPipeline::checkReadiness()
              !(parseFloat(element.style.height)>0)))return false;
         }
       }
-      return window.frames.length===%2;
+      return window.frames.length===%2&&f?f.docId:null;
     })())JS" ).arg( generation ).arg( node.frame.children().size() );
-    bridge->runInFrame( node.frame, script, [guard, token, check]( QVariant const & value ) {
-      if( !guard || !guard->current( token ) || guard->currentState != State::Generating ) return;
-      check->ready = check->ready && value.toBool();
+    bridge->runInFrame( node.frame, script, [guard, token, checkToken, check, index]( QVariant const & value ) {
+      if( !guard || !guard->current( token ) || checkToken != guard->readinessOperation ||
+          guard->currentState != State::Generating ) return;
+      check->frames[index].nonce = value.metaType().id() == QMetaType::QString ? value.toString() : QString();
+      check->ready = check->ready && !check->frames.at( index ).nonce.isEmpty();
       if( --check->remaining != 0 ) return;
       guard->checking = false;
       if( !check->ready || guard->page->isLoading() ) return;
+      QVector<QPair<QWebEngineFrame, QString>> documents;
       for( auto const & frame : check->frames )
+      {
         if( !frame.frame.isValid() || atPath( guard->page, frame.path ) != frame.frame ) return;
-      guard->requestSnapshot( token );
+        documents.append( {frame.frame, frame.nonce} );
+      }
+      guard->verifyReadiness( token, checkToken, documents );
+    } );
+  }
+}
+void PrintPipeline::verifyReadiness( quint64 token, quint64 checkToken,
+                                    QVector<QPair<QWebEngineFrame, QString>> const & frames )
+{
+  // Native handles survive same-frame navigation. A second pass validates the
+  // document nonces observed by the first pass before releasing the barrier.
+  struct Verification { int remaining; bool ready = true; };
+  auto verification = std::make_shared<Verification>();
+  verification->remaining = frames.size();
+  checking = true;
+  QPointer<PrintPipeline> guard( this );
+  for( auto const & frame : frames )
+  {
+    auto const native = frame.first;
+    QString const nonce = frame.second;
+    int const children = native.children().size();
+    QString const script = QStringLiteral( R"JS(/*gd-print-verify*/(()=>{
+      const f=window.__gdWebsiteFrame;
+      return {docId:f&&f.docId,children:window.frames.length,ready:document.readyState==='complete'&&
+        (!document.fonts||document.fonts.status==='loaded')&&f&&f.ready&&f.generation===%1};
+    })())JS" ).arg( generation );
+    bridge->runInFrame( native, script, [guard, token, checkToken, verification, native, nonce, children]( QVariant const & value ) {
+      if( !guard || !guard->current( token ) || checkToken != guard->readinessOperation ||
+          guard->currentState != State::Generating ) return;
+      auto const state = value.toMap();
+      verification->ready = verification->ready && native.isValid() &&
+        state.value( "docId" ).toString() == nonce && state.value( "ready" ).toBool() &&
+        state.value( "children" ).toInt() == children;
+      if( --verification->remaining != 0 ) return;
+      guard->checking = false;
+      if( verification->ready && !guard->page->isLoading() ) guard->requestSnapshot( token );
     } );
   }
 }
@@ -233,7 +295,12 @@ void PrintPipeline::requestSnapshot( quint64 token )
   readinessTimer.stop();
   QPointer<PrintPipeline> guard( this );
   view->printToPdf( [guard, token]( QByteArray const & result ) {
-    if( guard && guard->current( token ) ) guard->loadSnapshot( token, result );
+    if( !guard || !guard->current( token ) ) return;
+    // WebEngine may invoke its last callback from the page destructor. Let
+    // destruction guards cancel the operation before interpreting that result.
+    QMetaObject::invokeMethod( guard, [guard, token, result] {
+      if( guard && guard->current( token ) ) guard->loadSnapshot( token, result );
+    }, Qt::QueuedConnection );
   }, snapshotLayout );
 }
 void PrintPipeline::loadSnapshot( quint64 token, QByteArray const & result )

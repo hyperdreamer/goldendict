@@ -7,6 +7,8 @@
 #include <QPageLayout>
 #include <QPointer>
 #include <QTimer>
+#include <QWebEngineFrame>
+#include <QVector>
 #include <memory>
 
 class ArticleBridge;
@@ -54,7 +56,7 @@ private:
   QPointer<ArticleBridge> bridge;
   QPointer<QPrintPreviewDialog> dialog;
   State currentState = State::Idle;
-  quint64 operation = 0, exportOperation = 0;
+  quint64 operation = 0, exportOperation = 0, readinessOperation = 0;
   int generation = 0;
   bool checking = false, snapshotRequested = false;
   QString exportDestination;
@@ -69,6 +71,7 @@ private:
   bool current( quint64 ) const noexcept;
   void beginSnapshot( QPageLayout const &, QString const & = {} );
   void checkReadiness();
+  void verifyReadiness( quint64, quint64, QVector<QPair<QWebEngineFrame, QString>> const & );
   void requestSnapshot( quint64 );
   void loadSnapshot( quint64, QByteArray const & );
   void pdfStatusChanged( quint64 );
