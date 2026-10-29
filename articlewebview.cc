@@ -128,8 +128,8 @@ ArticleWebView::ArticleWebView( QWidget * parent ): QWebEngineView( parent )
 
 ArticleWebView::~ArticleWebView()
 {
-  delete inspector.data();
   if( bridge ) bridge->retire();
+  delete inspector.data();
   // WebEngine can run final JS callbacks here. The bridge is still present,
   // Closed, and only deleted once those callbacks can no longer reach the page.
   delete ownedPage.data();

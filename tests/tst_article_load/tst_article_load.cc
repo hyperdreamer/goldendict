@@ -42,6 +42,7 @@
 #include <QtTest>
 #include <QApplication>
 #include <QDeadlineTimer>
+#include <QDirIterator>
 #include <QDesktopServices>
 #include <QElapsedTimer>
 #include <QFile>
@@ -313,16 +314,14 @@ private slots:
         QVERIFY(!QFile::exists(output.filePath("duplicate.html")));
         QVERIFY(reported(status).contains("saved", Qt::CaseInsensitive));
         f.a->setResources({{"asset.bin", "complete-asset"}});
-        evaluate(web->page(), "const i=document.createElement('object');i.data='bres://dict-a/asset.bin';document.body.append(i)");
+        evaluate(web->page(), "const i=document.createElement('img');i.src='bres://dict-a/asset.bin';document.body.append(i)");
         status.clear(); view->saveArticle(complete, true);
         WAIT_FOR(saved.size() == 2);
         auto directories = QDir(output.path()).entryList({"complete_files-*"}, QDir::Dirs);
         QCOMPARE(directories.size(), 1);
-        auto assets = QDir(output.filePath(directories.first())).entryList(QDir::Files);
-        QVERIFY(!assets.isEmpty());
+        QDirIterator assets(output.filePath(directories.first()), QDir::Files, QDirIterator::Subdirectories);
         bool assetFound = false;
-        for (auto const &asset : assets)
-            assetFound |= readFile(output.filePath(directories.first() + '/' + asset)) == "complete-asset";
+        while (assets.hasNext()) assetFound |= readFile(assets.next()) == "complete-asset";
         QVERIFY(assetFound);
         QVERIFY(!readFile(complete).contains("bres://dict-a/asset.bin"));
         QVERIFY(!reported(status).isEmpty());
@@ -347,6 +346,10 @@ private slots:
         QSignalSpy firstPages(first.get(), &ArticleView::pageLoaded), pages(selected.get(), &ArticleView::pageLoaded);
         first->showDefinition("wrong-view", 17); selected->showDefinition("selected-view", 17);
         WAIT_FOR(loaded(*first, firstPages, 0, "wrong-view") && loaded(*selected, pages, 0, "selected-view"));
+        evaluate(first->findChild<ArticleWebView*>()->page(),
+                 "document.body.insertAdjacentHTML('afterbegin','<p>WrongRendererPDF</p>')");
+        evaluate(selected->findChild<ArticleWebView*>()->page(),
+                 "document.body.insertAdjacentHTML('afterbegin','<p>SelectedRendererPDF</p>')");
         QTemporaryDir output; QVERIFY(output.isValid());
         auto path = output.filePath("selected.pdf");
         QSignalSpy status(selected.get(), &ArticleView::statusBarMessage);
@@ -365,11 +368,16 @@ private slots:
         auto pdf = pdfCompletions.takeFirst(); QVERIFY(pdf.bytes.startsWith("%PDF-")); pdf.callback(pdf.bytes);
         WAIT_FOR(QFileInfo(path).size() > 0);
         QCOMPARE(ready.size(), 1);
-        QVERIFY(pdfText(path).contains("selected-view")); QVERIFY(!pdfText(path).contains("wrong-view"));
-        QVERIFY(!reported(status).isEmpty());
+        QVERIFY(pdfText(path).contains("SelectedRendererPDF")); QVERIFY(!pdfText(path).contains("WrongRendererPDF"));
+        WAIT_FOR(reported(status).contains("PDF exported:"));
         QVERIFY(!QFile::exists(output.filePath("duplicate.pdf")));
         status.clear(); selected->exportPdf(output.filePath("missing/file.pdf"), printLayout());
         WAIT_FOR(!failed.isEmpty()); QVERIFY(reported(status).contains(failed.last()[0].toString()));
+        QVERIFY(stays([&] {
+            for (auto const &message : status)
+                if (message[0].toString().startsWith("PDF exported:")) return false;
+            return true;
+        }));
         holdPdf = true; status.clear();
         selected->exportPdf(output.filePath("cancelled.pdf"), printLayout()); WAIT_FOR(!pdfCompletions.isEmpty());
         int const count = pages.size(); selected->showDefinition("new-generation", 17);
@@ -533,6 +541,45 @@ private slots:
         WAIT_FOR(view->getCurrentArticle() == "gdfrom-dict-b");
         QCOMPARE(view->getPhrase().punctuationSuffix, QStringLiteral("!"));
         WAIT_FOR(!view->hasSound());
+    }
+
+    // Break: live JS getters, duplicate cache notifications or actions enabled across reset.
+    void cachedStateEnablesActionsOnlyAfterReadinessAndClearsOnce()
+    {
+        QDeadlineTimer deadline(12000);
+        Fixture f; auto view = f.view(); auto web = view->findChild<ArticleWebView*>();
+        auto bridge = view->findChild<ArticleBridge*>();
+        auto action = [&](QString const &text) -> QAction* {
+            for (auto a : view->findChildren<QAction*>()) if (a->text() == text) return a;
+            return nullptr;
+        };
+        auto select = action("Select Current Article"), up = action("Previous article"), down = action("Next article");
+        QVERIFY(select && up && down);
+        QVERIFY(!select->isEnabled()); QVERIFY(!up->isEnabled()); QVERIFY(!down->isEnabled());
+        QSignalSpy pages(view.get(), &ArticleView::pageLoaded), articles(view.get(), &ArticleView::articlesChanged),
+                   sounds(view.get(), &ArticleView::soundAvailabilityChanged);
+        view->showDefinition("cache-actions", 17); WAIT_FOR(loaded(*view, pages, 0, "cache-actions"));
+        QVERIFY(select->isEnabled()); QVERIFY(up->isEnabled()); QVERIFY(down->isEnabled());
+        QCOMPARE(articles.size(), 1); QCOMPARE(sounds.size(), 0);
+        evaluate(web->page(), "gdAudioLinks.first='gdau://dict-a/sound.wav'; window.dispatchEvent(new Event('gd-active-article'))");
+        WAIT_FOR(view->hasSound()); QCOMPARE(sounds.size(), 1);
+        int const captureCount = captureCalls;
+        for (int i = 0; i < 3; ++i) {
+            QCOMPARE(view->getArticlesList(), (QStringList{"dict-a", "dict-b"}));
+            QCOMPARE(view->getCurrentArticle(), QString("gdfrom-dict-a"));
+            QCOMPARE(view->getActiveArticleId(), QString("dict-a")); QVERIFY(view->hasSound());
+        }
+        QCOMPARE(captureCalls, captureCount);
+        evaluate(web->page(), "window.dispatchEvent(new Event('gd-active-article'))");
+        QVERIFY(stays([&] { return articles.size() == 1 && sounds.size() == 1; }));
+        bridge->reset();
+        QVERIFY(view->getArticlesList().isEmpty()); QVERIFY(view->getCurrentArticle().isEmpty());
+        QVERIFY(view->getActiveArticleId().isEmpty()); QVERIFY(!view->hasSound());
+        QVERIFY(!select->isEnabled()); QVERIFY(!up->isEnabled()); QVERIFY(!down->isEnabled());
+        QCOMPARE(articles.size(), 2); QCOMPARE(articles.last()[0].toStringList(), QStringList());
+        QCOMPARE(sounds.size(), 2); QCOMPARE(sounds.last()[0].toBool(), false);
+        bridge->reset();
+        QVERIFY(stays([&] { return articles.size() == 2 && sounds.size() == 2; }));
     }
 
     // Break: wrong debounce/deadline consumer, zero/default fallback or live reply only.

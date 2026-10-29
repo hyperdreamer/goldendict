@@ -262,8 +262,8 @@ ArticleView::~ArticleView()
   d->save->cancel(); d->print->cancel();
   delete d->save.data(); delete d->print.data();
   d->printer.reset();
-  // ArticleWebView closes DevTools, retires the bridge, destroys its page, then
-  // destroys the bridge. All pages still borrow the live controller profile.
+  // ArticleWebView retires bridge work, closes DevTools, then destroys its page
+  // and bridge. All pages still borrow the live controller profile.
   delete ui.definition;
   cleanupTemp();
   try { audioPlayer->stop(); } catch( std::exception const & e ) { qWarning( "Audio stop: %s", e.what() ); }
