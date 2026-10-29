@@ -70,6 +70,13 @@ Alternatively, load `goldendict.pro` in Qt Creator.
 named `goldendict` (a plain `qmake6` resolves the project by directory name, and an
 ambiguous directory with two `.pro` files is rejected).
 
+### Build in the source tree
+
+Configure and build in the source tree. Out-of-source (shadow) build trees are not
+supported: two translation units declare a `Q_OBJECT` class in the `.cc` file and
+include their own generated `.moc`, and qmake 6.12 emits the dependency on that file
+without the rule that produces it, so a shadow tree fails to build.
+
 Note: to compile with `libhunspell` older than 1.5 pass `"CONFIG+=old_hunspell"` to `qmake6`.
 
 ### Optional KDE window-system helper
@@ -232,6 +239,12 @@ documented, not silent:
 * Windows and macOS builds, CMake, and a parallel Qt 4/Qt 5 build are out of scope.
   Existing platform-only sources are retained with mechanically corrected Qt 6 API
   but are not a validated release for those platforms.
+
+The detailed evidence for these limits, including which results are automated and
+X11-verified and which native Wayland session checks are still not recorded, is in
+[`docs/wayland-limitations.md`](docs/wayland-limitations.md). A window activation
+request is a best-effort hint: a compositor may decline it, so a window that does not
+come to the front is not a bug in GoldenDict.
 
 ## License
 
