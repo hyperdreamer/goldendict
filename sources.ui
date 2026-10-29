@@ -296,7 +296,7 @@ of the appropriate groups to use them.</string>
        <item>
         <widget class="QLabel" name="label_9">
          <property name="text">
-          <string>Any websites. A string %GDWORD% will be replaced with the query word:</string>
+          <string>Any websites. A string %GDWORD% will be replaced with the query word. Opening websites in a separate tab is available. Inline website embedding and iframe auto-resize are unavailable in Qt WebEngine:</string>
          </property>
         </widget>
        </item>

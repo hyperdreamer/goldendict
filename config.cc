@@ -21,18 +21,10 @@
 #endif
 
 #include "atomic_rename.hh"
-#include "qt4x5.hh"
-
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
 #include <QStandardPaths>
-#else
-#include <QDesktopServices>
-#endif
 
-#if defined( HAVE_X11 ) && QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-// Whether XDG Base Directory specification might be followed.
-// Only Qt5 builds are supported, as Qt4 doesn't provide all functions needed
-// to get XDG Base Directory compliant locations.
+#ifdef HAVE_X11
+// Preserve the existing XDG paths for builds with Linux desktop support.
 #define XDG_BASE_DIRECTORY_COMPLIANCE
 #endif
 
@@ -362,9 +354,7 @@ Preferences::Preferences():
 , limitInputPhraseLength( false )
 , inputPhraseLengthLimit( 1000 )
 , maxDictionaryRefsInContextMenu ( 20 )
-#ifndef Q_WS_X11
 , trackClipboardChanges( false )
-#endif
 , synonymSearchEnabled( true )
 {
 }
@@ -498,17 +488,17 @@ Group loadGroup( QDomElement grp, unsigned * nextId = 0 )
 
   QDomNodeList dicts = grp.elementsByTagName( "dictionary" );
 
-  for( Qt4x5::Dom::size_type y = 0; y < dicts.length(); ++y )
+  for( qsizetype y = 0; y < dicts.length(); ++y )
     g.dictionaries.push_back( DictionaryRef( dicts.item( y ).toElement().text(),
                                              dicts.item( y ).toElement().attribute( "name" ) ) );
 
   QDomNode muted = grp.namedItem( "mutedDictionaries" );
   dicts = muted.toElement().elementsByTagName( "mutedDictionary" );
-  for( Qt4x5::Dom::size_type x = 0; x < dicts.length(); ++x )
+  for( qsizetype x = 0; x < dicts.length(); ++x )
     g.mutedDictionaries.insert( dicts.item( x ).toElement().text() );
 
   dicts = muted.toElement().elementsByTagName( "popupMutedDictionary" );
-  for( Qt4x5::Dom::size_type x = 0; x < dicts.length(); ++x )
+  for( qsizetype x = 0; x < dicts.length(); ++x )
     g.popupMutedDictionaries.insert( dicts.item( x ).toElement().text() );
 
   return g;
@@ -523,7 +513,7 @@ MutedDictionaries loadMutedDictionaries( QDomNode mutedDictionaries )
     QDomNodeList nl = mutedDictionaries.toElement().
                         elementsByTagName( "mutedDictionary" );
 
-    for( Qt4x5::Dom::size_type x = 0; x < nl.length(); ++x )
+    for( qsizetype x = 0; x < nl.length(); ++x )
       result.insert( nl.item( x ).toElement().text() );
   }
 
@@ -686,7 +676,7 @@ Class load() THROW_SPEC( exError )
   {
     QDomNodeList nl = paths.toElement().elementsByTagName( "path" );
 
-    for( Qt4x5::Dom::size_type x = 0; x < nl.length(); ++x )
+    for( qsizetype x = 0; x < nl.length(); ++x )
       c.paths.push_back(
         Path( nl.item( x ).toElement().text(),
               nl.item( x ).toElement().attribute( "recursive" ) == "1" ) );
@@ -698,7 +688,7 @@ Class load() THROW_SPEC( exError )
   {
     QDomNodeList nl = soundDirs.toElement().elementsByTagName( "sounddir" );
 
-    for( Qt4x5::Dom::size_type x = 0; x < nl.length(); ++x )
+    for( qsizetype x = 0; x < nl.length(); ++x )
       c.soundDirs.push_back(
         SoundDir( nl.item( x ).toElement().text(),
                   nl.item( x ).toElement().attribute( "name" ),
@@ -723,7 +713,7 @@ Class load() THROW_SPEC( exError )
 
     QDomNodeList nl = groups.toElement().elementsByTagName( "group" );
 
-    for( Qt4x5::Dom::size_type x = 0; x < nl.length(); ++x )
+    for( qsizetype x = 0; x < nl.length(); ++x )
     {
       QDomElement grp = nl.item( x ).toElement();
 
@@ -739,7 +729,7 @@ Class load() THROW_SPEC( exError )
 
     QDomNodeList nl = hunspell.toElement().elementsByTagName( "enabled" );
 
-    for( Qt4x5::Dom::size_type x = 0; x < nl.length(); ++x )
+    for( qsizetype x = 0; x < nl.length(); ++x )
       c.hunspell.enabledDictionaries.push_back( nl.item( x ).toElement().text() );
   }
 
@@ -803,7 +793,7 @@ Class load() THROW_SPEC( exError )
   {
     QDomNodeList nl = programs.toElement().elementsByTagName( "program" );
 
-    for( Qt4x5::Dom::size_type x = 0; x < nl.length(); ++x )
+    for( qsizetype x = 0; x < nl.length(); ++x )
     {
       QDomElement pr = nl.item( x ).toElement();
 
@@ -830,7 +820,7 @@ Class load() THROW_SPEC( exError )
   {
     QDomNodeList nl = mws.toElement().elementsByTagName( "mediawiki" );
 
-    for( Qt4x5::Dom::size_type x = 0; x < nl.length(); ++x )
+    for( qsizetype x = 0; x < nl.length(); ++x )
     {
       QDomElement mw = nl.item( x ).toElement();
 
@@ -858,7 +848,7 @@ Class load() THROW_SPEC( exError )
   {
     QDomNodeList nl = wss.toElement().elementsByTagName( "website" );
 
-    for( Qt4x5::Dom::size_type x = 0; x < nl.length(); ++x )
+    for( qsizetype x = 0; x < nl.length(); ++x )
     {
       QDomElement ws = nl.item( x ).toElement();
 
@@ -886,7 +876,7 @@ Class load() THROW_SPEC( exError )
   {
     QDomNodeList nl = dss.toElement().elementsByTagName( "server" );
 
-    for( Qt4x5::Dom::size_type x = 0; x < nl.length(); ++x )
+    for( qsizetype x = 0; x < nl.length(); ++x )
     {
       QDomElement ds = nl.item( x ).toElement();
 
@@ -915,7 +905,7 @@ Class load() THROW_SPEC( exError )
   {
     QDomNodeList nl = ves.toElement().elementsByTagName( "voiceEngine" );
 
-    for ( Qt4x5::Dom::size_type x = 0; x < nl.length(); ++x )
+    for ( qsizetype x = 0; x < nl.length(); ++x )
     {
       QDomElement ve = nl.item( x ).toElement();
       VoiceEngine v;
@@ -1089,10 +1079,8 @@ Class load() THROW_SPEC( exError )
     if ( !preferences.namedItem( "maxDictionaryRefsInContextMenu" ).isNull() )
       c.preferences.maxDictionaryRefsInContextMenu = preferences.namedItem( "maxDictionaryRefsInContextMenu" ).toElement().text().toUShort();
 
-#ifndef Q_WS_X11
     if ( !preferences.namedItem( "trackClipboardChanges" ).isNull() )
       c.preferences.trackClipboardChanges = ( preferences.namedItem( "trackClipboardChanges" ).toElement().text() == "1" );
-#endif
 
     if ( !preferences.namedItem( "synonymSearchEnabled" ).isNull() )
       c.preferences.synonymSearchEnabled = ( preferences.namedItem( "synonymSearchEnabled" ).toElement().text() == "1" );
@@ -2080,11 +2068,9 @@ void save( Class const & c ) THROW_SPEC( exError )
     opt.appendChild( dd.createTextNode( QString::number( c.preferences.maxDictionaryRefsInContextMenu ) ) );
     preferences.appendChild( opt );
 
-#ifndef Q_WS_X11
     opt = dd.createElement( "trackClipboardChanges" );
     opt.appendChild( dd.createTextNode( c.preferences.trackClipboardChanges ? "1" : "0" ) );
     preferences.appendChild( opt );
-#endif
 
     opt = dd.createElement( "synonymSearchEnabled" );
     opt.appendChild( dd.createTextNode( c.preferences.synonymSearchEnabled ? "1" : "0" ) );
@@ -2521,15 +2507,11 @@ QString getStylesDir() throw()
 QString getCacheDir() throw()
 {
   return isPortableVersion() ? portableHomeDirPath() + "/cache"
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
   #ifdef HAVE_X11
                              : QStandardPaths::writableLocation( QStandardPaths::GenericCacheLocation ) + "/goldendict";
   #else
                              : QStandardPaths::writableLocation( QStandardPaths::CacheLocation );
   #endif
-#else
-                             : QDesktopServices::storageLocation( QDesktopServices::CacheLocation );
-#endif
 }
 
 QString getNetworkCacheDir() throw()

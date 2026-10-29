@@ -8,13 +8,10 @@
 #include <QBitmap>
 #include <QMenu>
 #include <QMouseEvent>
-#include <QDesktopWidget>
+#include "platformwindow.hh"
+#include <QScreen>
 #include "gddebug.hh"
 #include "gestures.hh"
-
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 11, 0 )
-#include <QScreen>
-#endif
 
 #ifdef Q_OS_MAC
 #include "macmouseover.hh"
@@ -25,22 +22,9 @@
 
 using std::wstring;
 
-/// We use different window flags under Windows and X11 due to slight differences
-/// in their behavior on those platforms.
-static const Qt::WindowFlags defaultUnpinnedWindowFlags =
-
-#if defined (Q_OS_WIN) || ( defined (Q_OS_MAC) && QT_VERSION < QT_VERSION_CHECK( 5, 3, 0 ) )
-Qt::Tool | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint
-#else
-Qt::Popup
-#endif
-;
-
 static const Qt::WindowFlags pinnedWindowFlags =
-#ifdef HAVE_X11
-/// With the Qt::Dialog flag, scan popup is always on top of the main window
-/// on Linux/X11 with Qt 4, Qt 5 since version 5.12.1 (QTBUG-74309).
-/// Qt::Window allows to use the scan popup and the main window independently.
+#if defined( Q_OS_UNIX ) && !defined( Q_OS_MAC )
+// A top-level window lets the pinned popup and main window be used independently.
 Qt::Window
 #else
 Qt::Dialog
@@ -68,6 +52,7 @@ static bool ownsClipboardMode( QClipboard::Mode mode )
 
 ScanPopup::ScanPopup( QWidget * parent,
                       Config::Class & cfg_,
+                      QWebEngineProfile & profile,
                       ArticleNetworkAccessManager & articleNetMgr,
                       AudioPlayerPtr const & audioPlayer_,
                       std::vector< sptr< Dictionary::Class > > const & allDictionaries_,
@@ -106,7 +91,7 @@ ScanPopup::ScanPopup( QWidget * parent,
 
   ui.queryError->hide();
 
-  definition = new ArticleView( ui.outerFrame, articleNetMgr, audioPlayer_,
+  definition = new ArticleView( ui.outerFrame, profile, articleNetMgr, audioPlayer_,
                                 allDictionaries, groups, true, cfg,
                                 openSearchAction,
                                 dictionaryBar.toggleViewAction()
@@ -249,16 +234,16 @@ ScanPopup::ScanPopup( QWidget * parent,
   connect( focusArticleViewAction, SIGNAL( triggered() ), definition, SLOT( focus() ) );
 
   switchExpandModeAction.setShortcuts( QList< QKeySequence >() <<
-                                       QKeySequence( Qt::CTRL + Qt::Key_8 ) <<
-                                       QKeySequence( Qt::CTRL + Qt::Key_Asterisk ) <<
-                                       QKeySequence( Qt::CTRL + Qt::SHIFT + Qt::Key_8 ) );
+                                       QKeySequence( Qt::CTRL | Qt::Key_8 ) <<
+                                       QKeySequence( Qt::CTRL | Qt::Key_Asterisk ) <<
+                                       QKeySequence( Qt::CTRL | Qt::SHIFT | Qt::Key_8 ) );
 
   addAction( &switchExpandModeAction );
   connect( &switchExpandModeAction, SIGNAL( triggered() ),
            this, SLOT(switchExpandOptionalPartsMode() ) );
 
-  connect( ui.groupList, SIGNAL( currentIndexChanged( QString const & ) ),
-           this, SLOT( currentGroupChanged( QString const & ) ) );
+  connect( ui.groupList, &QComboBox::currentTextChanged,
+           this, &ScanPopup::currentGroupChanged );
 
   connect( &wordFinder, SIGNAL( finished() ),
            this, SLOT( prefixMatchFinished() ) );
@@ -320,10 +305,8 @@ ScanPopup::ScanPopup( QWidget * parent,
   ui.goBackButton->setEnabled( false );
   ui.goForwardButton->setEnabled( false );
 
-#if QT_VERSION >= QT_VERSION_CHECK(4, 6, 0)
   grabGesture( Gestures::GDPinchGestureType );
   grabGesture( Gestures::GDSwipeGestureType );
-#endif
 
 #ifdef HAVE_X11
   scanFlag = new ScanFlag( this );
@@ -354,10 +337,8 @@ ScanPopup::~ScanPopup()
 
   disableScanning();
 
-#if QT_VERSION >= QT_VERSION_CHECK(4, 6, 0)
   ungrabGesture( Gestures::GDPinchGestureType );
   ungrabGesture( Gestures::GDSwipeGestureType );
-#endif
 }
 
 void ScanPopup::saveConfigData()
@@ -374,7 +355,7 @@ void ScanPopup::enableScanning()
   if ( !isScanningEnabled )
   {
     isScanningEnabled = true;
-    MouseOver::instance().enableMouseOver();
+    if( QGuiApplication::platformName() == "xcb" ) MouseOver::instance().enableMouseOver();
   }
 }
 
@@ -435,15 +416,15 @@ void ScanPopup::applyWordsZoomLevel()
 
   if ( ui.groupList->font().pointSize() != ps )
   {
-    disconnect( ui.groupList, SIGNAL( currentIndexChanged( QString const & ) ),
-                this, SLOT( currentGroupChanged( QString const & ) ) );
+    disconnect( ui.groupList, &QComboBox::currentTextChanged,
+                this, &ScanPopup::currentGroupChanged );
     int n = ui.groupList->currentIndex();
     ui.groupList->clear();
     ui.groupList->setFont( font );
     ui.groupList->fill( groups );
     ui.groupList->setCurrentIndex( n );
-    connect( ui.groupList, SIGNAL( currentIndexChanged( QString const & ) ),
-             this, SLOT( currentGroupChanged( QString const & ) ) );
+    connect( ui.groupList, &QComboBox::currentTextChanged,
+             this, &ScanPopup::currentGroupChanged );
   }
 
   ui.outerFrame->layout()->activate();
@@ -452,21 +433,10 @@ void ScanPopup::applyWordsZoomLevel()
 Qt::WindowFlags ScanPopup::unpinnedWindowFlags() const
 {
 #ifdef ENABLE_SPWF_CUSTOMIZATION
-  const Config::ScanPopupWindowFlags spwf = cfg.preferences.scanPopupUnpinnedWindowFlags;
-  Qt::WindowFlags result;
-  if( spwf == Config::SPWF_Popup )
-    result = Qt::Popup;
-  else
-  if( spwf == Config::SPWF_Tool )
-    result = Qt::Tool | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint;
-  else
-    return defaultUnpinnedWindowFlags; // Ignore BypassWMHint option.
-
-  if( cfg.preferences.scanPopupUnpinnedBypassWMHint )
-    result |= Qt::X11BypassWindowManagerHint;
-  return result;
+  return PlatformWindow::popupFlags( QGuiApplication::platformName(),
+    cfg.preferences.scanPopupUnpinnedWindowFlags, cfg.preferences.scanPopupUnpinnedBypassWMHint );
 #else
-  return defaultUnpinnedWindowFlags;
+  return PlatformWindow::popupFlags( QGuiApplication::platformName(), Config::SPWF_default, false );
 #endif
 }
 
@@ -532,6 +502,8 @@ void ScanPopup::delayShow()
 
 void ScanPopup::clipboardChanged( QClipboard::Mode m )
 {
+  if( QGuiApplication::platformName().startsWith( "wayland" ) &&
+      ( !cfg.preferences.trackClipboardChanges || m != QClipboard::Clipboard ) ) return;
   if ( !isScanningEnabled )
     return;
 #ifdef HAVE_X11
@@ -542,7 +514,7 @@ void ScanPopup::clipboardChanged( QClipboard::Mode m )
   GD_DPRINTF( "clipboard changed\n" );
 
 #ifdef HAVE_X11
-  if( m == QClipboard::Selection )
+  if( QGuiApplication::platformName() == "xcb" && m == QClipboard::Selection )
   {
     // Use delay show to prevent multiple popups while selection in progress
     delayTimer.start();
@@ -557,6 +529,7 @@ void ScanPopup::clipboardChanged( QClipboard::Mode m )
 
 void ScanPopup::mouseHovered( QString const & str, bool forcePopup )
 {
+  if( QGuiApplication::platformName().startsWith( "wayland" ) ) return;
   handleInputWord( str, forcePopup );
 }
 
@@ -586,7 +559,7 @@ void ScanPopup::handleInputWord( QString const & str, bool forcePopup )
   }
 
 #ifdef HAVE_X11
-  if ( cfg.preferences.showScanFlag ) {
+  if ( QGuiApplication::platformName() == "xcb" && cfg.preferences.showScanFlag ) {
     inputPhrase = pendingInputPhrase;
     emit showScanFlag( forcePopup );
     return;
@@ -595,7 +568,8 @@ void ScanPopup::handleInputWord( QString const & str, bool forcePopup )
 
   // Check key modifiers
 
-  if ( cfg.preferences.enableScanPopupModifiers && !checkModifiersPressed( cfg.preferences.scanPopupModifiers ) )
+  if ( !QGuiApplication::platformName().startsWith( "wayland" ) &&
+       cfg.preferences.enableScanPopupModifiers && !checkModifiersPressed( cfg.preferences.scanPopupModifiers ) )
   {
     if ( cfg.preferences.scanPopupAltMode )
     {
@@ -638,11 +612,8 @@ void ScanPopup::engagePopup( bool forcePopup, bool giveFocus )
 
       QPoint currentPos = QCursor::pos();
 
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 11, 0 )
-      QRect const desktop = QGuiApplication::screenAt( currentPos )->geometry();
-#else
-      QRect const desktop = QApplication::desktop()->screenGeometry();
-#endif
+      QRect const desktop = PlatformWindow::availableGeometryForPoint( currentPos );
+      if( desktop.isEmpty() ) return;
 
       QSize windowSize = geometry().size();
 
@@ -684,7 +655,7 @@ void ScanPopup::engagePopup( bool forcePopup, bool giveFocus )
     // Ensure that the window always has focus on X11 with Qt::Tool flag.
     // This also often prevents the window from disappearing prematurely with Qt::Popup flag,
     // especially when combined with Qt::X11BypassWindowManagerHint flag.
-    if ( !ui.pinButton->isChecked() )
+    if ( QGuiApplication::platformName() == "xcb" && !ui.pinButton->isChecked() )
       giveFocus = true;
 #endif
 
@@ -714,7 +685,7 @@ void ScanPopup::engagePopup( bool forcePopup, bool giveFocus )
   }
 #ifdef ENABLE_SPWF_CUSTOMIZATION
   else
-  if ( ( windowFlags() & Qt::Tool ) == Qt::Tool )
+  if ( QGuiApplication::platformName() == "xcb" && ( windowFlags() & Qt::Tool ) == Qt::Tool )
   {
     // Ensure that the window with Qt::Tool flag always has focus on X11.
     activateWindow();
@@ -836,7 +807,7 @@ void ScanPopup::showTranslationFor( Config::InputPhrase const & inputPhrase )
   definition->focus();
 }
 
-vector< sptr< Dictionary::Class > > const & ScanPopup::getActiveDicts()
+std::vector< sptr< Dictionary::Class > > const & ScanPopup::getActiveDicts()
 {
   int current = ui.groupList->currentIndex();
 
@@ -851,7 +822,7 @@ vector< sptr< Dictionary::Class > > const & ScanPopup::getActiveDicts()
     return groups[ current ].dictionaries;
   else
   {
-    vector< sptr< Dictionary::Class > > const & activeDicts =
+    std::vector< sptr< Dictionary::Class > > const & activeDicts =
       groups[ current ].dictionaries;
 
     // Populate the special dictionariesUnmuted array with only unmuted
@@ -1028,7 +999,7 @@ void ScanPopup::leaveEvent( QEvent * event )
   }
 }
 
-void ScanPopup::enterEvent( QEvent * event )
+void ScanPopup::enterEvent( QEnterEvent * event )
 {
   QMainWindow::enterEvent( event );
 
@@ -1042,27 +1013,9 @@ void ScanPopup::enterEvent( QEvent * event )
   }
 }
 
-void ScanPopup::requestWindowFocus()
-{
-  // One of the rare, actually working workarounds for requesting a user keyboard focus on X11,
-  // works for Qt::Popup windows, exactly like our Scan Popup (in unpinned state).
-  // Modern window managers actively resist to automatically focus pop-up windows.
-#if defined HAVE_X11 && QT_VERSION < QT_VERSION_CHECK( 5, 0, 0 )
-  if ( !ui.pinButton->isChecked() )
-  {
-    QMenu m( this );
-    m.addAction( "" );
-    m.show();
-    m.hide();
-  }
-#endif
-}
-
 void ScanPopup::showEvent( QShowEvent * ev )
 {
   QMainWindow::showEvent( ev );
-
-  QTimer::singleShot(100, this, SLOT( requestWindowFocus() ) );
 
   if ( groups.size() <= 1 ) // Only the default group? Hide then.
     ui.groupList->hide();
