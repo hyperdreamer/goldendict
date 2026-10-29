@@ -62,6 +62,10 @@ constexpr int WatchdogProbeSeconds = 1;
 /// Returns false and appends one human-readable reason per unmet requirement.
 /// `reasons` may be null when only the verdict is needed. The result is derived
 /// from the environment on every call, so a suite can falsify its own gate.
+/// QApplication suites additionally require an actual renderer + JavaScript,
+/// a readable article fixture, and a connectable private bus (no desktop bus).
+/// Only a successful renderer probe is cached; explicit environment overrides
+/// and fixture/bus readiness are always re-evaluated.
 bool requiredEnvironment( QStringList * reasons );
 
 /// Arms a wall watchdog with the given budget. A helper thread terminates the
@@ -115,9 +119,9 @@ QStringList compiledFeatureDefines();
 ///   "display"    a display server (X11 or Wayland) is actually connectable
 ///   "x11"        an X11 DISPLAY is connectable and the QPA is not forced elsewhere
 ///   "wayland"    a Wayland compositor socket is connectable
-///   "webengine"  the QtWebEngineProcess helper of this Qt installation exists
-///   "dbus"       a dbus-daemon executable exists, so a private test bus can be
-///                started (see PrivateSessionBus)
+///   "webengine"  helper exists AND a real page renders and evaluates JavaScript
+///                within 10 s (requires QApplication)
+///   "dbus"       a private dbus-daemon actually starts and both connections work
 /// Unknown tokens are reported as unavailable: a typo must not pass a required
 /// suite. `reason` may be null.
 bool prerequisiteAvailable( QString const & token, QString * reason );

@@ -6,7 +6,11 @@
 
 #include "fixtures.hh"
 
+#include <QApplication>
 #include <QCoreApplication>
+#include <QWebEnginePage>
+#include <QTest>
+#include <QVariant>
 #include <QDBusConnection>
 #include <QDir>
 #include <QElapsedTimer>
@@ -456,7 +460,21 @@ bool requiredEnvironment( QStringList * reasons )
         }
     }
 
-    for ( QString const & prerequisite : splitList( qEnvironmentVariable( "GD_TEST_REQUIRED_PREREQUISITES" ) ) )
+    // QApplication suites must prove renderer + JavaScript readiness, not merely
+    // locate QtWebEngineProcess. Pure suites never construct a GUI application.
+    QStringList prerequisites = splitList( qEnvironmentVariable( "GD_TEST_REQUIRED_PREREQUISITES" ) );
+    if ( qobject_cast< QApplication * >( QCoreApplication::instance() ) )
+    {
+        prerequisites << QStringLiteral( "webengine" ) << QStringLiteral( "dbus" );
+        if ( !fixtureExists( QStringLiteral( "article/article.html" ) ) )
+        {
+            appendReason( reasons, QStringLiteral( "missing renderer fixture: %1" )
+                                      .arg( fixturePath( QStringLiteral( "article/article.html" ) ) ) );
+            available = false;
+        }
+    }
+    prerequisites.removeDuplicates();
+    for ( QString const & prerequisite : prerequisites )
     {
         QString reason;
 
@@ -788,12 +806,51 @@ bool prerequisiteAvailable( QString const & token, QString * reason )
             QDir( QLibraryInfo::path( QLibraryInfo::LibraryExecutablesPath ) )
                 .absoluteFilePath( QStringLiteral( "QtWebEngineProcess" ) );
 
-        if ( QFileInfo( helper ).isExecutable() )
+        if ( !QFileInfo( helper ).isExecutable() )
+        {
+            if ( reason )
+                *reason = QStringLiteral( "the QtWebEngineProcess helper is missing at %1" ).arg( helper );
+            return false;
+        }
+        if ( !qobject_cast< QApplication * >( QCoreApplication::instance() ) )
+        {
+            if ( reason )
+                *reason = QStringLiteral( "a real renderer probe requires QApplication" );
+            return false;
+        }
+        // Cache only successful readiness, never environment failures. All
+        // completion lambdas are page-context-bound and die before their locals.
+        static bool rendererReady = false;
+        if ( rendererReady )
             return true;
-
-        if ( reason )
-            *reason = QStringLiteral( "the QtWebEngineProcess helper is missing at %1" ).arg( helper );
-        return false;
+        bool loaded = false;
+        bool loadOk = false;
+        bool jsDone = false;
+        bool jsOk = false;
+        QWebEnginePage page;
+        QObject::connect( &page, &QWebEnginePage::loadFinished, &page, [&]( bool ok ) {
+            loaded = true;
+            loadOk = ok;
+        } );
+        page.setHtml( QStringLiteral( "<!doctype html><body><div id='gd-ready'>renderer-ready</div></body>" ) );
+        QElapsedTimer deadline;
+        deadline.start();
+        if ( QTest::qWaitFor( [&] { return loaded; }, 10000 ) && loadOk )
+        {
+            page.runJavaScript( QStringLiteral(
+                "document.readyState === 'complete' && "
+                "document.getElementById('gd-ready').textContent === 'renderer-ready' && "
+                "document.getElementById('gd-ready').getBoundingClientRect().height > 0" ),
+                [&]( QVariant const & result ) {
+                    jsOk = result.toBool();
+                    jsDone = true;
+                } );
+            const int remaining = qMax( 0, 10000 - int( deadline.elapsed() ) );
+            rendererReady = QTest::qWaitFor( [&] { return jsDone; }, remaining ) && jsOk;
+        }
+        if ( !rendererReady && reason )
+            *reason = QStringLiteral( "real renderer/JavaScript readiness failed within 10 s" );
+        return rendererReady;
     }
 
     if ( reason )

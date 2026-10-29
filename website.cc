@@ -10,10 +10,7 @@
 #include <QFileInfo>
 #include "gddebug.hh"
 
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
 #include <QRegularExpression>
-#else
-#endif
 
 namespace WebSite {
 

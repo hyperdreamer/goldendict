@@ -738,12 +738,19 @@ include( qtsingleapplication/src/qtsingleapplication.pri )
 
 # Root test gate. The wrapper is expanded by make, never by qmake, and wraps the
 # build and the run separately so a gate script observes both invocations.
+#
+# The aggregate is generated *inside* tests/ and run from there, because that is
+# the layout the suite projects were written for: every suite keeps its objects,
+# moc output and .moc include in its own build directory under tests/. Generating
+# the same aggregate in the repository root instead makes qmake emit per-suite
+# dependencies without the rules that create the moc files, so the gate fails on
+# `#include "tst_x.moc"` before it runs a single test.
 CHECK_MAKEFILE = Makefile.tests
 
 tests-makefile.target = tests-makefile
 # $$QMAKE is the generated makefile's qmake variable and is empty while the
 # project is being evaluated; $$QMAKE_QMAKE is the qmake that is running now.
-tests-makefile.commands = $$QMAKE_QMAKE $$PWD/tests/tests.pro -o $$PWD/$$CHECK_MAKEFILE
+tests-makefile.commands = $$QMAKE_QMAKE $$PWD/tests/tests.pro -o $$PWD/tests/$$CHECK_MAKEFILE
 
 tests-build.target = tests-build
 tests-build.depends = tests-makefile
@@ -751,11 +758,11 @@ tests-build.depends = tests-makefile
 # build half runs in parallel: a serial cold build of all 18 suites does not fit
 # the gate's own 900 s budget (measured: 900 s built 3 of 18 suites). The run
 # half stays serial for deterministic test execution.
-tests-build.commands = $(GD_TEST_WRAPPER) $(MAKE) -C $$PWD -f $$CHECK_MAKEFILE -j$(shell nproc)
+tests-build.commands = $(GD_TEST_WRAPPER) $(MAKE) -C $$PWD/tests -f $$CHECK_MAKEFILE -j$(shell nproc)
 
 tests-run.target = tests-run
 tests-run.depends = tests-build
-tests-run.commands = $(GD_TEST_WRAPPER) $(MAKE) -C $$PWD -f $$CHECK_MAKEFILE check
+tests-run.commands = $(GD_TEST_WRAPPER) $(MAKE) -C $$PWD/tests -f $$CHECK_MAKEFILE check
 
 check.target = check
 check.depends = tests-run
