@@ -63,6 +63,12 @@
 #include "keyboardstate.hh"
 #include "platformwindow.hh"
 #include "portalhotkeys.hh"
+#include "preferences.hh"
+#include "hotkeyedit.hh"
+#include <QCheckBox>
+#include <QLabel>
+#include <QPushButton>
+#include <QRadioButton>
 #include "support/fake_portal.hh"
 
 // Xlib last, because Qt's own headers reject a Status/Bool definition that
@@ -447,6 +453,10 @@ private slots:
   void additiveValuesSurviveRoundTrip();
   void unsupportedShortcutTextSurvivesRoundTrip();
   void recorderEditClearsTheRawTextMarker();
+  void preferencesPreserveUnavailableValues();
+  void preferencesReportHotkeyCapabilities();
+  void preferencesExplainRendererParity();
+  void preferencesKeepAudioVariant();
 
 private:
   /// Copies one fixture to the isolated configuration location Config::load()
@@ -2037,7 +2047,7 @@ void TstHotkeys::recorderBackendReportsUnbindableSequences()
   backend.bind( { { QStringLiteral( "main-window" ), QStringLiteral( "Main window" ),
                     QStringLiteral( "CTRL+ALT+g" ) },
                   { QStringLiteral( "clipboard-lookup" ), QStringLiteral( "Clipboard lookup" ),
-                    QStringLiteral( "CTRL+F11,F11" ) } } );
+                    QStringLiteral( "CTRL+ALT+NoSuchKeysym" ) } } );
 
   // A sequence the recorder cannot represent is reported, never dropped silently
   // and never rewritten into something else.
@@ -2045,6 +2055,15 @@ void TstHotkeys::recorderBackendReportsUnbindableSequences()
   QVERIFY( backend.handleForId( QStringLiteral( "main-window" ) ) > 0 );
   QCOMPARE( backend.handleForId( QStringLiteral( "clipboard-lookup" ) ), 0 );
   QVERIFY( backend.explanation().contains( QStringLiteral( "clipboard-lookup" ) ) );
+
+  // The legacy two-combination form is bindable: spec 4.11 keeps the stored defaults
+  // (Ctrl+F11,F11 and Ctrl+C,C) working on X11, with the second combination completing
+  // the chord through the recorder's second-key slot.
+  X11RecordBackend chord;
+  chord.bind( { { QStringLiteral( "main-window" ), QStringLiteral( "Main window" ),
+                  QStringLiteral( "CTRL+F11,F11" ) } } );
+  QCOMPARE( chord.state(), HotkeyBackend::State::Bound );
+  QVERIFY( chord.handleForId( QStringLiteral( "main-window" ) ) > 0 );
 
   // The bindable half still works.
   Display * const display = PlatformWindow::x11Display();
@@ -2194,6 +2213,125 @@ void TstHotkeys::keyboardStateNeverClaimsAModifierWithoutADisplay()
   // claim either instead of dereferencing a null one.
   QVERIFY( !state.checkModifiersPressed( KeyboardState::Alt ) );
   QVERIFY( !state.checkModifiersPressed( KeyboardState::Ctrl | KeyboardState::Shift ) );
+}
+
+// Losing the disabled plugin value or normalizing raw shortcuts on OK would
+// destroy settings the current backend cannot represent.
+void TstHotkeys::preferencesPreserveUnavailableValues()
+{
+  Config::Class cfg;
+  QString const raw = QStringLiteral( "Ctrl+F11,F11,Ctrl+F12" );
+  cfg.preferences.mainWindowHotkey.rawText = raw;
+  cfg.preferences.clipboardHotkey = Config::HotKey( QKeySequence( "Ctrl+C,C" ) );
+  cfg.preferences.clipboardHotkey.rawText = "Ctrl+C,C";
+  cfg.preferences.enableWebPlugins = true;
+  {
+    Preferences dialog( nullptr, cfg );
+    auto plugins = dialog.findChild<QCheckBox *>( "enableWebPlugins" );
+    QVERIFY( plugins );
+    QVERIFY( !plugins->isEnabled() );
+    QVERIFY( plugins->isChecked() );
+    auto const accepted = dialog.getPreferences();
+    QCOMPARE( accepted.mainWindowHotkey.rawText, raw );
+    QCOMPARE( accepted.clipboardHotkey.rawText, QStringLiteral( "Ctrl+C,C" ) );
+    QVERIFY( accepted.enableWebPlugins );
+    dialog.reject();
+  }
+  QCOMPARE( cfg.preferences.mainWindowHotkey.rawText, raw );
+  Preferences edited( nullptr, cfg );
+  auto recorder = edited.findChild<HotKeyEdit *>( "mainWindowHotkey" );
+  QVERIFY( recorder );
+  QTest::keyClick( recorder, Qt::Key_G, Qt::ControlModifier );
+  auto const changed = edited.getPreferences().mainWindowHotkey;
+  QVERIFY( changed.rawText.isEmpty() );
+  QCOMPARE( changed.toKeySequence().toString( QKeySequence::PortableText ), QStringLiteral( "Ctrl+G" ) );
+}
+
+// An unavailable/denied backend must never look active because an old portal
+// description survived. Partial states retain the per-ID display and reason.
+void TstHotkeys::preferencesReportHotkeyCapabilities()
+{
+  Config::Class cfg;
+  Preferences dialog( nullptr, cfg );
+  auto state = dialog.findChild<QLabel *>( "hotkeyCapability" );
+  auto main = dialog.findChild<QLabel *>( "mainWindowHotkeyStatus" );
+  auto clipboard = dialog.findChild<QLabel *>( "clipboardHotkeyStatus" );
+  auto configure = dialog.findChild<QPushButton *>( "configureShortcuts" );
+  QVERIFY( state && main && clipboard && configure );
+  dialog.setHotkeyStatus( "xcb", HotkeyBackend::State::Bound, {}, {}, false );
+  QVERIFY( state->text().contains( "X11 active" ) );
+  dialog.setHotkeyStatus( "xcb", HotkeyBackend::State::Partial, "clipboard-lookup was refused", {}, false );
+  QVERIFY( !main->text().contains( "Active", Qt::CaseInsensitive ) );
+  QVERIFY( clipboard->text().contains( "refused" ) );
+  cfg.preferences.mainWindowHotkey = Config::HotKey( QKeySequence( "Ctrl+Alt+G" ) );
+  Preferences portal( nullptr, cfg );
+  state = portal.findChild<QLabel *>( "hotkeyCapability" );
+  main = portal.findChild<QLabel *>( "mainWindowHotkeyStatus" );
+  clipboard = portal.findChild<QLabel *>( "clipboardHotkeyStatus" );
+  configure = portal.findChild<QPushButton *>( "configureShortcuts" );
+  QVector<PortalBindingDisplay> const reported{ { "main-window", "Assigned in System Settings" } };
+  portal.setHotkeyStatus( "wayland", HotkeyBackend::State::Partial, "one binding refused", reported, true );
+  QVERIFY( state->text().contains( "partial", Qt::CaseInsensitive ) );
+  QVERIFY( main->text().contains( "Assigned in System Settings" ) );
+  QVERIFY( clipboard->text().contains( "unavailable", Qt::CaseInsensitive ) );
+  QVERIFY( clipboard->text().contains( "Wayland" ) );
+  QVERIFY( configure->isEnabled() );
+  QSignalSpy requested( &portal, &Preferences::configureShortcutsRequested );
+  configure->click();
+  QCOMPARE( requested.size(), 1 );
+  portal.setHotkeyStatus( "wayland", HotkeyBackend::State::Denied, "permission refused", reported, false );
+  QVERIFY( state->text().contains( "permission refused" ) );
+  QVERIFY( !configure->isEnabled() );
+  QVERIFY( main->text().contains( "permission refused" ) );
+  portal.setHotkeyStatus( "wayland", HotkeyBackend::State::Unavailable, "portal absent", {}, false );
+  QVERIFY( state->text().contains( "portal absent" ) );
+  auto note = portal.findChild<QLabel *>( "clipboardCapabilityNote" );
+  QVERIFY( note );
+  QVERIFY( note->text().contains( "clipboard-change", Qt::CaseInsensitive ) );
+  QVERIFY( note->text().contains( "explicit clipboard", Qt::CaseInsensitive ) );
+  QVERIFY( note->text().contains( "Hover" ) );
+
+  // Unparseable raw text must not acquire the parsed field's valid trigger.
+  cfg.preferences.mainWindowHotkey.rawText = "Ctrl+G,Ctrl+H,Ctrl+I";
+  Preferences unsupported( nullptr, cfg );
+  unsupported.setHotkeyStatus( "wayland", HotkeyBackend::State::Bound, {}, reported, true );
+  main = unsupported.findChild<QLabel *>( "mainWindowHotkeyStatus" );
+  QVERIFY( main->text().contains( "Unavailable", Qt::CaseInsensitive ) );
+  QVERIFY( !main->text().contains( "Assigned" ) );
+}
+
+void TstHotkeys::preferencesExplainRendererParity()
+{
+  Config::Class cfg;
+  Preferences dialog( nullptr, cfg );
+  auto note = dialog.findChild<QLabel *>( "rendererParityNote" );
+  QVERIFY( note );
+  QVERIFY( note->text().contains( "inline", Qt::CaseInsensitive ) );
+  QVERIFY( note->text().contains( "snapshot", Qt::CaseInsensitive ) );
+  auto proxy = dialog.findChild<QComboBox *>( "proxyType" );
+  QVERIFY( proxy );
+  QVERIFY( proxy->toolTip().contains( "Chromium" ) );
+  QVERIFY( proxy->toolTip().contains( "HTTP proxy" ) );
+}
+
+void TstHotkeys::preferencesKeepAudioVariant()
+{
+  Config::Class cfg;
+  cfg.preferences.internalPlayerBackend.setUiName( "Legacy custom backend" );
+  Preferences dialog( nullptr, cfg );
+  auto internal = dialog.findChild<QRadioButton *>( "useInternalPlayer" );
+  auto backend = dialog.findChild<QComboBox *>( "internalPlayerBackend" );
+  auto external = dialog.findChild<QRadioButton *>( "useExternalPlayer" );
+  QVERIFY( internal && backend && external );
+#ifdef MAKE_FFMPEG_PLAYER
+  QCOMPARE( backend->count(), 1 );
+  QCOMPARE( dialog.getPreferences().internalPlayerBackend.uiName(), QStringLiteral( "FFmpeg+libao" ) );
+#else
+  QVERIFY( internal->isHidden() );
+  QVERIFY( backend->isHidden() );
+  QVERIFY( external->isChecked() );
+  QCOMPARE( dialog.getPreferences().internalPlayerBackend.uiName(), QStringLiteral( "Legacy custom backend" ) );
+#endif
 }
 
 QTEST_MAIN( TstHotkeys )

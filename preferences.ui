@@ -820,11 +820,41 @@ seconds, which is specified here.</string>
        <item>
         <widget class="QLabel" name="label_8">
          <property name="text">
-          <string>The hotkeys are global and work from any program and within any context as long as GoldenDict is running in background.</string>
+          <string>The global shortcuts use the active desktop backend. See the capability and per-shortcut status below.</string>
          </property>
          <property name="wordWrap">
           <bool>true</bool>
          </property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QLabel" name="hotkeyCapability">
+         <property name="wordWrap"><bool>true</bool></property>
+         <property name="text"><string>Global shortcut status</string></property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QLabel" name="mainWindowHotkeyStatus">
+         <property name="wordWrap"><bool>true</bool></property>
+         <property name="text"><string>Main window shortcut unavailable</string></property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QLabel" name="clipboardHotkeyStatus">
+         <property name="wordWrap"><bool>true</bool></property>
+         <property name="text"><string>Clipboard shortcut unavailable</string></property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QPushButton" name="configureShortcuts">
+         <property name="enabled"><bool>false</bool></property>
+         <property name="text"><string>Configure shortcuts…</string></property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QLabel" name="clipboardCapabilityNote">
+         <property name="wordWrap"><bool>true</bool></property>
+         <property name="text"><string>Clipboard lookup capabilities</string></property>
         </widget>
        </item>
        <item>
@@ -1432,6 +1462,12 @@ download page.</string>
        <string>Ad&amp;vanced</string>
       </attribute>
       <layout class="QVBoxLayout" name="verticalLayout_11">
+       <item>
+        <widget class="QLabel" name="rendererParityNote">
+         <property name="wordWrap"><bool>true</bool></property>
+         <property name="text"><string>Websites can open in a separate tab. Inline website embedding and its iframe auto-resize are unavailable. Print and preview use a snapshot of the selected article; later page changes require a new snapshot.</string></property>
+        </widget>
+       </item>
        <item>
         <layout class="QHBoxLayout" name="horizontalLayout_17">
          <item>

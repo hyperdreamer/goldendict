@@ -1218,10 +1218,29 @@ bool X11RecordBackend::bindOne( HotkeyBinding const & binding, QString * reason 
     return false;
   }
 
+  // A stored X11 combination may be a single trigger or the legacy two-combination
+  // form ("Ctrl+F11,F11", "Ctrl+C,C"): the first combination carries the modifiers and
+  // the second names the key that completes the chord.
+  QStringList const combinations =
+    binding.sequence.split( QLatin1Char( ',' ), Qt::SkipEmptyParts );
+  QStringList triggers;
+  for( QString const & combination : combinations )
+  {
+    QString const trimmed = combination.trimmed();
+    if( !trimmed.isEmpty() )
+      triggers.append( trimmed );
+  }
+
+  if( triggers.isEmpty() || triggers.size() > 2 )
+  {
+    setError( reason, tr( "Only a one- or two-combination sequence can be bound." ) );
+    return false;
+  }
+
   quint32 modifiers = 0;
   QString keyName;
 
-  if ( !splitTrigger( binding.sequence, &modifiers, &keyName, reason ) )
+  if ( !splitTrigger( triggers.first(), &modifiers, &keyName, reason ) )
     return false;
 
   quint32 const keyCode = session->keyCodeForKeysymName( keyName );
@@ -1232,10 +1251,37 @@ bool X11RecordBackend::bindOne( HotkeyBinding const & binding, QString * reason 
     return false;
   }
 
+  quint32 secondKeyCode = 0;
+
+  if( triggers.size() == 2 )
+  {
+    quint32 secondModifiers = 0;
+    QString secondName;
+
+    if ( !splitTrigger( triggers.at( 1 ), &secondModifiers, &secondName, reason ) )
+      return false;
+
+    // The legacy form keeps the second combination's modifiers implicit: the recorder
+    // only tracks the key that completes the chord.
+    if ( secondModifiers != 0 && secondModifiers != modifiers )
+    {
+      setError( reason, tr( "The second combination must reuse the first one's modifiers." ) );
+      return false;
+    }
+
+    secondKeyCode = session->keyCodeForKeysymName( secondName );
+
+    if ( secondKeyCode == 0 )
+    {
+      setError( reason, tr( "This keymap has no key named \"%1\"." ).arg( secondName ) );
+      return false;
+    }
+  }
+
   // Stable IDs map to recorder handles: the handle is only handed to the matcher,
   // the ID is what an activation reports.
   int const handle = nextHandle++;
-  core->addBinding( keyCode, 0, modifiers, handle );
+  core->addBinding( keyCode, secondKeyCode, modifiers, handle );
   bound.append( qMakePair( binding.id, handle ) );
 
   return true;

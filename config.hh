@@ -239,12 +239,8 @@ private:
   QString name;
 };
 
-#if defined( HAVE_X11 ) && QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-  // The ScanPopup window flags customization code has been tested
-  // only in X11 desktop environments and window managers.
-  // None of the window flags configurations I have tried works perfectly well
-  // in XFCE with Qt4. Let us enable customization code for Qt5 exclusively to
-  // avoid regressions with Qt4.
+#ifdef HAVE_X11
+  // This customization is offered only on the actual xcb platform at runtime.
   #define ENABLE_SPWF_CUSTOMIZATION
 #endif
 
@@ -371,9 +367,7 @@ struct Preferences
   InputPhrase sanitizeInputPhrase( QString const & inputPhrase ) const;
 
   unsigned short maxDictionaryRefsInContextMenu;
-#ifndef Q_WS_X11
   bool trackClipboardChanges;
-#endif
 
   bool synonymSearchEnabled;
 
@@ -699,7 +693,7 @@ struct Class
   QByteArray popupWindowState; // Binary state saved by QMainWindow
   QByteArray popupWindowGeometry; // Geometry saved by QMainWindow
   QByteArray dictInfoGeometry; // Geometry of "Dictionary info" window
-  QByteArray inspectorGeometry; // Geometry of WebKit inspector window
+  QByteArray inspectorGeometry; // Geometry of the article DevTools window
   QByteArray dictionariesDialogGeometry; // Geometry of Dictionaries dialog
   QByteArray printPreviewDialogGeometry; // Geometry of Print Preview dialog
   QByteArray helpWindowGeometry; // Geometry of help window

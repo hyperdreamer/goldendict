@@ -31,7 +31,10 @@
 #include "fulltextsearch.hh"
 #include "helpwindow.hh"
 
+#include "hotkeybackend.hh"
 #include "hotkeywrapper.hh"
+#include "articleprofile.hh"
+#include <QPointer>
 #ifdef HAVE_X11
 #include <fixx11h.h>
 #endif
@@ -104,6 +107,10 @@ private:
   void removeGroupComboBoxActionsFromDialog( QDialog * dialog, GroupComboBox * pGroupComboBox );
 
   void commitData();
+  void destroyArticleViews();
+  void finishShutdown();
+  void failStartup( QString const & reason );
+  void refreshHotkeyStatus();
 
   QSystemTrayIcon * trayIcon;
 
@@ -173,7 +180,21 @@ private:
 
   sptr< ScanPopup > scanPopup;
 
-  sptr< HotkeyWrapper > hotkeyWrapper;
+  std::unique_ptr<ArticleProfileController> articleProfile;
+  std::unique_ptr<HotkeyBackend> hotkeyBackend;
+  QVector<HotkeyBinding> requestedHotkeys;
+  QVector<PortalBindingDisplay> reportedHotkeys;
+  HotkeyBackend::State hotkeyState = HotkeyBackend::State::Unavailable;
+  QString hotkeyExplanation;
+  QString hotkeyBackendName;
+  bool configureHotkeysAvailable = false;
+  quint64 hotkeyStatusRevision = 0;
+  QPointer<class Preferences> preferencesDialog;
+  QPointer<ArticleView> startupView;
+  QTimer startupDeadline;
+  bool startupComplete = false, startupFailed = false;
+  bool shuttingDown = false, shutdownComplete = false;
+  QStringList pendingMessages;
 
   QTimer newReleaseCheckTimer; // Countdown to a check for the new program
                                // release, if enabled
@@ -210,8 +231,6 @@ private:
   void closeEvent( QCloseEvent * );
 
   void applyProxySettings();
-  void applyWebSettings();
-  void setupNetworkCache( int maxSize );
   void makeDictionaries();
   void updateStatusLine();
   void updateGroupList();
@@ -244,7 +263,7 @@ private:
   void toggleMainWindow( bool onlyShow = false );
 #endif
 
-  /// Creates hotkeyWrapper and hooks the currently set keys for it
+  /// Binds the active backend only when the requested settings change.
   void installHotKeys();
 
   void applyZoomFactor();
@@ -427,7 +446,7 @@ private slots:
   void showTranslationFor( QString const & );
 
   void showTranslationFor( QString const &, QStringList const & dictIDs,
-                           QRegExp const & searchRegExp, bool ignoreDiacritics );
+                           FtsHighlightSpec const & searchRegExp, bool ignoreDiacritics );
 
   void showHistoryItem( QString const & );
 
@@ -457,7 +476,6 @@ private slots:
   void on_pageSetup_triggered();
   void on_printPreview_triggered();
   void on_print_triggered();
-  void printPreviewPaintRequested( QPrinter * );
 
   void on_saveArticle_triggered();
 
@@ -507,6 +525,8 @@ private slots:
   void hideGDHelp();
 
 signals:
+  void startupReady();
+
   /// Set optional parts expand mode for all tabs
   void setExpandOptionalParts( bool expand );
 
@@ -527,31 +547,6 @@ private slots:
   /// Return true while scanning GoldenDict window
   bool isGoldenDictWindow( HWND hwnd );
 #endif
-};
-
-class ArticleSaveProgressDialog : public QProgressDialog
-{
-Q_OBJECT
-
-public:
-  explicit ArticleSaveProgressDialog( QWidget * parent = 0,  Qt::WindowFlags f = Qt::WindowFlags() ):
-    QProgressDialog( parent, f )
-  {
-    setAutoReset( false );
-    setAutoClose( false );
-  }
-
-public slots:
-  void perform()
-  {
-    int progress = value() + 1;
-    if ( progress == maximum() )
-    {
-      emit close();
-      deleteLater();
-    }
-    setValue( progress );
-  }
 };
 
 #endif

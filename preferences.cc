@@ -2,9 +2,10 @@
 #include "keyboardstate.hh"
 #include "language.hh"
 #include "langcoder.hh"
+#include <QKeyEvent>
 #include <QMessageBox>
 #include "broken_xrecord.hh"
-#include "mainwindow.hh"
+#include "hotkeysyntax.hh"
 
 #include <algorithm>
 #include <vector>
@@ -46,6 +47,13 @@ Preferences::Preferences( QWidget * parent, Config::Class & cfg_ ):
 {
   Config::Preferences const & p = cfg_.preferences;
   ui.setupUi( this );
+  connect( ui.configureShortcuts, &QPushButton::clicked, this, &Preferences::configureShortcutsRequested );
+  if( QGuiApplication::platformName() != QLatin1String( "xcb" ) )
+  {
+    ui.groupBox_ScanPopupWindowFlags->hide();
+    ui.showScanFlag->hide();
+    ui.ignoreOwnClipboardChanges->hide();
+  }
 
   connect( ui.enableScanPopup, SIGNAL( toggled( bool ) ),
            this, SLOT( enableScanPopupToggled( bool ) ) );
@@ -196,6 +204,8 @@ Preferences::Preferences( QWidget * parent, Config::Class & cfg_ ):
   ui.mainWindowHotkey->setHotKey( p.mainWindowHotkey );
   ui.enableClipboardHotkey->setChecked( p.enableClipboardHotkey );
   ui.clipboardHotkey->setHotKey( p.clipboardHotkey );
+  ui.mainWindowHotkey->installEventFilter( this );
+  ui.clipboardHotkey->installEventFilter( this );
 
   ui.enableScanPopup->setChecked( p.enableScanPopup );
   ui.startWithScanPopupOn->setChecked( p.startWithScanPopupOn );
@@ -285,7 +295,8 @@ Preferences::Preferences( QWidget * parent, Config::Class & cfg_ ):
   ui.pronounceOnLoadMain->setChecked( p.pronounceOnLoadMain );
   ui.pronounceOnLoadPopup->setChecked( p.pronounceOnLoadPopup );
 
-  ui.internalPlayerBackend->addItems( Config::InternalPlayerBackend::nameList() );
+  if( Config::InternalPlayerBackend::anyAvailable() )
+    ui.internalPlayerBackend->addItem( Config::InternalPlayerBackend::defaultBackend().uiName() );
 
   // Make sure that exactly one radio button in the group is checked and that
   // on_useExternalPlayer_toggled() is called.
@@ -349,6 +360,10 @@ Preferences::Preferences( QWidget * parent, Config::Class & cfg_ ):
   ui.checkForNewReleases->setChecked( p.checkForNewReleases );
   ui.disallowContentFromOtherSites->setChecked( p.disallowContentFromOtherSites );
   ui.enableWebPlugins->setChecked( p.enableWebPlugins );
+  ui.enableWebPlugins->setEnabled( false );
+  ui.enableWebPlugins->setText( tr( "Web plugins (unavailable in Qt WebEngine)" ) );
+  ui.enableWebPlugins->setToolTip( tr( "NPAPI plugins are unavailable; the stored setting is retained." ) );
+  ui.proxyType->setToolTip( tr( "HTTP Caching uses an HTTP proxy for Chromium. Qt dictionary requests retain HTTP caching proxy behavior." ) );
   ui.hideGoldenDictHeader->setChecked( p.hideGoldenDictHeader );
   ui.maxNetworkCacheSize->setValue( p.maxNetworkCacheSize );
   ui.clearNetworkCacheOnExit->setChecked( p.clearNetworkCacheOnExit );
@@ -380,11 +395,13 @@ Preferences::Preferences( QWidget * parent, Config::Class & cfg_ ):
   ui.allowEpwing->hide();
 #endif
   ui.maxDictionarySize->setValue( p.fts.maxDictionarySize );
+  setHotkeyStatus( QGuiApplication::platformName(), HotkeyBackend::State::Unavailable,
+                   tr( "Global shortcuts are not initialized" ), {}, false );
 }
 
 Config::Preferences Preferences::getPreferences()
 {
-  Config::Preferences p;
+  Config::Preferences p = cfg.preferences;
 
   p.interfaceLanguage =
     ui.interfaceLanguage->itemData(
@@ -411,14 +428,15 @@ Config::Preferences Preferences::getPreferences()
   p.escKeyHidesMainWindow = ui.escKeyHidesMainWindow->isChecked();
 
   p.enableMainWindowHotkey = ui.enableMainWindowHotkey->isChecked();
-  p.mainWindowHotkey = ui.mainWindowHotkey->getHotKey();
+  p.mainWindowHotkey = mainHotkeyEdited ? ui.mainWindowHotkey->getHotKey() : cfg.preferences.mainWindowHotkey;
   p.enableClipboardHotkey = ui.enableClipboardHotkey->isChecked();
-  p.clipboardHotkey = ui.clipboardHotkey->getHotKey();
+  p.clipboardHotkey = clipboardHotkeyEdited ? ui.clipboardHotkey->getHotKey() : cfg.preferences.clipboardHotkey;
 
   p.enableScanPopup = ui.enableScanPopup->isChecked();
   p.startWithScanPopupOn = ui.startWithScanPopupOn->isChecked();
   p.enableScanPopupModifiers = ui.enableScanPopupModifiers->isChecked();
 
+  p.scanPopupModifiers = 0;
   p.scanPopupModifiers += ui.altKey->isChecked() ? KeyboardState::Alt : 0;
   p.scanPopupModifiers += ui.ctrlKey->isChecked() ? KeyboardState::Ctrl: 0;
   p.scanPopupModifiers += ui.shiftKey->isChecked() ? KeyboardState::Shift: 0;
@@ -464,7 +482,8 @@ Config::Preferences Preferences::getPreferences()
   p.pronounceOnLoadMain = ui.pronounceOnLoadMain->isChecked();
   p.pronounceOnLoadPopup = ui.pronounceOnLoadPopup->isChecked();
   p.useInternalPlayer = ui.useInternalPlayer->isChecked();
-  p.internalPlayerBackend.setUiName( ui.internalPlayerBackend->currentText() );
+  if( Config::InternalPlayerBackend::anyAvailable() )
+    p.internalPlayerBackend.setUiName( ui.internalPlayerBackend->currentText() );
   p.audioPlaybackProgram = ui.audioPlaybackProgram->text();
 
   p.proxyServer.enabled = ui.useProxyServer->isChecked();
@@ -489,6 +508,7 @@ Config::Preferences Preferences::getPreferences()
 
   p.fts.enabled = ui.ftsGroupBox->isChecked();
   p.fts.maxDictionarySize = ui.maxDictionarySize->value();
+  p.fts.disabledTypes.clear();
 
   if( !ui.allowAard->isChecked() )
   {
@@ -575,6 +595,75 @@ Config::Preferences Preferences::getPreferences()
   }
 
   return p;
+}
+
+bool Preferences::eventFilter( QObject * watched, QEvent * event )
+{
+  if( event->type() == QEvent::KeyPress )
+  {
+    int const key = static_cast<QKeyEvent *>( event )->key();
+    if( key && key != Qt::Key_unknown && key != Qt::Key_Shift && key != Qt::Key_Control &&
+        key != Qt::Key_Alt && key != Qt::Key_AltGr && key != Qt::Key_Meta )
+    {
+      if( watched == ui.mainWindowHotkey ) mainHotkeyEdited = true;
+      if( watched == ui.clipboardHotkey ) clipboardHotkeyEdited = true;
+    }
+  }
+  return QDialog::eventFilter( watched, event );
+}
+
+void Preferences::setHotkeyStatus( QString const & platform, HotkeyBackend::State state,
+                                   QString const & explanation,
+                                   QVector<PortalBindingDisplay> const & bindings,
+                                   bool configureAvailable )
+{
+  bool const wayland = platform.startsWith( QLatin1String( "wayland" ) );
+  bool const active = state == HotkeyBackend::State::Bound || state == HotkeyBackend::State::Partial;
+  QString status;
+  switch( state )
+  {
+    case HotkeyBackend::State::Bound:
+      status = wayland ? tr( "Portal bound" ) : tr( "X11 active" ); break;
+    case HotkeyBackend::State::Partial:
+      status = wayland ? tr( "Portal partial" ) : tr( "X11 partial" ); break;
+    case HotkeyBackend::State::Denied: status = tr( "Portal denied" ); break;
+    case HotkeyBackend::State::Unavailable: status = tr( "Global shortcuts unavailable" ); break;
+    case HotkeyBackend::State::Unsupported: status = tr( "Global shortcuts unsupported" ); break;
+    case HotkeyBackend::State::Creating: status = tr( "Creating portal session" ); break;
+    case HotkeyBackend::State::Binding: status = tr( "Binding global shortcuts" ); break;
+    case HotkeyBackend::State::Ready: status = tr( "Portal session ready" ); break;
+    case HotkeyBackend::State::Closed: status = tr( "Global shortcuts closed" ); break;
+  }
+  ui.hotkeyCapability->setText( explanation.isEmpty() ? status : status + ": " + explanation );
+  auto display = [&]( QString const & id, HotKeyEdit * editor, QCheckBox * enabled, QLabel * label ) {
+    if( !enabled->isChecked() ) { label->setText( tr( "Disabled" ) ); return; }
+    QString reason, trigger;
+    Config::HotKey key = editor->getHotKey();
+    bool const edited = editor == ui.mainWindowHotkey ? mainHotkeyEdited : clipboardHotkeyEdited;
+    auto const & stored = editor == ui.mainWindowHotkey ? cfg.preferences.mainWindowHotkey : cfg.preferences.clipboardHotkey;
+    if( wayland && !edited && !stored.rawText.isEmpty() && !HotkeySyntax::parse( stored.rawText, &key, &reason ) )
+    {
+      label->setText( tr( "Unavailable on Wayland: %1" ).arg( reason ) );
+      return;
+    }
+    if( wayland && !HotkeySyntax::preferredTrigger( key, &trigger, &reason ) )
+    {
+      label->setText( tr( "Unavailable on Wayland: %1" ).arg( reason ) );
+      return;
+    }
+    if( active )
+      for( auto const & binding : bindings )
+        if( binding.id == id ) { label->setText( binding.triggerDescription ); return; }
+    label->setText( state == HotkeyBackend::State::Bound && !wayland ? tr( "Active" ) :
+                   ( explanation.isEmpty() ? status : explanation ) );
+  };
+  display( "main-window", ui.mainWindowHotkey, ui.enableMainWindowHotkey, ui.mainWindowHotkeyStatus );
+  display( "clipboard-lookup", ui.clipboardHotkey, ui.enableClipboardHotkey, ui.clipboardHotkeyStatus );
+  ui.configureShortcuts->setVisible( wayland );
+  ui.configureShortcuts->setEnabled( wayland && active && configureAvailable );
+  ui.clipboardCapabilityNote->setText( wayland
+    ? tr( "Hover lookup and focus restoration are unavailable on Wayland. Clipboard-change scanning and explicit clipboard lookup remain available; global shortcuts use the portal." )
+    : tr( "Clipboard-change scanning and explicit clipboard lookup remain available independently of global shortcuts." ) );
 }
 
 void Preferences::enableScanPopupToggled( bool b )
@@ -693,9 +782,7 @@ void Preferences::helpRequested()
 {
   if( !helpWindow )
   {
-    MainWindow * mainWindow = qobject_cast< MainWindow * >( parentWidget() );
-    if( mainWindow )
-      mainWindow->closeGDHelp();
+    emit closeMainHelpRequested();
 
     helpWindow = new Help::HelpWindow( this, cfg );
 
