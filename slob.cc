@@ -18,7 +18,6 @@
 #include "htmlescape.hh"
 #include "filetype.hh"
 #include "tiff.hh"
-#include "qt4x5.hh"
 
 #ifdef _MSC_VER
 #include <stub_msvc.h>
@@ -1169,7 +1168,7 @@ void SlobDictionary::makeFTSIndex( QAtomicInt & isCancelled, bool firstIteration
 
     findArticleLinks( 0, &setOfOffsets, 0, &isCancelled );
 
-    if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+    if( isCancelled.loadAcquire() )
       throw exUserAbort();
 
     QVector< uint32_t > offsets;
@@ -1191,10 +1190,10 @@ void SlobDictionary::makeFTSIndex( QAtomicInt & isCancelled, bool firstIteration
     setOfOffsets.clear();
     setOfOffsets.squeeze();
 
-    if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+    if( isCancelled.loadAcquire() )
       throw exUserAbort();
 
-    if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+    if( isCancelled.loadAcquire() )
       throw exUserAbort();
 
     QMap< QString, QVector< uint32_t > > ftsWords;
@@ -1216,7 +1215,7 @@ void SlobDictionary::makeFTSIndex( QAtomicInt & isCancelled, bool firstIteration
     // index articles for full-text search
     for( int i = 0; i < offsets.size(); i++ )
     {
-      if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+      if( isCancelled.loadAcquire() )
         throw exUserAbort();
 
       QString articleStr;
@@ -1256,7 +1255,7 @@ void SlobDictionary::makeFTSIndex( QAtomicInt & isCancelled, bool firstIteration
     QMap< QString, QVector< uint32_t > >::iterator it = ftsWords.begin();
     while( it != ftsWords.end() )
     {
-      if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+      if( isCancelled.loadAcquire() )
         throw exUserAbort();
 
       uint32_t offset = chunks.startNewBlock();
@@ -1273,7 +1272,7 @@ void SlobDictionary::makeFTSIndex( QAtomicInt & isCancelled, bool firstIteration
       {
         for( int i = 0; i < wordsWithOffsets.size(); i++ )
         {
-          if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+          if( isCancelled.loadAcquire() )
             throw exUserAbort();
           indexedWords.addSingleWord( wordsWithOffsets[ i ].first, wordsWithOffsets[ i ].second );
         }
@@ -1286,7 +1285,7 @@ void SlobDictionary::makeFTSIndex( QAtomicInt & isCancelled, bool firstIteration
 
     for( int i = 0; i < wordsWithOffsets.size(); i++ )
     {
-      if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+      if( isCancelled.loadAcquire() )
         throw exUserAbort();
       indexedWords.addSingleWord( wordsWithOffsets[ i ].first, wordsWithOffsets[ i ].second );
     }
@@ -1296,13 +1295,13 @@ void SlobDictionary::makeFTSIndex( QAtomicInt & isCancelled, bool firstIteration
     wordsWithOffsets.clear();
     wordsWithOffsets.squeeze();
 
-    if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+    if( isCancelled.loadAcquire() )
       throw exUserAbort();
 
     ftsIdxHeader.chunksOffset = chunks.finish();
     ftsIdxHeader.wordCount = indexedWords.size();
 
-    if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+    if( isCancelled.loadAcquire() )
       throw exUserAbort();
 
     BtreeIndexing::IndexInfo ftsIdxInfo = BtreeIndexing::buildIndex( indexedWords, ftsIdx );
@@ -1441,7 +1440,7 @@ void SlobArticleRequestRunnable::run()
 
 void SlobArticleRequest::run()
 {
-  if ( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+  if ( isCancelled.loadAcquire() )
   {
     finish();
     return;
@@ -1470,7 +1469,7 @@ void SlobArticleRequest::run()
 
   for( unsigned x = 0; x < chain.size(); ++x )
   {
-    if ( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+    if ( isCancelled.loadAcquire() )
     {
       finish();
       return;
@@ -1630,7 +1629,7 @@ void SlobResourceRequestRunnable::run()
 void SlobResourceRequest::run()
 {
   // Some runnables linger enough that they are cancelled before they start
-  if ( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+  if ( isCancelled.loadAcquire() )
   {
     finish();
     return;

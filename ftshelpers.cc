@@ -7,7 +7,6 @@
 #include "file.hh"
 #include "gddebug.hh"
 #include "folding.hh"
-#include "qt4x5.hh"
 
 #include <vector>
 #include <string>
@@ -412,7 +411,7 @@ void makeFTSIndex( BtreeIndexing::BtreeDictionary * dict, QAtomicInt & isCancell
 {
   Mutex::Lock _( dict->getFtsMutex() );
 
-  if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+  if( isCancelled.loadAcquire() )
     throw exUserAbort();
 
   File::Class ftsIdx( dict->ftsIndexName(), "wb" );
@@ -434,7 +433,7 @@ void makeFTSIndex( BtreeIndexing::BtreeDictionary * dict, QAtomicInt & isCancell
 
   dict->findArticleLinks( 0, &setOfOffsets, 0, &isCancelled );
 
-  if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+  if( isCancelled.loadAcquire() )
     throw exUserAbort();
 
   QVector< uint32_t > offsets;
@@ -452,7 +451,7 @@ void makeFTSIndex( BtreeIndexing::BtreeDictionary * dict, QAtomicInt & isCancell
   setOfOffsets.clear();
   setOfOffsets.squeeze();
 
-  if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+  if( isCancelled.loadAcquire() )
     throw exUserAbort();
 
   dict->sortArticlesOffsetsForFTS( offsets, isCancelled );
@@ -468,7 +467,7 @@ void makeFTSIndex( BtreeIndexing::BtreeDictionary * dict, QAtomicInt & isCancell
   // index articles for full-text search
   for( int i = 0; i < offsets.size(); i++ )
   {
-    if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+    if( isCancelled.loadAcquire() )
       throw exUserAbort();
 
     QString headword, articleStr;
@@ -489,7 +488,7 @@ void makeFTSIndex( BtreeIndexing::BtreeDictionary * dict, QAtomicInt & isCancell
   QMap< QString, QVector< uint32_t > >::iterator it = ftsWords.begin();
   while( it != ftsWords.end() )
   {
-    if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+    if( isCancelled.loadAcquire() )
       throw exUserAbort();
 
     uint32_t offset = chunks.startNewBlock();
@@ -506,7 +505,7 @@ void makeFTSIndex( BtreeIndexing::BtreeDictionary * dict, QAtomicInt & isCancell
     {
       for( int i = 0; i < wordsWithOffsets.size(); i++ )
       {
-        if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+        if( isCancelled.loadAcquire() )
           throw exUserAbort();
         indexedWords.addSingleWord( wordsWithOffsets[ i ].first, wordsWithOffsets[ i ].second );
       }
@@ -519,7 +518,7 @@ void makeFTSIndex( BtreeIndexing::BtreeDictionary * dict, QAtomicInt & isCancell
 
   for( int i = 0; i < wordsWithOffsets.size(); i++ )
   {
-    if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+    if( isCancelled.loadAcquire() )
       throw exUserAbort();
     indexedWords.addSingleWord( wordsWithOffsets[ i ].first, wordsWithOffsets[ i ].second );
   }
@@ -532,7 +531,7 @@ void makeFTSIndex( BtreeIndexing::BtreeDictionary * dict, QAtomicInt & isCancell
   ftsIdxHeader.chunksOffset = chunks.finish();
   ftsIdxHeader.wordCount = indexedWords.size();
 
-  if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+  if( isCancelled.loadAcquire() )
     throw exUserAbort();
 
   BtreeIndexing::IndexInfo ftsIdxInfo = BtreeIndexing::buildIndex( indexedWords, ftsIdx );
@@ -593,7 +592,7 @@ void FTSResultsRequest::checkArticles( QVector< uint32_t > const & offsets,
     // user pattern, so this is the only expression the search can run with.
     for( int i = 0; i < offsets.size(); i++ )
     {
-      if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+      if( isCancelled.loadAcquire() )
         break;
 
       dict.getArticleText( offsets.at( i ), headword, articleText );
@@ -632,7 +631,7 @@ void FTSResultsRequest::checkArticles( QVector< uint32_t > const & offsets,
 
     for( int i = 0; i < offsets.size(); i++ )
     {
-      if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+      if( isCancelled.loadAcquire() )
         break;
 
       int pos = 0;
@@ -915,7 +914,7 @@ void FTSResultsRequest::indexSearch( BtreeIndexing::BtreeIndex & ftsIndex,
   int n = indexWords.length();
   for( int i = 0; i < n; i++ )
   {
-    if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+    if( isCancelled.loadAcquire() )
       return;
 
     tmp.clear();
@@ -924,7 +923,7 @@ void FTSResultsRequest::indexSearch( BtreeIndexing::BtreeIndex & ftsIndex,
     for( unsigned x = 0; x < links.size(); x++ )
     {
 
-      if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+      if( isCancelled.loadAcquire() )
         return;
 
       vector< char > chunk;
@@ -986,7 +985,7 @@ void FTSResultsRequest::combinedIndexSearch( BtreeIndexing::BtreeIndex & ftsInde
   QSet< uint32_t > setOfOffsets;
   uint32_t size;
 
-  if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+  if( isCancelled.loadAcquire() )
     return;
 
   if( indexWords.isEmpty() )
@@ -1023,7 +1022,7 @@ void FTSResultsRequest::combinedIndexSearch( BtreeIndexing::BtreeIndex & ftsInde
       for( unsigned x = 0; x < links.size(); x++ )
       {
 
-        if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+        if( isCancelled.loadAcquire() )
           return;
 
         vector< char > chunk;
@@ -1063,7 +1062,7 @@ void FTSResultsRequest::combinedIndexSearch( BtreeIndexing::BtreeIndex & ftsInde
 
     for( int x = 0; x < links.size(); x++ )
     {
-      if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+      if( isCancelled.loadAcquire() )
         return;
 
       QString word = QString::fromUtf8( links[ x ].word.data(), links[ x ].word.size() );
@@ -1140,7 +1139,7 @@ void FTSResultsRequest::fullIndexSearch( BtreeIndexing::BtreeIndex & ftsIndex,
   uint32_t size;
   QVector< BtreeIndexing::WordArticleLink > links;
 
-  if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+  if( isCancelled.loadAcquire() )
     return;
 
   if( indexWords.isEmpty() )
@@ -1154,7 +1153,7 @@ void FTSResultsRequest::fullIndexSearch( BtreeIndexing::BtreeIndex & ftsIndex,
 
   for( int x = 0; x < links.size(); x++ )
   {
-    if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+    if( isCancelled.loadAcquire() )
       return;
 
     QString word = QString::fromUtf8( links[ x ].word.data(), links[ x ].word.size() );
@@ -1223,14 +1222,14 @@ void FTSResultsRequest::fullSearch( QStringList & searchWords, QRegularExpressio
 {
   // Whole file survey
 
-  if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+  if( isCancelled.loadAcquire() )
     return;
 
   QSet< uint32_t > setOfOffsets;
   setOfOffsets.reserve( dict.getArticleCount() );
   dict.findArticleLinks( 0, &setOfOffsets, 0, &isCancelled );
 
-  if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+  if( isCancelled.loadAcquire() )
     return;
 
   QVector< uint32_t > offsets;
@@ -1244,14 +1243,14 @@ void FTSResultsRequest::fullSearch( QStringList & searchWords, QRegularExpressio
     ptr++;
   }
 
-  if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+  if( isCancelled.loadAcquire() )
     return;
 
   setOfOffsets.clear();
 
   dict.sortArticlesOffsetsForFTS( offsets, isCancelled );
 
-  if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+  if( isCancelled.loadAcquire() )
     return;
 
   checkArticles( offsets, searchWords, regexp );
@@ -1259,7 +1258,7 @@ void FTSResultsRequest::fullSearch( QStringList & searchWords, QRegularExpressio
 
 void FTSResultsRequest::run()
 {
-  if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+  if( isCancelled.loadAcquire() )
   {
     finish();
     return;
