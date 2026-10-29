@@ -55,6 +55,8 @@ ests/tst_*/tst_print_pipeline
 tests/tst_*/tst_article_history
 tests/tst_*/tst_external_content
 tests/tst_*/tst_website_frames
+tests/tst_*/tst_hotkeys_noffmpeg
+tests/tst_*/Makefile.noffmpeg
 tests/tst_*/tst_article_bridge
 tests/tst_*/tst_encoding
 tests/tst_*/tst_htmlescape
