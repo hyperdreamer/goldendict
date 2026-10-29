@@ -248,6 +248,17 @@ QStringList markTexts(QWebEnginePage &page, QDeadlineTimer const &deadline)
     return evaluate(page, "Array.from(document.querySelectorAll('mark[data-gd-highlight]'))"
                           ".map(mark => mark.textContent)", deadline).toStringList();
 }
+// The active match is also the selection, so a finished FTS state is the selection
+// plus every mark in document order. The count label and the hit activation are
+// written by two serialized operations, so no single instant describes it.
+QString finishedFtsState(QWebEnginePage &page, QDeadlineTimer const &deadline)
+{
+    return evaluate(page, R"JS((() => {
+        const marks = Array.from(document.querySelectorAll('mark[data-gd-highlight]'))
+            .map(mark => mark.textContent).join(',');
+        return getSelection().toString() + '|' + marks;
+      })())JS", deadline).toString();
+}
 QList<int> markOffsets(QString const &rootId, QWebEnginePage &page, QDeadlineTimer const &deadline)
 {
     auto values = evaluate(page, "(() => {const root=document.getElementById(" + quote(rootId) + ");"
@@ -1573,8 +1584,11 @@ private slots:
                              parsed.lookup.highlight, 17, false);
         WAIT_FOR(pages.size() == 2);
         auto label = ftsSearchLabel(*view); QVERIFY(label);
-        // The hidden optional match is not part of the visible text snapshot.
-        WAIT_FOR(label->text() == QStringLiteral("1 of 2 matches"));
+        // The hidden optional match is not part of the visible text snapshot. The
+        // count label is written before hit activation, so wait for the finished
+        // state (label, marks and active match) rather than for the label alone.
+        WAIT_FOR(label->text() == QStringLiteral("1 of 2 matches") &&
+                 finishedFtsState(*web->page(), deadline) == QStringLiteral("testneedle|testneedle,testneedle"));
         QVERIFY(ftsSearchFrame(*view)->isVisible());
         QVERIFY(selectionRulePresent(*web->page(), deadline));
         QVERIFY(evaluate(*web->page(), "getSelection().toString() === 'testneedle'", deadline).toBool());
@@ -1656,10 +1670,23 @@ private slots:
         QCOMPARE(evaluate(*web->page(), "document.getElementById('w').textContent", deadline).toString(),
                  QString("testneedle one testneedle two"));
         QCOMPARE(evaluate(*web->page(), "getSelection().toString()", deadline).toString(), QString("one"));
+        // Count label, marks and active match are written by two separate queued
+        // operations, so one instant cannot describe the finished state: the
+        // completion that carries the count queues hit activation behind every
+        // operation already waiting (a debounced state capture or a frame probe,
+        // as load produces). Queue one real operation here so the row always
+        // covers that delay instead of hitting it by chance, then wait for the
+        // whole described state rather than for the label alone.
+        auto queued = std::make_shared<bool>(false);
+        web->bridge->run(QStringLiteral("(() => {window.__gdQueuedProbe = true;return true;})()"),
+                         [queued](QVariant const &) { *queued = true; });
         heldScripts.takeFirst().deliver();
-        WAIT_FOR(label->text() == QStringLiteral("1 of 2 matches"));
+        WAIT_FOR(label->text() == QStringLiteral("1 of 2 matches") &&
+                 finishedFtsState(*web->page(), deadline) == QStringLiteral("testneedle|testneedle,testneedle"));
         QCOMPARE(evaluate(*web->page(), "getSelection().toString()", deadline).toString(),
                  QString("testneedle"));
+        QCOMPARE(markTexts(*web->page(), deadline), (QStringList{"testneedle", "testneedle"}));
+        QVERIFY(*queued);
         QVERIFY(unicodeScalarsIntact(*web->page(), deadline));
         // Two changes: the one retry is spent, so no stale offsets may mark.
         holdScriptMarker = QStringLiteral("gdSaveSelection(");
@@ -1674,7 +1701,10 @@ private slots:
         evaluate(*web->page(), "document.getElementById('w').appendChild(document.createTextNode(' testneedle three'))",
                  deadline);
         heldScripts.takeFirst().deliver();
-        WAIT_FOR(statusText(status) == QStringLiteral("Article changed; run the search again."));
+        // The change report is emitted before the queue clears the marks, so the
+        // abort is only complete once the status and the unmarked DOM agree.
+        WAIT_FOR(statusText(status) == QStringLiteral("Article changed; run the search again.") &&
+                 markTexts(*web->page(), deadline).isEmpty());
         QVERIFY(markTexts(*web->page(), deadline).isEmpty());
         QCOMPARE(evaluate(*web->page(), "document.getElementById('w').textContent", deadline).toString(),
                  QString("testneedle one testneedle two testneedle three"));
