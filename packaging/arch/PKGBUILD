@@ -1,0 +1,77 @@
+# Maintainer: hyperdreamer
+#
+# Qt 6 / QtWebEngine build of GoldenDict for Arch Linux.
+#
+#   makepkg -si
+#
+# The source is pinned to a commit rather than a moving branch: the qmake
+# project installs into $PREFIX (default /usr/local), so PREFIX=/usr is passed
+# at configure time and the binary looks for its data in /usr/share/goldendict.
+
+pkgname=goldendict
+pkgver=1.5.1
+pkgrel=1
+epoch=2
+pkgdesc='Feature-rich dictionary lookup program (Qt 6 and QtWebEngine)'
+arch=('x86_64' 'aarch64')
+url='https://github.com/hyperdreamer/goldendict'
+license=('GPL-3.0-or-later')
+_commit='862b1a986c3867eb4a60e17c316c2087dd00c7f1'
+source=("${pkgname}::git+https://github.com/hyperdreamer/goldendict.git#commit=${_commit}")
+sha256sums=('SKIP')
+
+depends=(
+  # Qt 6 modules the application links: core gui widgets xml network sql
+  # printsupport help svg webenginecore webenginewidgets webchannel dbus pdf pdfwidgets
+  qt6-base
+  qt6-webengine          # also ships QtPdf and QtPdfWidgets
+  qt6-svg
+  qt6-tools              # QtHelp
+  qt6-webchannel
+  kwindowsystem          # optional best-effort window activation, detected at configure time
+  # Optional features this package turns on at configure time
+  opencc                 # CONFIG+=chinese_conversion_support
+  xz                     # zim_support: liblzma
+  zstd                   # zim_support: libzstd
+  # Everything else comes from the compiled link line
+  libeb
+  hunspell
+  lzo
+  libtiff
+  libao
+  ffmpeg
+  libx11
+  libxtst
+  zlib
+  bzip2
+  libvorbis
+)
+makedepends=('git' 'qt6-tools')
+conflicts=('goldendict-git' 'goldendict-ng' 'goldendict-ng-git')
+provides=('goldendict')
+options=('!lto')
+
+pkgver() {
+  cd "${pkgname}"
+  printf '1.5.1.r%s.g%s' \
+    "$(git rev-list --count "${_commit}")" \
+    "$(git rev-parse --short "${_commit}")"
+}
+
+build() {
+  cd "${pkgname}"
+  # Build in the source tree: two translation units carry a Q_OBJECT class in the
+  # .cc and include their own generated .moc, which qmake cannot satisfy from a
+  # build directory outside the source tree.
+  qmake6 goldendict.pro PREFIX=/usr \
+    CONFIG+=chinese_conversion_support \
+    CONFIG+=zim_support
+  make -j"$(nproc)"
+}
+
+package() {
+  cd "${pkgname}"
+  make INSTALL_ROOT="${pkgdir}" install
+
+  install -Dm644 LICENSE.txt "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE.txt"
+}
