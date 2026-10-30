@@ -30,9 +30,19 @@ bool ftsIndexIsOldOrBad( string const & indexFile,
 
   FtsIdxHeader header;
 
-  return idx.readRecords( &header, sizeof( header ), 1 ) != 1 ||
-         header.signature != FtsSignature ||
-         header.formatVersion != CurrentFtsFormatVersion + dict->getFtsIndexVersion();
+  if ( idx.readRecords( &header, sizeof( header ), 1 ) != 1 ||
+       header.signature != FtsSignature ||
+       header.formatVersion != CurrentFtsFormatVersion + dict->getFtsIndexVersion() )
+    return true;
+
+  // The full-text index is a separate file with its own btree. Validate its
+  // IndexInfo against this file: a tree that cannot describe it must be rebuilt
+  // rather than traversed.
+  Mutex probeMutex;
+
+  return !BtreeIndexing::BtreeIndex::indexInfoIsSane(
+    BtreeIndexing::IndexInfo( header.indexBtreeMaxElements, header.indexRootOffset ),
+    idx, probeMutex );
 }
 
 namespace

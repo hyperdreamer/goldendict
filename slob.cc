@@ -144,9 +144,36 @@ bool indexIsOldOrBad( string const & indexFile )
 
   IdxHeader header;
 
-  return idx.readRecords( &header, sizeof( header ), 1 ) != 1 ||
-         header.signature != Signature ||
-         header.formatVersion != CurrentFormatVersion;
+  if ( idx.readRecords( &header, sizeof( header ), 1 ) != 1 ||
+                header.signature != Signature ||
+                header.formatVersion != CurrentFormatVersion )
+    return true;
+
+  // The signature and the version only identify who wrote the header. A
+  // different producer that reuses both numbers but stores a different header
+  // layout leaves the two IndexInfo fields below meaningless here, and the btree
+  // traversal would then read arbitrary offsets in this file. Such an index has
+  // to be rebuilt before it is opened.
+  Mutex probeMutex;
+
+  if ( !BtreeIndexing::BtreeIndex::indexInfoIsSane(
+         BtreeIndexing::IndexInfo( header.indexBtreeMaxElements, header.indexRootOffset ),
+         idx, probeMutex ) )
+    return true;
+
+  // The embedded resource tree carries its own IndexInfo pair in this header.
+  // Validate it only when present: an absent pair is two zero fields and must
+  // keep meaning "no resource index", otherwise every start would rebuild.
+  if ( header.resourceIndexBtreeMaxElements || header.resourceIndexRootOffset )
+  {
+    if ( !BtreeIndexing::BtreeIndex::indexInfoIsSane(
+           BtreeIndexing::IndexInfo( header.resourceIndexBtreeMaxElements,
+                                     header.resourceIndexRootOffset ),
+           idx, probeMutex ) )
+      return true;
+  }
+
+  return false;
 }
 
 

@@ -141,11 +141,36 @@ bool indexIsOldOrBad( string const & indexFile, bool hasZipFile )
 
   IdxHeader header;
 
-  return idx.readRecords( &header, sizeof( header ), 1 ) != 1 ||
-         header.signature != Signature ||
-         header.formatVersion != CurrentFormatVersion ||
-         (bool) header.hasZipFile != hasZipFile ||
-         ( hasZipFile && header.zipSupportVersion != CurrentZipSupportVersion );
+  if ( idx.readRecords( &header, sizeof( header ), 1 ) != 1 ||
+                header.signature != Signature ||
+                header.formatVersion != CurrentFormatVersion ||
+                (bool) header.hasZipFile != hasZipFile ||
+                ( hasZipFile && header.zipSupportVersion != CurrentZipSupportVersion ) )
+    return true;
+
+  // The signature and the version only identify who wrote the header. A
+  // different producer that reuses both numbers but stores a different header
+  // layout leaves the two IndexInfo fields below meaningless here, and the btree
+  // traversal would then read arbitrary offsets in this file. Such an index has
+  // to be rebuilt before it is opened.
+  Mutex probeMutex;
+
+  if ( !BtreeIndexing::BtreeIndex::indexInfoIsSane(
+         BtreeIndexing::IndexInfo( header.indexBtreeMaxElements, header.indexRootOffset ),
+         idx, probeMutex ) )
+    return true;
+
+  // The optional zip resource tree carries its own IndexInfo pair in this same
+  // header, so it has to describe this file too before it may be opened.
+  if ( header.zipIndexBtreeMaxElements || header.zipIndexRootOffset )
+  {
+    if ( !BtreeIndexing::BtreeIndex::indexInfoIsSane(
+           BtreeIndexing::IndexInfo( header.zipIndexBtreeMaxElements, header.zipIndexRootOffset ),
+           idx, probeMutex ) )
+      return true;
+  }
+
+  return false;
 }
 
 class DslDictionary: public BtreeIndexing::BtreeDictionary

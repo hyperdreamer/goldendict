@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <set>
 #include <algorithm>
 #include <QVector>
 #include <QSet>
@@ -36,12 +37,16 @@ enum
   /// This is to be bumped up each time the internal format changes.
   /// The value isn't used here by itself, it is supposed to be added
   /// to each dictionary's internal format version.
-  FormatVersion = 4
+  FormatVersion = 4,
+
+  BtreeMinElements = 64,
+  BtreeMaxElements = 8192
 };
 
 // These exceptions which might be thrown during the index traversal
 
 DEF_EX( exIndexWasNotOpened, "The index wasn't opened", Dictionary::Ex )
+DEF_EX( exIndexInfoUnusable, "The index header does not describe this file", Dictionary::Ex )
 DEF_EX( exFailedToDecompressNode, "Failed to decompress a btree's node", Dictionary::Ex )
 DEF_EX( exCorruptedChainData, "Corrupted chain data in the leaf of a btree encountered", Dictionary::Ex )
 
@@ -82,11 +87,16 @@ public:
   /// Opens the index. The file reference is saved to be used for
   /// subsequent lookups.
   /// The mutex is the one to be locked when working with the file.
+  static bool indexInfoIsSane( IndexInfo const &, File::Class &, Mutex & );
   void openIndex( IndexInfo const &, File::Class &, Mutex & );
 
   /// Finds articles that match the given string. A case-insensitive search
   /// is performed.
   vector< WordArticleLink > findArticles( wstring const &, bool ignoreDiacritics = false );
+
+  /// Finds articles that match the given string and propagates index errors.
+  vector< WordArticleLink > findArticlesChecked( wstring const &,
+                                                 bool ignoreDiacritics = false );
 
   /// Find all unique article links in the index
   void findAllArticleLinks( QVector< WordArticleLink > & articleLinks );
@@ -107,6 +117,18 @@ public:
 
 protected:
 
+  struct TraversalState
+  {
+    std::set< uint32_t > visitedOffsets;
+  };
+
+  static void enterNode( TraversalState &, uint32_t );
+
+  char const * readNextLeaf( uint32_t & nextLeaf,
+                             vector< char > & leaf,
+                             char const * & leafEnd,
+                             TraversalState & traversal );
+
   /// Finds the offset in the btree leaf for the given word, either matching
   /// by an exact match, or by finding the smallest entry that might match
   /// by prefix. It can return zero if there isn't even a possible prefx
@@ -123,7 +145,8 @@ protected:
                                              bool & exactMatch,
                                              vector< char > & leaf,
                                              uint32_t & nextLeaf,
-                                             char const * & leafEnd );
+                                             char const * & leafEnd,
+                                             TraversalState * traversal = 0 );
 
   /// Reads a node or leaf at the given offset. Just uncompresses its data
   /// to the given vector and does nothing more.
@@ -144,6 +167,7 @@ protected:
 
 private:
 
+  bool indexUsable;
   uint32_t indexNodeSize;
   uint32_t rootOffset;
   bool rootNodeLoaded;

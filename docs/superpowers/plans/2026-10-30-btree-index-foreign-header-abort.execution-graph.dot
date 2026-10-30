@@ -1,0 +1,83 @@
+digraph btree_index_abort {
+  rankdir=LR;
+  node [shape=box, style=rounded];
+  subgraph cluster_lane-core {
+    label="lane-core";
+    T01 [label="T01\nEstablish checked lookup, predicate, and ine"];
+    T02 [label="T02\nDecode node records incrementally with stron"];
+    T03 [label="T03\nValidate complete node and inner-chain shape"];
+    T04 [label="T04\nShare cycle-safe leaf transitions and report"];
+  }
+  subgraph cluster_lane-tests {
+    label="lane-tests";
+    T05 [label="T05\nAdd the pure suite, fixture architecture, an"];
+    T06 [label="T06\nPin decoder bounds, exact shape, and writer "];
+    T07 [label="T07\nPin all transition routes, cycles, and prefi"];
+    T11 [label="T11\nCommit storage, ZIP, MDX/MDD, and metadata a"];
+    T16 [label="T16\nCommit actual primary, secondary, and MDD-ta"];
+    T23 [label="T23\nCommit real worker-closure and ZIP owner-err"];
+    T24 [label="T24\nAutomate all seven disposable runtime negati"];
+    T25 [label="T25\nEnforce the full out-of-tree, sanitizer, and"];
+    T26 [label="T26\nPublish a complete reachable-hit inventory a"];
+    T27 [label="T27\nVerify isolated application lookup, rebuild "];
+  }
+  subgraph cluster_lane-storage {
+    label="lane-storage";
+    T08 [label="T08\nHarden chunk tables, incremental streams, an"];
+    T09 [label="T09\nBound independent ZIP framing and raw-deflat"];
+  }
+  subgraph cluster_lane-producers {
+    label="lane-producers";
+    T10 [label="T10\nBound MDX/MDD source records and adjacent me"];
+    T12 [label="T12\nRoute simple primary producer failures into "];
+    T13 [label="T13\nValidate every present optional ZIP pair in "];
+    T14 [label="T14\nWire required ZIM/SLOB resource trees and se"];
+    T15 [label="T15\nBound every MDD table record at startup and "];
+    T17 [label="T17\nContain synchronous sound, ZipSounds, Dictd,"];
+    T18 [label="T18\nClose Stardict, DSL, GLS, and XDXF field and"];
+    T19 [label="T19\nRepair BGL's parallel resource decoder and A"];
+    T20 [label="T20\nProve EPWING fixed-field records and contain"];
+    T21 [label="T21\nBound ZIM clusters, SLOB bins, and multi-tar"];
+    T22 [label="T22\nTerminate MDX resource redirects and surface"];
+  }
+  T01 -> T02;
+  T02 -> T03;
+  T03 -> T04;
+  T04 -> T05;
+  T05 -> T06;
+  T06 -> T07;
+  T04 -> T08;
+  T07 -> T08;
+  T08 -> T09;
+  T04 -> T09;
+  T08 -> T10;
+  T04 -> T10;
+  T05 -> T10;
+  T07 -> T11;
+  T08 -> T11;
+  T09 -> T11;
+  T10 -> T11;
+  T10 -> T12;
+  T12 -> T13;
+  T09 -> T13;
+  T11 -> T13;
+  T13 -> T14;
+  T14 -> T15;
+  T11 -> T16;
+  T15 -> T16;
+  T15 -> T17;
+  T16 -> T17;
+  T08 -> T17;
+  T09 -> T17;
+  T17 -> T18;
+  T18 -> T19;
+  T19 -> T20;
+  T20 -> T21;
+  T21 -> T22;
+  T16 -> T23;
+  T22 -> T23;
+  T23 -> T24;
+  T24 -> T25;
+  T25 -> T26;
+  T26 -> T27;
+}

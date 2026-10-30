@@ -161,7 +161,17 @@ public:
     MdictParser::RecordInfo indexEntry;
     vector< char > chunk;
     Mutex::Lock _( idxMutex );
+
+    // getBlock() proves only that the block start lies inside the chunk; the
+    // fixed record header has to fit there as well before it is read.
+    size_t const inChunkOffset = links[ 0 ].articleOffset & 0xffff;
+
     const char * indexEntryPtr = chunks.getBlock( links[ 0 ].articleOffset, chunk );
+
+    if ( chunk.size() < inChunkOffset ||
+         chunk.size() - inChunkOffset < sizeof( indexEntry ) )
+      return false;
+
     memcpy( &indexEntry, indexEntryPtr, sizeof( indexEntry ) );
 
     ScopedMemMap compressed( mddFile, indexEntry.compressedBlockPos, indexEntry.compressedBlockSize );
@@ -177,8 +187,24 @@ public:
       return false;
     }
 
-    result.resize( indexEntry.recordSize );
-    memcpy( &result.front(), decompressed.constData() + indexEntry.recordOffset, indexEntry.recordSize );
+    // The slice comes from the file, so reject negative fields first and then
+    // prove the slice lies inside what was actually decompressed before copying.
+    if ( indexEntry.recordOffset < 0 || indexEntry.recordSize < 0 )
+      return false;
+
+    uint64_t const decompressedSize = (uint64_t)decompressed.size();
+    uint64_t const recordOffset = (uint64_t)indexEntry.recordOffset;
+    uint64_t const recordSize = (uint64_t)indexEntry.recordSize;
+
+    if ( recordOffset > decompressedSize || recordSize > decompressedSize - recordOffset )
+      return false;
+
+    result.clear();
+
+    if ( recordSize )
+      result.assign( decompressed.constData() + recordOffset,
+                     decompressed.constData() + recordOffset + recordSize );
+
     return true;
   }
 
@@ -1379,12 +1405,52 @@ static bool indexIsOldOrBad( vector< string > const & dictFiles, string const & 
   File::Class idx( indexFile, "rb" );
   IdxHeader header;
 
-  return idx.readRecords( &header, sizeof( header ), 1 ) != 1 ||
-         header.signature != kSignature ||
-         header.formatVersion != kCurrentFormatVersion ||
-         header.parserVersion != MdictParser::kParserVersion ||
-         header.foldingVersion != Folding::Version ||
-         header.mddIndexInfosCount != dictFiles.size() - 1;
+  if ( idx.readRecords( &header, sizeof( header ), 1 ) != 1 ||
+       header.signature != kSignature ||
+       header.formatVersion != kCurrentFormatVersion ||
+       header.parserVersion != MdictParser::kParserVersion ||
+       header.foldingVersion != Folding::Version ||
+       header.mddIndexInfosCount != dictFiles.size() - 1 )
+    return true;
+
+  // Every persisted tree in this file has its own IndexInfo: the dictionary's
+  // own btree in the header, and one record per .mdd resource file in the
+  // mddIndexInfos table. A tree that cannot describe this file makes the whole
+  // index unusable, so any failure forces a rebuild.
+  try
+  {
+    Mutex probeMutex;
+
+    if ( !BtreeIndexing::BtreeIndex::indexInfoIsSane(
+           BtreeIndexing::IndexInfo( header.indexBtreeMaxElements, header.indexRootOffset ),
+           idx, probeMutex ) )
+      return true;
+
+    idx.seek( header.mddIndexInfosOffset );
+
+    for ( uint32_t i = 0; i < header.mddIndexInfosCount; i++ )
+    {
+      quint32 const nameSize = idx.read< quint32 >();
+
+      vector< char > nameBuffer( nameSize );
+
+      if ( nameSize )
+        idx.read( &nameBuffer.front(), nameSize );
+
+      uint32_t const btreeMaxElements = idx.read< uint32_t >();
+      uint32_t const rootOffset = idx.read< uint32_t >();
+
+      if ( !BtreeIndexing::BtreeIndex::indexInfoIsSane(
+             BtreeIndexing::IndexInfo( btreeMaxElements, rootOffset ), idx, probeMutex ) )
+        return true;
+    }
+  }
+  catch( std::exception & )
+  {
+    return true;
+  }
+
+  return false;
 }
 
 static void findResourceFiles( string const & mdx, vector< string > & dictFiles )
