@@ -70,9 +70,30 @@ bool IndexedZip::loadFile( uint32_t offset, vector< char > & data )
   switch( header.compressionMethod )
   {
     case ZipFile::Uncompressed:
+    {
       GD_DPRINTF( "Uncompressed\n" );
+
+      // A stored entry of zero length is legal: succeed without forming a
+      // reference into an empty vector.
+      if ( header.uncompressedSize == 0 )
+      {
+        data.clear();
+        return true;
+      }
+
+      qint64 const zipSize = zip.size();
+      qint64 const payloadPos = zip.pos();
+
+      if ( zipSize < 0 || payloadPos < 0 || payloadPos > zipSize ||
+           (uint64_t)header.uncompressedSize > (uint64_t)( zipSize - payloadPos ) )
+      {
+        data.clear();
+        return false;
+      }
+
       data.resize( header.uncompressedSize );
       return (size_t) zip.read( &data.front(), data.size() ) == data.size();
+    }
 
     case ZipFile::Deflated:
     {
@@ -80,12 +101,33 @@ bool IndexedZip::loadFile( uint32_t offset, vector< char > & data )
 
       // Now do the deflation
 
+      // All four sizes below come from the entry header, so bound them against
+      // the zip itself and against what raw deflate can expand to before any
+      // buffer is sized from them.
+      qint64 const zipSize = zip.size();
+      qint64 const payloadPos = zip.pos();
+
+      if ( zipSize < 0 || payloadPos < 0 || payloadPos > zipSize ||
+           (uint64_t)header.compressedSize > (uint64_t)( zipSize - payloadPos ) ||
+           !header.compressedSize ||
+           (uint64_t)header.uncompressedSize > (uint64_t)header.compressedSize * 1032u + 64u )
+      {
+        data.clear();
+        return false;
+      }
+
       QByteArray compressedData = zip.read( header.compressedSize );
 
       if ( compressedData.size() != (int)header.compressedSize )
+      {
+        data.clear();
         return false;
+      }
 
-      data.resize( header.uncompressedSize );
+      // Always give the inflater at least one output byte so a legal empty entry
+      // never produces a zero-length buffer, and publish the result only once the
+      // stream has been shown to end at exactly the advertised length.
+      vector< char > scratch( header.uncompressedSize ? header.uncompressedSize : 1 );
 
       z_stream stream;
 
@@ -93,27 +135,31 @@ bool IndexedZip::loadFile( uint32_t offset, vector< char > & data )
 
       stream.next_in = ( Bytef * ) compressedData.data();
       stream.avail_in = compressedData.size();
-      stream.next_out = ( Bytef * ) &data.front();
-      stream.avail_out = data.size();
+      stream.next_out = ( Bytef * ) &scratch.front();
+      stream.avail_out = scratch.size();
 
       if ( inflateInit2( &stream, -MAX_WBITS ) != Z_OK )
       {
-        data.clear();        
+        data.clear();
         return false;
       }
 
-      if ( inflate( &stream, Z_FINISH ) != Z_STREAM_END )
+      int const result = inflate( &stream, Z_FINISH );
+
+      size_t const produced = stream.total_out;
+
+      inflateEnd( &stream );
+
+      if ( result != Z_STREAM_END || produced != header.uncompressedSize )
       {
-        GD_DPRINTF( "Not zstream end!" );
+        GD_DPRINTF( "Not zstream end!\n" );
 
         data.clear();
 
-        inflateEnd( &stream );
-
         return false;
       }
 
-      inflateEnd( &stream );
+      data.assign( scratch.begin(), scratch.begin() + header.uncompressedSize );
 
       return true;
     }
