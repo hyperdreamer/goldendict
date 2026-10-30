@@ -536,6 +536,177 @@ private slots:
     QVERIFY( index.findArticles( target ).empty() );
   }
 
+  // ---- the advance must land on a leaf, not on an internal node --------
+  void next_leaf_internal_node_throws()
+  {
+    QTemporaryDir dir;
+    Built built = buildIndex( dir.filePath( "index" ), 200 );
+
+    // Root payload, then its first child leaf.
+    quint32 const rootSize = getU32( built.bytes, int( built.info.rootOffset ) );
+    quint32 const rootCsz  = getU32( built.bytes, int( built.info.rootOffset ) + 4 );
+    QByteArray const root =
+        zlibDecompress( built.bytes.constData() + built.info.rootOffset + 8,
+                        int( rootCsz ), int( rootSize ) );
+    QVERIFY( !root.isEmpty() );
+
+    quint32 const childAt = getU32( root, 4 );
+    quint32 const childSize = getU32( built.bytes, int( childAt ) );
+    quint32 const childCsz  = getU32( built.bytes, int( childAt ) + 4 );
+    QByteArray const leaf =
+        zlibDecompress( built.bytes.constData() + childAt + 8, int( childCsz ), int( childSize ) );
+    QVERIFY( !leaf.isEmpty() );
+
+    // Walk to the last chain of that leaf and take its word.
+    quint32 const entries = getU32( leaf, 0 );
+    QVERIFY( entries >= 1 );
+    int at = 4;
+    QByteArray lastWord;
+    for ( quint32 i = 0; i < entries; ++i )
+    {
+      quint32 const chainSize = getU32( leaf, at );
+      int const recordAt = at + 4;
+      int const terminator = leaf.indexOf( '\0', recordAt );
+      QVERIFY( terminator > recordAt );
+      lastWord = leaf.mid( recordAt, terminator - recordAt );
+      at = recordAt + int( chainSize );
+    }
+
+    // A word that sorts after the last chain forces the traversal to advance to
+    // the next leaf - which is exactly the branch that had no leaf-type check.
+    QByteArray query = lastWord;
+    query.append( char( 0xff ) );
+
+    // Readable padding after the root, so the trailer read itself cannot mask
+    // the missing type check with a short read at EOF.
+    QByteArray bytes = built.bytes;
+    bytes.append( QByteArray( 8, '\0' ) );
+
+    // Point that leaf's trailer at the internal root.
+    int const trailerAt = int( childAt ) + 8 + int( childCsz );
+    QVERIFY( trailerAt + 4 <= bytes.size() );
+    putU32( bytes, trailerAt, built.info.rootOffset );
+    writeBytes( built.path, bytes );
+
+    File::Class file( built.path.toStdString().c_str(), "rb" );
+    Mutex mutex;
+    QVERIFY( BtreeIndex::indexInfoIsSane( built.info, file, mutex ) );
+
+    BtreeIndex index;
+    index.openIndex( built.info, file, mutex );
+
+    bool threw = false;
+    try
+    {
+      index.findArticlesChecked(
+          Utf8::decode( std::string( query.constData(), size_t( query.size() ) ) ) );
+    }
+    catch ( std::exception & )
+    {
+      threw = true;
+    }
+    QVERIFY2( threw, "advancing to an internal node must throw, not hand its offsets to readChain" );
+  }
+
+  // ---- a child cycle must terminate, not spin ---------------------------
+  void child_cycle_terminates()
+  {
+    QTemporaryDir dir;
+    Built built = buildIndex( dir.filePath( "index" ), 200 );
+
+    quint32 const rootAt = built.info.rootOffset;
+    quint32 const rootSize = getU32( built.bytes, int( rootAt ) );
+    quint32 const rootCsz  = getU32( built.bytes, int( rootAt ) + 4 );
+    QByteArray root = zlibDecompress( built.bytes.constData() + rootAt + 8,
+                                      int( rootCsz ), int( rootSize ) );
+    QVERIFY( !root.isEmpty() );
+    QCOMPARE( getU32( root, 0 ), 0xffffffffu );
+
+    // First child offset now points back at the root: a structurally valid cycle.
+    putU32( root, 4, rootAt );
+
+    QByteArray bytes = built.bytes;
+    bytes.truncate( int( rootAt ) );
+    appendRecord( bytes, root, false, 0 );   // the rebuilt root becomes the last record
+    writeBytes( built.path, bytes );
+
+    File::Class file( built.path.toStdString().c_str(), "rb" );
+    Mutex mutex;
+
+    BtreeIndex index;
+    index.openIndex( built.info, file, mutex );
+
+    QElapsedTimer timer;
+    timer.start();
+
+    bool contained = false;
+    try
+    {
+      index.findArticlesChecked( L"word00000" );
+      contained = true;                       // returned without results
+    }
+    catch ( std::exception & )
+    {
+      contained = true;                       // reported the corrupt tree
+    }
+
+    QVERIFY2( contained, "a child cycle must terminate" );
+    QVERIFY2( timer.elapsed() < 5000, "a child cycle must terminate promptly, not spin" );
+  }
+
+  // ---- every traversal entry point refuses an unusable index -----------
+  void every_entry_point_guarded_after_inert_open()
+  {
+    QTemporaryDir dir;
+    Built built = buildIndex( dir.filePath( "index" ), 200 );
+
+    File::Class file( built.path.toStdString().c_str(), "rb" );
+    Mutex mutex;
+
+    BtreeIndex index;
+    index.openIndex( IndexInfo( 2057158, 378 ), file, mutex );   // inert
+
+    // The propagating lookup must say why.
+    bool threw = false;
+    try
+    {
+      index.findArticlesChecked( L"word00001" );
+    }
+    catch ( BtreeIndexing::exIndexInfoUnusable & )
+    {
+      threw = true;
+    }
+    catch ( std::exception & )
+    {
+      threw = true;
+    }
+    QVERIFY( threw );
+
+    // Every other public entry point must refuse too: either it reports, or it
+    // leaves its output empty. What it may never do is touch the bogus offsets.
+    QVector< BtreeIndexing::WordArticleLink > links;
+    QSet< QString > headwords;
+    QList< quint32 > addresses;
+
+    try { index.findAllArticleLinks( links ); } catch ( std::exception & ) {}
+    QVERIFY( links.isEmpty() );
+
+    try { index.getAllHeadwords( headwords ); } catch ( std::exception & ) {}
+    QVERIFY( headwords.isEmpty() );
+
+    try { index.findArticleLinks( &links, 0, &headwords ); } catch ( std::exception & ) {}
+    QVERIFY( links.isEmpty() );
+    QVERIFY( headwords.isEmpty() );
+
+    addresses.append( 0 );
+    QVector< QString > resolved;
+    try { index.getHeadwordsFromOffsets( addresses, resolved ); } catch ( std::exception & ) {}
+    QVERIFY( resolved.isEmpty() );
+
+    // And the catching lookup keeps its contract.
+    QVERIFY( index.findArticles( L"word00001" ).empty() );
+  }
+
   // ---- chunked storage -------------------------------------------------
   void zero_size_chunk_throws()
   {
