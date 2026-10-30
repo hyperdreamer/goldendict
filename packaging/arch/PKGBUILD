@@ -16,7 +16,7 @@ pkgdesc='Feature-rich dictionary lookup program (Qt 6 and QtWebEngine)'
 arch=('x86_64' 'aarch64')
 url='https://github.com/hyperdreamer/goldendict'
 license=('GPL-3.0-or-later')
-_commit='f932303702169e634d7bf9a947b58c23feb04895'
+_commit='278bb0c49414ab4d7e6e68a3aff93f8710d3bf5a'
 source=("${pkgname}::git+https://github.com/hyperdreamer/goldendict.git#commit=${_commit}")
 sha256sums=('SKIP')
 
