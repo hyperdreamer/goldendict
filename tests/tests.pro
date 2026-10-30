@@ -124,9 +124,9 @@ equals(GD_CLOSURE_MODE, true) {
         tst_article_bridge tst_article_history tst_article_load \
         tst_article_schemes tst_article_stream tst_encoding \
         tst_external_content tst_hotkeys tst_htmlescape tst_langcoder \
-        tst_linkrewrite tst_platformwindow tst_portal_hotkeys \
-        tst_print_pipeline tst_regex tst_save_article tst_utf8_wstring \
-        tst_website_frames
+        tst_btree_index tst_linkrewrite tst_platformwindow \
+        tst_portal_hotkeys tst_print_pipeline tst_regex tst_save_article \
+        tst_utf8_wstring tst_website_frames
     GD_TEST_NAMES =
     for(GD_TEST_PROJECT, GD_TEST_PROJECTS) {
         GD_TEST_NAME = $$basename(GD_TEST_PROJECT)
