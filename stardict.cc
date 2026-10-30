@@ -162,9 +162,21 @@ bool indexIsOldOrBad( string const & indexFile )
 
   IdxHeader header;
 
-  return idx.readRecords( &header, sizeof( header ), 1 ) != 1 ||
-         header.signature != Signature ||
-         header.formatVersion != CurrentFormatVersion;
+  if ( idx.readRecords( &header, sizeof( header ), 1 ) != 1 ||
+                header.signature != Signature ||
+                header.formatVersion != CurrentFormatVersion )
+    return true;
+
+  // The signature and the version only identify who wrote the header. A
+  // different producer that reuses both numbers but stores a different header
+  // layout leaves the two IndexInfo fields below meaningless here, and the btree
+  // traversal would then read arbitrary offsets in this file. Such an index has
+  // to be rebuilt before it is opened.
+  Mutex probeMutex;
+
+  return !BtreeIndexing::BtreeIndex::indexInfoIsSane(
+    BtreeIndexing::IndexInfo( header.indexBtreeMaxElements, header.indexRootOffset ),
+    idx, probeMutex );
 }
 
 class StardictDictionary: public BtreeIndexing::BtreeDictionary

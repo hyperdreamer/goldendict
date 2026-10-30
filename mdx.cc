@@ -1379,12 +1379,52 @@ static bool indexIsOldOrBad( vector< string > const & dictFiles, string const & 
   File::Class idx( indexFile, "rb" );
   IdxHeader header;
 
-  return idx.readRecords( &header, sizeof( header ), 1 ) != 1 ||
-         header.signature != kSignature ||
-         header.formatVersion != kCurrentFormatVersion ||
-         header.parserVersion != MdictParser::kParserVersion ||
-         header.foldingVersion != Folding::Version ||
-         header.mddIndexInfosCount != dictFiles.size() - 1;
+  if ( idx.readRecords( &header, sizeof( header ), 1 ) != 1 ||
+       header.signature != kSignature ||
+       header.formatVersion != kCurrentFormatVersion ||
+       header.parserVersion != MdictParser::kParserVersion ||
+       header.foldingVersion != Folding::Version ||
+       header.mddIndexInfosCount != dictFiles.size() - 1 )
+    return true;
+
+  // Every persisted tree in this file has its own IndexInfo: the dictionary's
+  // own btree in the header, and one record per .mdd resource file in the
+  // mddIndexInfos table. A tree that cannot describe this file makes the whole
+  // index unusable, so any failure forces a rebuild.
+  try
+  {
+    Mutex probeMutex;
+
+    if ( !BtreeIndexing::BtreeIndex::indexInfoIsSane(
+           BtreeIndexing::IndexInfo( header.indexBtreeMaxElements, header.indexRootOffset ),
+           idx, probeMutex ) )
+      return true;
+
+    idx.seek( header.mddIndexInfosOffset );
+
+    for ( uint32_t i = 0; i < header.mddIndexInfosCount; i++ )
+    {
+      quint32 const nameSize = idx.read< quint32 >();
+
+      vector< char > nameBuffer( nameSize );
+
+      if ( nameSize )
+        idx.read( &nameBuffer.front(), nameSize );
+
+      uint32_t const btreeMaxElements = idx.read< uint32_t >();
+      uint32_t const rootOffset = idx.read< uint32_t >();
+
+      if ( !BtreeIndexing::BtreeIndex::indexInfoIsSane(
+             BtreeIndexing::IndexInfo( btreeMaxElements, rootOffset ), idx, probeMutex ) )
+        return true;
+    }
+  }
+  catch( std::exception & )
+  {
+    return true;
+  }
+
+  return false;
 }
 
 static void findResourceFiles( string const & mdx, vector< string > & dictFiles )
