@@ -437,9 +437,22 @@ bool indexIsOldOrBad( string const & indexFile, bool hasZipFile )
   // to be rebuilt before it is opened.
   Mutex probeMutex;
 
-  return !BtreeIndexing::BtreeIndex::indexInfoIsSane(
-    BtreeIndexing::IndexInfo( header.indexBtreeMaxElements, header.indexRootOffset ),
-    idx, probeMutex );
+  if ( !BtreeIndexing::BtreeIndex::indexInfoIsSane(
+         BtreeIndexing::IndexInfo( header.indexBtreeMaxElements, header.indexRootOffset ),
+         idx, probeMutex ) )
+    return true;
+
+  // The optional zip resource tree carries its own IndexInfo pair in this same
+  // header, so it has to describe this file too before it may be opened.
+  if ( header.zipIndexBtreeMaxElements || header.zipIndexRootOffset )
+  {
+    if ( !BtreeIndexing::BtreeIndex::indexInfoIsSane(
+           BtreeIndexing::IndexInfo( header.zipIndexBtreeMaxElements, header.zipIndexRootOffset ),
+           idx, probeMutex ) )
+      return true;
+  }
+
+  return false;
 }
 
 class GlsDictionary: public BtreeIndexing::BtreeDictionary
