@@ -58,6 +58,7 @@ tests/tst_*/tst_website_frames
 tests/tst_*/tst_hotkeys_noffmpeg
 tests/tst_*/Makefile.noffmpeg
 tests/tst_*/tst_article_bridge
+tests/tst_*/tst_article_load
 tests/tst_*/tst_encoding
 tests/tst_*/tst_htmlescape
 tests/tst_*/tst_hotkeys
