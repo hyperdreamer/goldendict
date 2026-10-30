@@ -75,3 +75,6 @@ tests/build/
 /.qmake.stash
 /Makefile.tests
 /tst_*/
+
+# CodeGraph index
+.codegraph/
