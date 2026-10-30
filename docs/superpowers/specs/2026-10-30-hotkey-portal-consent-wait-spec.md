@@ -454,8 +454,8 @@ Add these exact tests to `tests/tst_portal_hotkeys/tst_portal_hotkeys.cc`:
 6. `declinedSavedIdReportsUnassignedNotBound`: use `bind-returning-empty-trigger`; assert `Denied`, empty `activeIds`, the unassigned label, and not `Assigned by portal`.
 7. `shortcutsChangedWithEmptyTriggerReportsUnassigned`: emit `ShortcutsChanged` naming a requested ID with an empty trigger; assert the state leaves `Bound` and the label is unassigned, killing an ID-presence rule on the signal path.
 8. `bindDeniedThenRetryUsesNewSession`: produce `bind-denied` and `Denied`, then retry by calling
-   `PortalBackend::bind()` explicitly with the same desired set — the production path an accepted
-   Preferences dialog reaches. This suite is `QTEST_GUILESS_MAIN` and links neither
+   `PortalBackend::bind()` explicitly with the same desired set, which is the production path an
+   accepted Preferences dialog reaches. This suite is `QTEST_GUILESS_MAIN` and links neither
    `preferences.cc` nor `mainwindow.cc`, so the dialog is never constructed here. Switch the fake to
    its success scenario for the second session, then assert two `CreateSession` calls, exactly one
    `BindShortcuts` per session, no protocol violation, and final `Bound`. Which UI gesture passes
@@ -469,17 +469,17 @@ Add these exact tests to `tests/tst_hotkeys/tst_hotkeys.cc`:
 12. `installGateRemembersOnlyIssuedBinds`: assert that `HotkeyInstallGate` records a desired list when it returns true, does not record it when false, and `reset()` primes a fresh bind.
 13. `mainWindowUsesTheSharedInstallGate`: read `TestSupport::repositoryRoot() + "/mainwindow.cc"` and assert exactly one `installGate.shouldBind(` and no `requestedHotkeys` identifier. This is the source-shape test for the gate because the suite does not link `MainWindow`.
 14. `bindingExplanationNamesTheConfirmationDialog`: obtain the explanation from the **real**
-    production emission — drive `PortalBackend` over the private bus until `startBind()` publishes
-    `State::Binding` and capture the `stateChanged` explanation — assert it equals D5's exact
-    `QStringLiteral`, and only then pass that captured value into
+    production emission: drive `PortalBackend` over the private bus until `startBind()` publishes
+    `State::Binding` and capture the `stateChanged` explanation; assert it equals D5's exact
+    `QStringLiteral`; and only then pass that captured value into
     `Preferences::setHotkeyStatus` and assert the page renders it for a non-active state. A literal
     supplied by the test would let the production string drift and still pass.
 15. `unassignedBindingLabelAndConfigureEnablement`: assert D4 for both origins of `Denied`: Bind denial
     has Configure enabled with a live session; CreateSession denial has it disabled. Assert `Bound` and
     `Partial` enabled, and `Creating`, `Ready`, `Binding`, `Unavailable`, `Closed`, and `Unsupported`
     disabled. Assert the unassigned label for an inactive ID. This suite links `portalhotkeys.cc`, so
-    at least one case must take `configureAvailable` from a **real backend** — including a
-    false-capability case — rather than from a hand-supplied boolean; otherwise the
+    at least one case must take `configureAvailable` from a **real backend** (including a
+    false-capability case) rather than from a hand-supplied boolean; otherwise the
     unconditional-true predicate mutant survives and this test cannot be one of its killers.
 16. `configureAvailabilityFollowsBindCompletion`: over the private bus, assert `isConfigureAvailable()` is false before a session, false while Bind Response is held in `Binding`, true after a `Bound` Bind response, true after Bind denial, false after CreateSession denial, and false after `Session.Closed`, owner loss, and `unbind()`. Assert `configureAvailabilityChanged()` once per transition and no poll-driven emissions. Call `backend.configure()` directly during `Binding` and assert no ConfigureShortcuts call; call it after Bind denial and assert exactly one. Break the **actual client transport** after a concluded `Bound` bind by stopping the private bus
 daemon while the backend's retained connection and cached session/version terms stay intact
