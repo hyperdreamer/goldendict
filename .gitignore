@@ -78,3 +78,12 @@ tests/build/
 
 # CodeGraph index
 .codegraph/
+
+# Arch packaging. `makepkg` writes the built package next to the PKGBUILD unless
+# PKGDEST says otherwise, and the source clone lands in $SRCDEST. Neither is a
+# build product of the project itself, so keep both out of the history.
+packaging/arch/dist/
+packaging/arch/src/
+packaging/arch/pkg/
+*.pkg.tar.zst
+*.pkg.tar.xz

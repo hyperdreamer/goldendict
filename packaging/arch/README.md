@@ -4,8 +4,20 @@
 
 ```bash
 cd packaging/arch
-makepkg -si
+PKGDEST="$PWD/dist" SRCDEST="$PWD/src" makepkg -si
 ```
+
+Keep the artifacts next to the recipe instead of scattering them: `PKGDEST` puts the
+built package in `packaging/arch/dist/` (git-ignored) and `SRCDEST` keeps the source
+clone in `packaging/arch/src/`. To install a package that was already built:
+
+```bash
+sudo pacman -U packaging/arch/dist/goldendict-*.pkg.tar.zst
+```
+
+Building without those variables writes the package into the current directory, which
+is fine but leaves binaries wherever you happened to be. Nothing in this recipe writes
+to `$HOME`.
 
 The package is named `goldendict` and declares `conflicts`/`provides` for
 `goldendict-git`, `goldendict-ng` and `goldendict-ng-git`, because all of them
