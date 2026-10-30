@@ -8,6 +8,8 @@
 #include <QThreadPool>
 #include <QSemaphore>
 #include <math.h>
+#include <limits.h>
+#include <limits>
 #include <string.h>
 #include <stdlib.h>
 #include "gddebug.hh"
@@ -43,14 +45,48 @@ using gd::wstring;
 using gd::wchar;
 using std::pair;
 
-enum
+namespace
 {
-  BtreeMinElements = 64,
-  BtreeMaxElements = 8192
-};
+uint32_t readUint32( char const * ptr )
+{
+  uint32_t value;
+  memcpy( &value, ptr, sizeof( value ) );
+  return value;
+}
+
+uint32_t readLeafLink( File::Class & file )
+{
+  qint64 signedPosition;
+  qint64 signedSize;
+  try
+  {
+    signedPosition = file.tell();
+    signedSize = file.file().size();
+  }
+  catch( File::Ex & )
+  {
+    throw File::exReadError();
+  }
+
+  if( signedPosition < 0 || signedSize < 0 ||
+      uint64_t( signedPosition ) > uint64_t( signedSize ) ||
+      sizeof( uint32_t ) > uint64_t( signedSize ) - uint64_t( signedPosition ) )
+    throw File::exReadError();
+
+  try
+  {
+    return file.read< uint32_t >();
+  }
+  catch( File::Ex & )
+  {
+    throw File::exReadError();
+  }
+}
+}
 
 BtreeIndex::BtreeIndex():
-  idxFile( 0 ), rootNodeLoaded( false )
+  idxFileMutex( 0 ), idxFile( 0 ), indexUsable( false ),
+  indexNodeSize( 0 ), rootOffset( 0 ), rootNodeLoaded( false )
 {
 }
 
@@ -67,56 +103,147 @@ string const & BtreeDictionary::ensureInitDone()
   return empty;
 }
 
+bool BtreeIndex::indexInfoIsSane( IndexInfo const & info,
+                                   File::Class & file, Mutex & mutex )
+{
+  try
+  {
+    Mutex::Lock lock( mutex );
+    qint64 savedPosition;
+
+    try
+    {
+      savedPosition = file.tell();
+    }
+    catch(...)
+    {
+      return false;
+    }
+
+    if( savedPosition < 0 )
+      return false;
+
+    bool sane = false;
+
+    try
+    {
+      qint64 signedSize = file.file().size();
+      if( signedSize >= 0 && info.btreeMaxElements >= 1 &&
+          info.btreeMaxElements <= BtreeMaxElements )
+      {
+        uint64_t size = static_cast< uint64_t >( signedSize );
+        uint64_t offset = static_cast< uint64_t >( info.rootOffset );
+
+        if( offset <= size && sizeof( uint32_t ) * 2 <= size - offset )
+        {
+          BtreeIndex probe;
+          probe.idxFile = &file;
+          probe.idxFileMutex = &mutex;
+          probe.indexNodeSize = info.btreeMaxElements;
+          probe.rootOffset = info.rootOffset;
+
+          vector< char > decoded;
+          probe.readNode( info.rootOffset, decoded );
+          sane = true;
+        }
+      }
+    }
+    catch(...)
+    {
+      sane = false;
+    }
+
+    try
+    {
+      file.seek( savedPosition );
+    }
+    catch(...)
+    {
+      return false;
+    }
+
+    return sane;
+  }
+  catch(...)
+  {
+    return false;
+  }
+}
+
 void BtreeIndex::openIndex( IndexInfo const & indexInfo,
                             File::Class & file, Mutex & mutex )
 {
-  indexNodeSize = indexInfo.btreeMaxElements;
-  rootOffset = indexInfo.rootOffset;
+  indexNodeSize = 0;
+  rootOffset = 0;
+  rootNodeLoaded = false;
+  rootNode.clear();
+  indexUsable = false;
 
   idxFile = &file;
   idxFileMutex = &mutex;
 
-  rootNodeLoaded = false;
-  rootNode.clear();
+  bool sane = false;
+  try
+  {
+    sane = indexInfoIsSane( indexInfo, file, mutex );
+  }
+  catch(...)
+  {
+    sane = false;
+  }
+
+  if( sane )
+  {
+    indexNodeSize = indexInfo.btreeMaxElements;
+    rootOffset = indexInfo.rootOffset;
+    indexUsable = true;
+  }
 }
 
 vector< WordArticleLink > BtreeIndex::findArticles( wstring const & word, bool ignoreDiacritics )
 {
-  vector< WordArticleLink > result;
-
   try
   {
-    wstring folded = Folding::apply( word );
-    if( folded.empty() )
-      folded = Folding::applyWhitespaceOnly( word );
-
-    bool exactMatch;
-
-    vector< char > leaf;
-    uint32_t nextLeaf;
-
-    char const * leafEnd;
-
-    char const * chainOffset = findChainOffsetExactOrPrefix( folded, exactMatch,
-                                                             leaf, nextLeaf,
-                                                             leafEnd );
-
-    if ( chainOffset && exactMatch )
-    {
-      result = readChain( chainOffset );
-
-      antialias( word, result, ignoreDiacritics );
-    }
+    return findArticlesChecked( word, ignoreDiacritics );
   }
   catch( std::exception & e )
   {
     gdWarning( "Articles searching failed, error: %s\n", e.what() );
-    result.clear();
   }
   catch(...)
   {
     qWarning( "Articles searching failed\n" );
-    result.clear();
+  }
+
+  return vector< WordArticleLink >();
+}
+
+vector< WordArticleLink > BtreeIndex::findArticlesChecked( wstring const & word,
+                                                           bool ignoreDiacritics )
+{
+  if( !idxFile )
+    throw exIndexWasNotOpened();
+  if( !indexUsable )
+    throw exIndexInfoUnusable();
+
+  vector< WordArticleLink > result;
+  wstring folded = Folding::apply( word );
+  if( folded.empty() )
+    folded = Folding::applyWhitespaceOnly( word );
+
+  bool exactMatch;
+  vector< char > leaf;
+  uint32_t nextLeaf;
+  char const * leafEnd;
+
+  char const * chainOffset = findChainOffsetExactOrPrefix( folded, exactMatch,
+                                                           leaf, nextLeaf,
+                                                           leafEnd );
+
+  if( chainOffset && exactMatch )
+  {
+    result = readChain( chainOffset );
+    antialias( word, result, ignoreDiacritics );
   }
 
   return result;
@@ -312,10 +439,11 @@ void BtreeWordSearchRequest::findMatches()
       vector< char > leaf;
       uint32_t nextLeaf;
       char const * leafEnd;
+      BtreeIndex::TraversalState traversal;
 
       char const * chainOffset = dict.findChainOffsetExactOrPrefix( folded, exactMatch,
                                                                     leaf, nextLeaf,
-                                                                    leafEnd );
+                                                                    leafEnd, &traversal );
 
       if ( chainOffset )
       for( ; ; )
@@ -323,63 +451,66 @@ void BtreeWordSearchRequest::findMatches()
         if ( isCancelled.loadAcquire() )
           break;
 
-        //DPRINTF( "offset = %u, size = %u\n", chainOffset - &leaf.front(), leaf.size() );
+        //DPRINTF( "offset = %u, size = %u\n", chainOffset - leaf.data(), leaf.size() );
 
         vector< WordArticleLink > chain = dict.readChain( chainOffset );
 
-        wstring chainHead = Utf8::decode( chain[ 0 ].word );
-
-        wstring resultFolded = Folding::apply( chainHead );
-        if( resultFolded.empty() )
-          resultFolded = Folding::applyWhitespaceOnly( chainHead );
-
-        if ( ( useWildcards && folded.empty() ) ||
-             ( resultFolded.size() >= folded.size()
-               && !resultFolded.compare( 0, folded.size(), folded ) ) )
+        if( !chain.empty() )
         {
-          // Exact or prefix match
+          wstring chainHead = Utf8::decode( chain[ 0 ].word );
 
-          Mutex::Lock _( dataMutex );
+          wstring resultFolded = Folding::apply( chainHead );
+          if( resultFolded.empty() )
+            resultFolded = Folding::applyWhitespaceOnly( chainHead );
 
-          for( unsigned x = 0; x < chain.size(); ++x )
+          if ( ( useWildcards && folded.empty() ) ||
+               ( resultFolded.size() >= folded.size()
+                 && !resultFolded.compare( 0, folded.size(), folded ) ) )
           {
-            if( useWildcards )
+            // Exact or prefix match
+
+            Mutex::Lock _( dataMutex );
+
+            for( unsigned x = 0; x < chain.size(); ++x )
             {
-              wstring word = Utf8::decode( chain[ x ].prefix + chain[ x ].word );
-              wstring result = Folding::applyDiacriticsOnly( word );
-              if( result.size() >= (wstring::size_type)minMatchLength )
+              if( useWildcards )
               {
-                QRegularExpressionMatch match = regexp.match( gd::toQString( result ) );
-                if( match.hasMatch() && match.capturedStart() == 0 )
+                wstring word = Utf8::decode( chain[ x ].prefix + chain[ x ].word );
+                wstring result = Folding::applyDiacriticsOnly( word );
+                if( result.size() >= (wstring::size_type)minMatchLength )
                 {
-                  addMatch( word );
+                  QRegularExpressionMatch match = regexp.match( gd::toQString( result ) );
+                  if( match.hasMatch() && match.capturedStart() == 0 )
+                  {
+                    addMatch( word );
+                  }
                 }
               }
-            }
-            else
-            {
-              // Skip middle matches, if requested. If suffix variation is specified,
-              // make sure the string isn't larger than requested.
-              if ( ( allowMiddleMatches || Folding::apply( Utf8::decode( chain[ x ].prefix ) ).empty() ) &&
-                   ( maxSuffixVariation < 0 || (int)resultFolded.size() - initialFoldedSize <= maxSuffixVariation ) )
+              else
+              {
+                // Skip middle matches, if requested. If suffix variation is specified,
+                // make sure the string isn't larger than requested.
+                if ( ( allowMiddleMatches || Folding::apply( Utf8::decode( chain[ x ].prefix ) ).empty() ) &&
+                     ( maxSuffixVariation < 0 || (int)resultFolded.size() - initialFoldedSize <= maxSuffixVariation ) )
                   addMatch( Utf8::decode( chain[ x ].prefix + chain[ x ].word ) );
+              }
+            }
+
+            if( isCancelled.loadAcquire() )
+              break;
+
+            if ( matches.size() >= maxResults )
+            {
+              // For now we actually allow more than maxResults if the last
+              // chain yield more than one result. That's ok and maybe even more
+              // desirable.
+              break;
             }
           }
-
-          if( isCancelled.loadAcquire() )
+          else
+            // Neither exact nor a prefix match, end this
             break;
-
-          if ( matches.size() >= maxResults )
-          {
-            // For now we actually allow more than maxResults if the last
-            // chain yield more than one result. That's ok and maybe even more
-            // desirable.
-            break;
-          }
         }
-        else
-          // Neither exact nor a prefix match, end this
-          break;
 
         // Fetch new leaf if we're out of chains here
 
@@ -391,21 +522,7 @@ void BtreeWordSearchRequest::findMatches()
 
           if ( nextLeaf )
           {
-            Mutex::Lock _( *dict.idxFileMutex );
-
-            dict.readNode( nextLeaf, leaf );
-            leafEnd = &leaf.front() + leaf.size();
-
-            nextLeaf = dict.idxFile->read< uint32_t >();
-            chainOffset = &leaf.front() + sizeof( uint32_t );
-
-            uint32_t leafEntries = *(uint32_t *)&leaf.front();
-
-            if ( leafEntries == 0xffffFFFF )
-            {
-              //DPRINTF( "bah!\n" );
-              exit( 1 );
-            }
+            chainOffset = dict.readNextLeaf( nextLeaf, leaf, leafEnd, traversal );
           }
           else
             break; // That was the last leaf
@@ -425,10 +542,23 @@ void BtreeWordSearchRequest::findMatches()
   {
     qWarning( "Index searching failed: \"%s\", error: %s\n",
               dict.getName().c_str(), e.what() );
+    {
+      Mutex::Lock lock( dataMutex );
+      matches.clear();
+    }
+    QString errorString = QString::fromUtf8( e.what() );
+    if( errorString.isEmpty() )
+      errorString = QString::fromUtf8( "Index searching failed" );
+    setErrorString( errorString );
   }
   catch(...)
   {
     gdWarning( "Index searching failed: \"%s\"\n", dict.getName().c_str() );
+    {
+      Mutex::Lock lock( dataMutex );
+      matches.clear();
+    }
+    setErrorString( QString::fromUtf8( "Index searching failed" ) );
   }
 }
 
@@ -476,50 +606,292 @@ sptr< Dictionary::WordSearchRequest > BtreeDictionary::stemmedMatch(
 
 void BtreeIndex::readNode( uint32_t offset, vector< char > & out )
 {
-  idxFile->seek( offset );
+  qint64 signedSize;
+  try
+  {
+    signedSize = idxFile->file().size();
+  }
+  catch( File::Ex & )
+  {
+    throw exFailedToDecompressNode();
+  }
 
-  uint32_t uncompressedSize = idxFile->read< uint32_t >();
-  uint32_t compressedSize = idxFile->read< uint32_t >();
-
-  //DPRINTF( "%x,%x\n", uncompressedSize, compressedSize );
-
-  out.resize( uncompressedSize );
-
-  vector< unsigned char > compressedData( compressedSize );
-
-  idxFile->read( &compressedData.front(), compressedData.size() );
-
-  #ifdef __BTREE_USE_LZO
-
-  lzo_uint decompressedLength = out.size();
-
-  if ( lzo1x_decompress( &compressedData.front(), compressedData.size(),
-                         (unsigned char *)&out.front(), &decompressedLength, 0 )
-       != LZO_E_OK || decompressedLength != out.size() )
+  if( signedSize < 0 )
     throw exFailedToDecompressNode();
 
-  #else
+  uint64_t size = static_cast< uint64_t >( signedSize );
+  uint64_t nodeOffset = static_cast< uint64_t >( offset );
 
-  unsigned long decompressedLength = out.size();
-
-  if ( uncompress( (unsigned char *)&out.front(),
-                   &decompressedLength,
-                   &compressedData.front(),
-                   compressedData.size() ) != Z_OK ||
-       decompressedLength != out.size() )
+  if( nodeOffset > size || sizeof( uint32_t ) * 2 > size - nodeOffset )
     throw exFailedToDecompressNode();
-  #endif
+
+  uint32_t uncompressedSize;
+  uint32_t compressedSize;
+
+  try
+  {
+    idxFile->seek( offset );
+    uncompressedSize = idxFile->read< uint32_t >();
+    compressedSize = idxFile->read< uint32_t >();
+  }
+  catch( File::Ex & )
+  {
+    throw exFailedToDecompressNode();
+  }
+
+  if( !uncompressedSize || !compressedSize )
+    throw exFailedToDecompressNode();
+
+  if( uint64_t( compressedSize ) > size - nodeOffset - sizeof( uint32_t ) * 2 )
+    throw exFailedToDecompressNode();
+
+  uint64_t expansionLimit = uint64_t( compressedSize ) * 1032u + 64u;
+  if( uint64_t( uncompressedSize ) > expansionLimit )
+    throw exFailedToDecompressNode();
+
+  if( uint64_t( compressedSize ) > uint64_t( std::numeric_limits< size_t >::max() ) ||
+      uint64_t( compressedSize ) > uint64_t( std::numeric_limits< qint64 >::max() ) )
+    throw exFailedToDecompressNode();
+
+  vector< unsigned char > compressedData;
+  if( uint64_t( compressedSize ) > uint64_t( compressedData.max_size() ) )
+    throw exFailedToDecompressNode();
+  compressedData.resize( static_cast< size_t >( compressedSize ) );
+
+  try
+  {
+    idxFile->read( compressedData.data(), static_cast< qint64 >( compressedSize ) );
+  }
+  catch( File::Ex & )
+  {
+    throw exFailedToDecompressNode();
+  }
+
+  vector< char > decoded;
+  if( uint64_t( uncompressedSize ) > uint64_t( decoded.max_size() ) )
+    throw exFailedToDecompressNode();
+
+#ifdef __BTREE_USE_LZO
+  // LZO has a separate expansion contract. Enabling this branch requires
+  // codec-specific bounds and tests equivalent to the zlib path below.
+  decoded.resize( uncompressedSize );
+  lzo_uint decompressedLength = decoded.size();
+  if( lzo1x_decompress( compressedData.data(), compressedData.size(),
+                         reinterpret_cast< unsigned char * >( decoded.data() ),
+                         &decompressedLength, 0 ) != LZO_E_OK ||
+      decompressedLength != decoded.size() )
+    throw exFailedToDecompressNode();
+#else
+  z_stream stream = {};
+  if( inflateInit( &stream ) != Z_OK )
+    throw exFailedToDecompressNode();
+
+  struct InflateEnd
+  {
+    z_stream * stream;
+    ~InflateEnd() throw()
+    {
+      inflateEnd( stream );
+    }
+  } inflateEndGuard = { &stream };
+
+  uint64_t consumed = 0;
+  uint64_t produced = 0;
+  unsigned char outputWindow[ 65536 ];
+
+  for( ; ; )
+  {
+    if( stream.avail_in == 0 && consumed < uint64_t( compressedSize ) )
+    {
+      uint64_t remaining = uint64_t( compressedSize ) - consumed;
+      uint64_t take = remaining < uint64_t( UINT_MAX ) ? remaining : uint64_t( UINT_MAX );
+      stream.next_in = reinterpret_cast< Bytef * >( compressedData.data() +
+                                                     static_cast< size_t >( consumed ) );
+      stream.avail_in = static_cast< uInt >( take );
+    }
+
+    uInt inputBefore = stream.avail_in;
+    stream.next_out = outputWindow;
+    stream.avail_out = static_cast< uInt >( sizeof( outputWindow ) );
+
+    int result = inflate( &stream, Z_NO_FLUSH );
+    uint64_t used = uint64_t( inputBefore - stream.avail_in );
+    uint64_t made = uint64_t( sizeof( outputWindow ) - stream.avail_out );
+    consumed += used;
+
+    if( produced > expansionLimit || made > expansionLimit - produced ||
+        produced > uint64_t( uncompressedSize ) ||
+        made > uint64_t( uncompressedSize ) - produced )
+      throw exFailedToDecompressNode();
+
+    if( made > uint64_t( decoded.max_size() - decoded.size() ) )
+      throw exFailedToDecompressNode();
+
+    if( made )
+    {
+      char const * begin = reinterpret_cast< char const * >( outputWindow );
+      decoded.insert( decoded.end(), begin, begin + static_cast< size_t >( made ) );
+    }
+    produced += made;
+
+    if( result == Z_STREAM_END )
+    {
+      if( consumed != uint64_t( compressedSize ) ||
+          produced != uint64_t( uncompressedSize ) )
+        throw exFailedToDecompressNode();
+      break;
+    }
+
+    if( result != Z_OK || ( !used && !made ) )
+      throw exFailedToDecompressNode();
+  }
+#endif
+
+  size_t const nodeSize = decoded.size();
+  if( nodeSize < sizeof( uint32_t ) )
+    throw exFailedToDecompressNode();
+
+  uint32_t first;
+  memcpy( &first, decoded.data(), sizeof( first ) );
+
+  if( first == 0xffffFFFF )
+  {
+    if( indexNodeSize < 1 || indexNodeSize > BtreeMaxElements )
+      throw exFailedToDecompressNode();
+
+    uint64_t headerBytes = sizeof( uint32_t ) +
+                           ( uint64_t( indexNodeSize ) + 1u ) * sizeof( uint32_t );
+    if( headerBytes > uint64_t( nodeSize ) )
+      throw exFailedToDecompressNode();
+
+    size_t cursor = static_cast< size_t >( headerBytes );
+    for( uint32_t separator = 0; separator < indexNodeSize; ++separator )
+    {
+      if( cursor >= nodeSize )
+        throw exFailedToDecompressNode();
+
+      char const * end = reinterpret_cast< char const * >(
+        memchr( decoded.data() + cursor, 0, nodeSize - cursor ) );
+      if( !end || end == decoded.data() + cursor )
+        throw exFailedToDecompressNode();
+
+      cursor = static_cast< size_t >( end - decoded.data() ) + 1;
+    }
+
+    if( cursor != nodeSize )
+      throw exFailedToDecompressNode();
+  }
+  else
+  {
+    if( first > indexNodeSize )
+      throw exFailedToDecompressNode();
+
+    size_t cursor = sizeof( uint32_t );
+    for( uint32_t entry = 0; entry < first; ++entry )
+    {
+      if( cursor > nodeSize || sizeof( uint32_t ) > nodeSize - cursor )
+        throw exFailedToDecompressNode();
+
+      uint32_t chainSize;
+      memcpy( &chainSize, decoded.data() + cursor, sizeof( chainSize ) );
+      cursor += sizeof( chainSize );
+
+      if( !chainSize || uint64_t( chainSize ) > uint64_t( nodeSize - cursor ) )
+        throw exFailedToDecompressNode();
+
+      size_t chainEnd = cursor + static_cast< size_t >( chainSize );
+      bool hasRecord = false;
+
+      while( cursor < chainEnd )
+      {
+        char const * wordEnd = reinterpret_cast< char const * >(
+          memchr( decoded.data() + cursor, 0, chainEnd - cursor ) );
+        if( !wordEnd )
+          throw exFailedToDecompressNode();
+        cursor = static_cast< size_t >( wordEnd - decoded.data() ) + 1;
+
+        char const * prefixEnd = reinterpret_cast< char const * >(
+          memchr( decoded.data() + cursor, 0, chainEnd - cursor ) );
+        if( !prefixEnd )
+          throw exFailedToDecompressNode();
+        cursor = static_cast< size_t >( prefixEnd - decoded.data() ) + 1;
+
+        if( sizeof( uint32_t ) > chainEnd - cursor )
+          throw exFailedToDecompressNode();
+        cursor += sizeof( uint32_t );
+        hasRecord = true;
+      }
+
+      if( !hasRecord || cursor != chainEnd )
+        throw exFailedToDecompressNode();
+    }
+
+    if( cursor != nodeSize )
+      throw exFailedToDecompressNode();
+  }
+
+  out.swap( decoded );
 }
 
+void BtreeIndex::enterNode( TraversalState & traversal, uint32_t offset )
+{
+  if( !traversal.visitedOffsets.insert( offset ).second )
+    throw exCorruptedChainData();
+}
+
+char const * BtreeIndex::readNextLeaf( uint32_t & nextLeaf,
+                                       vector< char > & leaf,
+                                       char const * & leafEnd,
+                                       TraversalState & traversal )
+{
+  if( !idxFile )
+    throw exIndexWasNotOpened();
+  if( !indexUsable )
+    throw exIndexInfoUnusable();
+
+  if( !nextLeaf )
+    return 0;
+
+  Mutex::Lock lock( *idxFileMutex );
+  uint32_t target = nextLeaf;
+  enterNode( traversal, target );
+
+  vector< char > decoded;
+  readNode( target, decoded );
+
+  if( decoded.size() < sizeof( uint32_t ) )
+    throw exCorruptedChainData();
+
+  uint32_t entries = readUint32( decoded.data() );
+  if( entries == 0xffffFFFF || entries < 1 || entries > indexNodeSize )
+    throw exCorruptedChainData();
+
+  uint32_t following = readLeafLink( *idxFile );
+
+  leaf.swap( decoded );
+  leafEnd = leaf.data() + leaf.size();
+  nextLeaf = following;
+  return leaf.data() + sizeof( uint32_t );
+}
 char const * BtreeIndex::findChainOffsetExactOrPrefix( wstring const & target,
                                                        bool & exactMatch,
                                                        vector< char > & extLeaf,
                                                        uint32_t & nextLeaf,
-                                                       char const * & leafEnd )
+                                                       char const * & leafEnd,
+                                                       TraversalState * traversal )
 {
-  if ( !idxFile )
+  if( !idxFile )
     throw exIndexWasNotOpened();
-  
+  if( !indexUsable )
+    throw exIndexInfoUnusable();
+
+  if( !traversal )
+  {
+    TraversalState localTraversal;
+    return findChainOffsetExactOrPrefix( target, exactMatch, extLeaf, nextLeaf,
+                                         leafEnd, &localTraversal );
+  }
+
   Mutex::Lock _( *idxFileMutex );
   
   // Lookup the index by traversing the index btree
@@ -531,6 +903,7 @@ char const * BtreeIndex::findChainOffsetExactOrPrefix( wstring const & target,
   // Read a node
 
   uint32_t currentNodeOffset = rootOffset;
+  enterNode( *traversal, rootOffset );
 
   if ( !rootNodeLoaded )
   {
@@ -539,7 +912,7 @@ char const * BtreeIndex::findChainOffsetExactOrPrefix( wstring const & target,
     rootNodeLoaded = true;
   }
 
-  char const * leaf = &rootNode.front();
+  char const * leaf = rootNode.data();
   leafEnd = leaf + rootNode.size();
 
   if( target.empty() )
@@ -547,27 +920,40 @@ char const * BtreeIndex::findChainOffsetExactOrPrefix( wstring const & target,
     //For empty target string we return first chain in index
     for( ; ; )
     {
-      uint32_t leafEntries = *(uint32_t *)leaf;
+      uint32_t leafEntries = readUint32( leaf );
 
       if ( leafEntries == 0xffffFFFF )
       {
         // A node
-        currentNodeOffset = *( (uint32_t *)leaf + 1 );
+        currentNodeOffset = readUint32( leaf + sizeof( uint32_t ) );
+        enterNode( *traversal, currentNodeOffset );
         readNode( currentNodeOffset, extLeaf );
-        leaf = &extLeaf.front();
+        leaf = extLeaf.data();
         leafEnd = leaf + extLeaf.size();
-        nextLeaf = idxFile->read< uint32_t >();
+        leafEntries = readUint32( leaf );
+
+        if( leafEntries != 0xffffFFFF )
+        {
+          if( !leafEntries )
+            throw exCorruptedChainData();
+          nextLeaf = readLeafLink( *idxFile );
+          return leaf + sizeof( uint32_t );
+        }
       }
       else
       {
         // A leaf
-        if( currentNodeOffset == rootOffset )
-        {
-          // Only one leaf in index, there's no next leaf
-          nextLeaf = 0;
-        }
         if( !leafEntries )
+        {
+          if( currentNodeOffset != rootOffset )
+            throw exCorruptedChainData();
           return 0;
+        }
+
+        if( currentNodeOffset == rootOffset )
+          nextLeaf = 0;
+        else
+          nextLeaf = readLeafLink( *idxFile );
 
         return leaf + sizeof( uint32_t );
       }
@@ -578,15 +964,13 @@ char const * BtreeIndex::findChainOffsetExactOrPrefix( wstring const & target,
   {
     // Is it a leaf or a node?
 
-    uint32_t leafEntries = *(uint32_t *)leaf;
+    uint32_t leafEntries = readUint32( leaf );
 
     if ( leafEntries == 0xffffFFFF )
     {
       // A node
 
       //DPRINTF( "=>a node\n" );
-
-      uint32_t const * offsets = (uint32_t *)leaf + 1;
 
       char const * ptr = leaf + sizeof( uint32_t ) +
                          ( indexNodeSize + 1 ) * sizeof( uint32_t );
@@ -689,39 +1073,41 @@ char const * BtreeIndex::findChainOffsetExactOrPrefix( wstring const & target,
 
       // Ok, now check the outcome
 
+      uint32_t const leftOffset = readUint32(
+        leaf + sizeof( uint32_t ) + entry * sizeof( uint32_t ) );
+      uint32_t const rightOffset = readUint32(
+        leaf + sizeof( uint32_t ) + ( entry + 1 ) * sizeof( uint32_t ) );
+
       if ( !compareResult )
       {
-        // The target string matches the one found.
-        // Go to the right, since it's there where we store such results.
-        currentNodeOffset = offsets[ entry + 1 ];
+        // The target string matches the one found. Finish the search.
+        currentNodeOffset = rightOffset;
       }
       if ( compareResult < 0 )
       {
         // The target string is smaller than the one found.
         // Go to the left.
-        currentNodeOffset = offsets[ entry ];
+        currentNodeOffset = leftOffset;
       }
       else
       {
         // The target string is larger than the one found.
         // Go to the right.
-        currentNodeOffset = offsets[ entry + 1 ];
+        currentNodeOffset = rightOffset;
       }
 
       //DPRINTF( "reading node at %x\n", currentNodeOffset );
+      enterNode( *traversal, currentNodeOffset );
       readNode( currentNodeOffset, extLeaf );
-      leaf = &extLeaf.front();
+      leaf = extLeaf.data();
       leafEnd = leaf + extLeaf.size();
+      if( readUint32( leaf ) != 0xffffFFFF && !readUint32( leaf ) )
+        throw exCorruptedChainData();
     }
     else
     {
       //DPRINTF( "=>a leaf\n" );
       // A leaf
-
-      // If this leaf is the root, there's no next leaf, it just can't be.
-      // We do this check because the file's position indicator just won't
-      // be in the right place for root node anyway, since we precache it.
-      nextLeaf = ( currentNodeOffset != rootOffset ? idxFile->read< uint32_t >() : 0 );
 
       if ( !leafEntries )
       {
@@ -732,6 +1118,10 @@ char const * BtreeIndex::findChainOffsetExactOrPrefix( wstring const & target,
           return 0; // No match
       }
 
+      // If this leaf is the root, there's no next leaf, it just can't be.
+      // This check is needed because the cached root has no file trailer.
+      nextLeaf = ( currentNodeOffset != rootOffset ? readLeafLink( *idxFile ) : 0 );
+
       // Build an array containing all chain pointers
       char const * ptr = leaf + sizeof( uint32_t );
 
@@ -740,7 +1130,7 @@ char const * BtreeIndex::findChainOffsetExactOrPrefix( wstring const & target,
       vector< char const * > chainOffsets( leafEntries );
 
       {
-        char const ** nextOffset = &chainOffsets.front();
+        char const ** nextOffset = chainOffsets.data();
 
         while( leafEntries-- )
         {
@@ -757,12 +1147,12 @@ char const * BtreeIndex::findChainOffsetExactOrPrefix( wstring const & target,
       // Now do a binary search in it, aiming to find where our target
       // string lands.
 
-      char const ** window = &chainOffsets.front();
+      char const ** window = chainOffsets.data();
       unsigned windowSize = chainOffsets.size();
 
       for( ; ; )
       {
-        //DPRINTF( "window = %u, ws = %u\n", window - &chainOffsets.front(), windowSize );
+        //DPRINTF( "window = %u, ws = %u\n", window - chainOffsets.data(), windowSize );
 
         char const ** chainToCheck = window + windowSize/2;
         ptr = *chainToCheck;
@@ -830,13 +1220,7 @@ char const * BtreeIndex::findChainOffsetExactOrPrefix( wstring const & target,
             {
               if ( nextLeaf )
               {
-                readNode( nextLeaf, extLeaf );
-  
-                leafEnd = &extLeaf.front() + extLeaf.size();
-  
-                nextLeaf = idxFile->read< uint32_t >();
-  
-                return &extLeaf.front() + sizeof( uint32_t );
+                return readNextLeaf( nextLeaf, extLeaf, leafEnd, *traversal );
               }
               else
                 return 0; // This was the last leaf
@@ -854,6 +1238,11 @@ char const * BtreeIndex::findChainOffsetExactOrPrefix( wstring const & target,
 
 vector< WordArticleLink > BtreeIndex::readChain( char const * & ptr )
 {
+  if( !idxFile )
+    throw exIndexWasNotOpened();
+  if( !indexUsable )
+    throw exIndexInfoUnusable();
+
   uint32_t chainSize;
 
   memcpy( &chainSize, ptr, sizeof( uint32_t ) );
@@ -1262,16 +1651,20 @@ IndexInfo buildIndex( IndexedWords const & indexedWords, File::Class & file )
 
 void BtreeIndex::getAllHeadwords( QSet< QString > & headwords )
 {
-  if ( !idxFile )
+  if( !idxFile )
     throw exIndexWasNotOpened();
+  if( !indexUsable )
+    throw exIndexInfoUnusable();
 
   findArticleLinks( NULL, NULL, &headwords );
 }
 
 void BtreeIndex::findAllArticleLinks( QVector< WordArticleLink > & articleLinks )
 {
-  if ( !idxFile )
+  if( !idxFile )
     throw exIndexWasNotOpened();
+  if( !indexUsable )
+    throw exIndexInfoUnusable();
 
   QSet< uint32_t > offsets;
 
@@ -1283,11 +1676,18 @@ void BtreeIndex::findArticleLinks( QVector< WordArticleLink > * articleLinks,
                                    QSet< QString > *headwords,
                                    QAtomicInt * isCancelled )
 {
+  if( !idxFile )
+    throw exIndexWasNotOpened();
+  if( !indexUsable )
+    throw exIndexInfoUnusable();
+
   uint32_t currentNodeOffset = rootOffset;
   uint32_t nextLeaf = 0;
   uint32_t leafEntries;
+  TraversalState traversal;
 
   Mutex::Lock _( *idxFileMutex );
+  enterNode( traversal, rootOffset );
 
   if ( !rootNodeLoaded )
   {
@@ -1296,7 +1696,7 @@ void BtreeIndex::findArticleLinks( QVector< WordArticleLink > * articleLinks,
     rootNodeLoaded = true;
   }
 
-  char const * leaf = &rootNode.front();
+  char const * leaf = rootNode.data();
   char const * leafEnd = leaf + rootNode.size();
   char const * chainPtr = 0;
 
@@ -1306,7 +1706,7 @@ void BtreeIndex::findArticleLinks( QVector< WordArticleLink > * articleLinks,
 
   for( ; ; )
   {
-    leafEntries = *(uint32_t *)leaf;
+    leafEntries = readUint32( leaf );
 
     if( isCancelled && isCancelled->loadAcquire() )
       return;
@@ -1314,15 +1714,18 @@ void BtreeIndex::findArticleLinks( QVector< WordArticleLink > * articleLinks,
     if ( leafEntries == 0xffffFFFF )
     {
       // A node
-      currentNodeOffset = *( (uint32_t *)leaf + 1 );
+      currentNodeOffset = readUint32( leaf + sizeof( uint32_t ) );
+      enterNode( traversal, currentNodeOffset );
       readNode( currentNodeOffset, extLeaf );
-      leaf = &extLeaf.front();
+      leaf = extLeaf.data();
       leafEnd = leaf + extLeaf.size();
-      nextLeaf = idxFile->read< uint32_t >();
     }
     else
     {
       // A leaf
+      if( !leafEntries && currentNodeOffset != rootOffset )
+        throw exCorruptedChainData();
+      nextLeaf = ( currentNodeOffset != rootOffset ? readLeafLink( *idxFile ) : 0 );
       chainPtr = leaf + sizeof( uint32_t );
       break;
     }
@@ -1384,19 +1787,7 @@ void BtreeIndex::findArticleLinks( QVector< WordArticleLink > * articleLinks,
       // We're past the current leaf, fetch the next one
 
       if ( nextLeaf )
-      {
-        readNode( nextLeaf, extLeaf );
-        leaf = &extLeaf.front();
-        leafEnd = leaf + extLeaf.size();
-
-        nextLeaf = idxFile->read< uint32_t >();
-        chainPtr = leaf + sizeof( uint32_t );
-
-        leafEntries = *(uint32_t *)leaf;
-
-        if ( leafEntries == 0xffffFFFF )
-          throw exCorruptedChainData();
-      }
+        chainPtr = readNextLeaf( nextLeaf, extLeaf, leafEnd, traversal );
       else
         break; // That was the last leaf
     }
@@ -1407,13 +1798,20 @@ void BtreeIndex::getHeadwordsFromOffsets( QList<uint32_t> & offsets,
                                           QVector<QString> & headwords,
                                           QAtomicInt * isCancelled )
 {
+  if( !idxFile )
+    throw exIndexWasNotOpened();
+  if( !indexUsable )
+    throw exIndexInfoUnusable();
+
   uint32_t currentNodeOffset = rootOffset;
   uint32_t nextLeaf = 0;
   uint32_t leafEntries;
+  TraversalState traversal;
 
   std::sort( offsets.begin(), offsets.end() );
 
   Mutex::Lock _( *idxFileMutex );
+  enterNode( traversal, rootOffset );
 
   if ( !rootNodeLoaded )
   {
@@ -1422,7 +1820,7 @@ void BtreeIndex::getHeadwordsFromOffsets( QList<uint32_t> & offsets,
     rootNodeLoaded = true;
   }
 
-  char const * leaf = &rootNode.front();
+  char const * leaf = rootNode.data();
   char const * leafEnd = leaf + rootNode.size();
   char const * chainPtr = 0;
 
@@ -1432,7 +1830,7 @@ void BtreeIndex::getHeadwordsFromOffsets( QList<uint32_t> & offsets,
 
   for( ; ; )
   {
-    leafEntries = *(uint32_t *)leaf;
+    leafEntries = readUint32( leaf );
 
     if( isCancelled && isCancelled->loadAcquire() )
       return;
@@ -1440,15 +1838,18 @@ void BtreeIndex::getHeadwordsFromOffsets( QList<uint32_t> & offsets,
     if ( leafEntries == 0xffffFFFF )
     {
       // A node
-      currentNodeOffset = *( (uint32_t *)leaf + 1 );
+      currentNodeOffset = readUint32( leaf + sizeof( uint32_t ) );
+      enterNode( traversal, currentNodeOffset );
       readNode( currentNodeOffset, extLeaf );
-      leaf = &extLeaf.front();
+      leaf = extLeaf.data();
       leafEnd = leaf + extLeaf.size();
-      nextLeaf = idxFile->read< uint32_t >();
     }
     else
     {
       // A leaf
+      if( !leafEntries && currentNodeOffset != rootOffset )
+        throw exCorruptedChainData();
+      nextLeaf = ( currentNodeOffset != rootOffset ? readLeafLink( *idxFile ) : 0 );
       chainPtr = leaf + sizeof( uint32_t );
       break;
     }
@@ -1501,19 +1902,7 @@ void BtreeIndex::getHeadwordsFromOffsets( QList<uint32_t> & offsets,
       // We're past the current leaf, fetch the next one
 
       if ( nextLeaf )
-      {
-        readNode( nextLeaf, extLeaf );
-        leaf = &extLeaf.front();
-        leafEnd = leaf + extLeaf.size();
-
-        nextLeaf = idxFile->read< uint32_t >();
-        chainPtr = leaf + sizeof( uint32_t );
-
-        leafEntries = *(uint32_t *)leaf;
-
-        if ( leafEntries == 0xffffFFFF )
-          throw exCorruptedChainData();
-      }
+        chainPtr = readNextLeaf( nextLeaf, extLeaf, leafEnd, traversal );
       else
         break; // That was the last leaf
     }
