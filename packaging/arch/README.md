@@ -4,25 +4,23 @@
 
 ```bash
 cd packaging/arch
-PKGDEST="$PWD/dist" SRCDEST="$PWD/src" makepkg -si
+PKGDEST="$PWD/dist" SRCDEST=/var/tmp/makepkg-src BUILDDIR=/var/tmp/makepkg-build makepkg -si
 ```
 
-Keep the artifacts next to the recipe instead of scattering them: `PKGDEST` puts the
-built package in `packaging/arch/dist/` (git-ignored) and `SRCDEST` keeps the source
-clone in `packaging/arch/src/`. To install a package that was already built:
+`PKGDEST` puts the built package in `packaging/arch/dist/` (git-ignored) instead of the
+current directory. `SRCDEST` and `BUILDDIR` must stay **outside** the repository:
+makepkg keeps a bare clone there and creates its working copy from it, and git refuses
+that operation when the bare repository lives inside another work tree
+(`fatal: this operation must be run in a work tree`). Neither variable points at `$HOME`.
+
+To install a package that was already built:
 
 ```bash
 sudo pacman -U packaging/arch/dist/goldendict-*.pkg.tar.zst
 ```
 
-Building without those variables writes the package into the current directory, which
-is fine but leaves binaries wherever you happened to be. Nothing in this recipe writes
-to `$HOME`.
-
-The package is named `goldendict` and declares `conflicts`/`provides` for
-`goldendict-git`, `goldendict-ng` and `goldendict-ng-git`, because all of them
-install `/usr/bin/goldendict`. `pacman -U` therefore replaces an existing build
-of the same program rather than keeping two side by side.
+The package does not build detached debug symbols (`options=('!debug')`); add the flag
+back in `PKGBUILD` if you need them for a crash report.
 
 ## Why the build happens in the source tree
 

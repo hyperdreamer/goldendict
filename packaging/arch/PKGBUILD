@@ -9,7 +9,7 @@
 # at configure time and the binary looks for its data in /usr/share/goldendict.
 
 pkgname=goldendict
-pkgver=1.5.1
+pkgver=1.5.1.r2828.g862b1a98
 pkgrel=1
 epoch=2
 pkgdesc='Feature-rich dictionary lookup program (Qt 6 and QtWebEngine)'
@@ -49,7 +49,7 @@ depends=(
 makedepends=('git' 'qt6-tools')
 conflicts=('goldendict-git' 'goldendict-ng' 'goldendict-ng-git')
 provides=('goldendict')
-options=('!lto')
+options=('!lto' '!debug')
 
 pkgver() {
   cd "${pkgname}"
