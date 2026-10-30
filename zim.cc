@@ -531,9 +531,24 @@ bool indexIsOldOrBad( string const & indexFile )
   // to be rebuilt before it is opened.
   Mutex probeMutex;
 
-  return !BtreeIndexing::BtreeIndex::indexInfoIsSane(
-    BtreeIndexing::IndexInfo( header.indexBtreeMaxElements, header.indexRootOffset ),
-    idx, probeMutex );
+  if ( !BtreeIndexing::BtreeIndex::indexInfoIsSane(
+         BtreeIndexing::IndexInfo( header.indexBtreeMaxElements, header.indexRootOffset ),
+         idx, probeMutex ) )
+    return true;
+
+  // The embedded resource tree carries its own IndexInfo pair in this header.
+  // Validate it only when present: an absent pair is two zero fields and must
+  // keep meaning "no resource index", otherwise every start would rebuild.
+  if ( header.resourceIndexBtreeMaxElements || header.resourceIndexRootOffset )
+  {
+    if ( !BtreeIndexing::BtreeIndex::indexInfoIsSane(
+           BtreeIndexing::IndexInfo( header.resourceIndexBtreeMaxElements,
+                                     header.resourceIndexRootOffset ),
+           idx, probeMutex ) )
+      return true;
+  }
+
+  return false;
 }
 
 quint32 getArticleCluster( ZimFile & file, quint32 articleNumber )
