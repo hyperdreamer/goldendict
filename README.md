@@ -72,10 +72,11 @@ ambiguous directory with two `.pro` files is rejected).
 
 ### Build in the source tree
 
-Configure and build in the source tree. Out-of-source (shadow) build trees are not
-supported: two translation units declare a `Q_OBJECT` class in the `.cc` file and
-include their own generated `.moc`, and qmake 6.12 emits the dependency on that file
-without the rule that produces it, so a shadow tree fails to build.
+Configure and build in the source tree, or in a build directory inside it (`./build.sh`,
+which uses `build/`). A build directory **outside** the source tree is not supported: two
+translation units declare a `Q_OBJECT` class in the `.cc` file and include their own
+generated `.moc`, and qmake 6.12 emits the dependency on that file without the rule that
+produces it, so an external tree fails to build. Verified with `./build.sh --qt6`.
 
 Note: to compile with `libhunspell` older than 1.5 pass `"CONFIG+=old_hunspell"` to `qmake6`.
 
