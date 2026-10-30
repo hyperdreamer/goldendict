@@ -158,9 +158,54 @@ whatever exit codes the probe runs actually produced — are produced and printe
 `scripts/verify-test-gate.sh` itself when it is executed. This document does not
 restate exit codes for the probes that were not observed while writing it.
 
+## Live platform evidence (observed 2026-10-30 on the target session)
+
+Three startup runs were made against an isolated `HOME` holding a **copy** of the
+configuration, so the desktop session's dictionaries, index and history were neither
+read for evidence nor modified.
+
+| gate | command | exit | platform | backend | observation | evidence-path |
+| --- | --- | --- | --- | --- | --- | --- |
+| native Wayland | `HOME=<isolated> QT_QPA_PLATFORM=wayland ./goldendict --log-to-file` | terminated by signal after the readiness line | `wayland` | `portal` | `startup-ready platform=wayland backend=portal` | `/tmp/gd-live/startup-wayland.log` |
+| explicit X11 | `HOME=<isolated> QT_QPA_PLATFORM=xcb ./goldendict --log-to-file` | terminated by signal after the readiness line | `xcb` | `x11-record` | `startup-ready platform=xcb backend=x11-record` | `/tmp/gd-live/startup-xcb.log` |
+| headless startup smoke | `QT_QPA_PLATFORM=xcb timeout 30 xvfb-run -a ./goldendict --log-to-file` | `124` | `xcb` | `x11-record` | `startup-ready platform=xcb backend=x11-record` | `/tmp/gd-qt6-final-startup-gdlog.txt` |
+
+This is the platform half of the live gate: native Wayland selects the portal backend,
+explicit X11 selects the compiled RECORD backend, and the startup handshake completes on
+both without a renderer or bridge failure. The log line is preceded by a UTF-8 byte order
+mark in the log file, so the marker is grepped without anchoring to the line start.
+
+### Interaction evidence still outstanding
+
+The following need a person at the machine, and are **not** observed. Nothing below is
+claimed as a live result, and the live-gate markers are deliberately absent:
+
+- the portal-reported `Bound`/`Partial` state and label of a single shortcut;
+- an article rendered from a live lookup on the native session;
+- the scan popup raised by that shortcut;
+- audible audio playback;
+- the two-key X11 default and the double `Ctrl+C` popup;
+- a physical printer, and the optional KDE window-system helper.
+
+## Complete automated gate (recorded at `b0506f02`)
+
+| command | exit | observation | evidence-path |
+| --- | --- | --- | --- |
+| `qmake6 goldendict.pro CONFIG+=verbose_build_output && make clean && make -j$(nproc)` | `0` | actual application linker command captured, no Qt5/Qt6Compat/QtMultimedia/WebKit/X11Extras tokens | `/tmp/gd-qt6-final-build.log` |
+| `QT_QPA_PLATFORM=xcb GD_TEST_WRAPPER=scripts/test-wrapper.sh make check` | `0` | 903 assertions, 0 failed, 1 environment skip; wrapper logged the build and run invocations separately | `/tmp/gd-qt6-final-check.log`, `/tmp/gd-qt6-final-wrapper.log` |
+| `scripts/check-qt6-only.sh Makefile /tmp/gd-qt6-final-build.log` | `0` | `AUDIT: raw=36 token-stream=0 scope=392`, exception line printed | `/tmp/gd-qt6-final-audit.log` |
+| `QT_QPA_PLATFORM=xcb timeout 30 xvfb-run -a ./goldendict` | `124` | startup-ready line present, no crash, no renderer error | `/tmp/gd-qt6-final-startup.log` |
+| `no_ffmpeg_player` variant: `qmake6 goldendict.pro CONFIG+='no_ffmpeg_player verbose_build_output' && make -j$(nproc)` | `0` | `MAKE_FFMPEG_PLAYER` absent from the generated Makefile | `/tmp/nf-build.log` |
+| `no_ffmpeg_player` audio/preferences cases (six named cases in `tst_hotkeys_noffmpeg`) | `0` | 8 passed, 0 failed, 0 skipped | `/tmp/nf-tb3.log` |
+
+The four gate probes (`scripts/verify-test-gate.sh`) were proven at `88064d41`, the last
+change to that script; its only later edits are documentation. Their outcomes are
+characterised in the table above rather than restated with invented exits.
+
 ## Deliberately not claimed here
 
-* Native Wayland live behaviour of any limit in §1–§6 (Task 37).
+* Native Wayland interaction behaviour of any limit in §1–§6 (the platform gates above are
+  the only live observations; the interaction list is outstanding).
 * Any physical-printer or KDE-session-dependent optional test result.
 * Any compositor behaviour beyond "activation may be declined": focus is never
   guaranteed, only requested.

@@ -29,6 +29,7 @@
  */
 
 #include <QtTest>
+#include <QPointer>
 
 #include <QDir>
 #include <QDomDocument>
@@ -56,6 +57,7 @@
 #include "broken_xrecord.hh"
 #include "config.hh"
 #include "externalaudioplayer.hh"
+#include "externalviewer.hh"
 #include "ffmpegaudioplayer.hh"
 #include "hotkeybackend.hh"
 #include "hotkeysyntax.hh"
@@ -394,6 +396,7 @@ class TstHotkeys : public QObject
 private slots:
   void initTestCase();
   void cleanupTestCase();
+  void externalViewerRetiresItsProcessObject();
 
   // Syntax: parsing, preferred trigger, serialization.
   void parsesSingleCombinationToPreferredTrigger();
@@ -516,6 +519,44 @@ void TstHotkeys::initTestCase()
                           .arg( Config::getConfigFileName() ) ) );
 
   TestSupport::installWatchdog( TestSupport::PureWatchdogSeconds );
+}
+
+void TstHotkeys::externalViewerRetiresItsProcessObject()
+{
+  // Qt 6 renamed QProcess::error() to errorOccurred(). String-based connects to the
+  // old name fail silently at run time, so the regression is invisible except as a
+  // Qt warning. The external viewer is the caller that was broken by it.
+  static QStringList warnings;
+  warnings.clear();
+
+  QtMessageHandler const previous = qInstallMessageHandler(
+    []( QtMsgType type, QMessageLogContext const &, QString const & text ) {
+      if ( type != QtDebugMsg && type != QtInfoMsg )
+        warnings.append( text );
+    } );
+
+  QPointer< ExternalViewer > viewer;
+  bool started = false;
+  QString startFailure;
+  try
+  {
+    viewer = new ExternalViewer( "payload", 7, QStringLiteral( "txt" ), QStringLiteral( "/bin/true" ) );
+    viewer->start();
+    started = true;
+  }
+  catch( ExternalViewer::exCantRunViewer const & error )
+  {
+    startFailure = QString::fromUtf8( error.what() );
+  }
+
+  bool const retired = started && QTest::qWaitFor( [ &viewer ] { return viewer.isNull(); }, 15000 );
+
+  qInstallMessageHandler( previous );
+
+  QVERIFY2( started, qPrintable( "the external viewer could not start: " + startFailure ) );
+  QVERIFY2( retired, "the external viewer was not retired after its process finished" );
+  QVERIFY2( !warnings.join( '\n' ).contains( QStringLiteral( "No such signal" ) ),
+            qPrintable( "a Qt connection to a renamed signal failed: " + warnings.join( QStringLiteral( " | " ) ) ) );
 }
 
 void TstHotkeys::cleanupTestCase()
