@@ -94,11 +94,22 @@ namespace
 
     IdxHeader header;
 
-    return idx.readRecords( &header, sizeof( header ), 1 ) != 1 ||
-           header.signature != Signature ||
-           header.formatVersion != CurrentFormatVersion ||
-           header.parserVersion != Babylon::ParserVersion ||
-           header.foldingVersion != Folding::Version;
+    if ( idx.readRecords( &header, sizeof( header ), 1 ) != 1 ||
+         header.signature != Signature ||
+         header.formatVersion != CurrentFormatVersion ||
+         header.parserVersion != Babylon::ParserVersion ||
+         header.foldingVersion != Folding::Version )
+      return true;
+
+    // The signature and the version only identify who wrote the header; a file
+    // from a different producer with a different header layout leaves the two
+    // IndexInfo fields meaningless, so the tree must be rebuilt before it is
+    // traversed.
+    Mutex probeMutex;
+
+    return !BtreeIndexing::BtreeIndex::indexInfoIsSane(
+      BtreeIndexing::IndexInfo( header.indexBtreeMaxElements, header.indexRootOffset ),
+      idx, probeMutex );
   }
 
   // Removes the $1$-like postfix
