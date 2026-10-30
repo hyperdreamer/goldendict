@@ -407,7 +407,15 @@ Use isolated temporary source copies for negative controls: remove the non-empty
 The following are separate acceptance runs requiring the operator's existing local corpus; they are not counted among the 50 hermetic slots:
 
 - Enumerate every persisted pair: 20 top-level files in the reviewed corpus, every MDX volume pair, every optional ZIP/ZIM/SLOB resource pair, and every `_FTS` file. Record file identity, owner, pair fields, result, and before/after SHA-256. Require 17 accepted top-level files and exactly three rejected foreign SoundDir files; embedded/FTS valid pairs remain accepted. A different corpus requires an explicit inventory delta, not silently forcing those historical counts.
-- Copy configuration/indexes to an isolated test application configuration using the supported portable-directory path (`config.cc:49`, `config.cc:2470`). Run a lookup such as `hello` using the built executable and scratch copies only. Require a normal live process, the three foreign files rebuilt with this tree's six-field header and valid roots, other 17 top-level index files byte-identical, successful affected sound lookups, and no new process core. Do not delete or rewrite the user's active index directory to demonstrate the fix.
+- Copy the configuration and index tree into a scratch **HOME override** (`HOME=<tmpdir>`, plus
+  `XDG_CONFIG_HOME`/`XDG_CACHE_HOME`/`XDG_RUNTIME_DIR` under it) and run the lookup with the built
+  executable and scratch copies only. Portable mode is NOT usable for this gate: `main.cc:477`
+  executes `cfg.soundDirs.clear()` and `sources.cc:135-147` disables the sound-directory controls, so a
+  portable launch can never rebuild or exercise the SoundDir stores whose corruption is the original
+  defect. Require a normal live process, the three foreign files rebuilt with this tree's six-field
+  header and valid roots, the other 17 top-level index files byte-identical, successful affected sound
+  lookups, and no new process core. Do not delete or rewrite the user's active index directory to
+  demonstrate the fix; the override keeps every write inside the scratch HOME.
 - Produce the final worker-hit classification from §7, and compile all modified producer/codec feature configurations. A successful small unit suite does not replace compiling the real protected helper call from `findMatches()` or the feature-conditional readers.
 
 ## 9. Compatibility
@@ -458,6 +466,7 @@ Keep public `findArticles()` as the existing logging/empty-result wrapper. Use t
 | Inspection correction C4: ZIP is not chunk storage | Replace D5.5's `ChunkMaxSize` suggestion with ZIP/source/deflate properties; valid large/empty entries remain accepted (§3.4). | T40, T41, T47. |
 | Inspection correction C5: logging alone does not report request failure | Existing prefix/FTS catches and public lookup swallow errors (`btreeidx.cc:111`, `btreeidx.cc:424`, `ftshelpers.cc:1332`). Checked lookup plus outer request reporting supplies the promised dictionary-local errors (§2.2, §7). | T44, T45, T47, T48 and catching-lookup negative control. |
 | Inspection correction C6: design D5 missed MDX-adjacent metadata (spec review 1 BLOCKER 1) | Add the stylesheet/description paths the worker closure did not name (`mdx.cc:420–437`, `mdx.cc:928–943`): bounded lengths, zero-length skips, explicit-length conversion, `descriptionSize`-bounded descriptor. | T49, T50 and the §7 final sweep. |
+| Inspection correction C7: portable launch cannot exercise SoundDir (planner-discovered) | Design/spec §8.4 named the portable-directory path for acceptance, but `main.cc:477` clears `cfg.soundDirs` and `sources.cc:135-147` disables them there, so the gate could never rebuild the three foreign stores. Replace with an isolated scratch **HOME override**. | Task 27 acceptance; no test slot (local-corpus gate). |
 | Spec review 1 MAJOR 1: truncated trailer untested | T22 gains a `_data` row for an absent or 1–3-byte trailer; `File::exReadError`, unchanged caller state, no `readChain{}. | T22. |
 | Structural-only chain validation | Resolve “minimum seven bytes” as ordinary-word commentary, not an additional semantic rule: field framing itself is two NULs and four bytes (`btreeidx.cc:961`); do not reject otherwise complete records solely for an empty word (§2, §3.2). | T12 positive framing controls; no unrequested semantic validation. |
 | Existing FTS/optional-ZIP conventions | Preserve FTS version sum and `{0,0}` optional ZIP absence while still checking every present pair (§6). Required ZIM/SLOB empty trees retain a real root. | T35, T37. |
