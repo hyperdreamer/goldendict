@@ -251,8 +251,12 @@ Per-ID display labels are:
 | Condition | Label |
 | --- | --- |
 | ID active | the portal-reported trigger |
-| ID inactive and Configure available | `Not assigned by the portal - use Configure shortcuts` |
+| ID inactive and Configure available | `Not assigned by the portal — use Configure shortcuts` |
 | ID inactive and Configure unavailable | the existing state/explanation text |
+
+The inactive-with-Configure label is exactly the approved design's string and contains the Unicode
+EM DASH U+2014 between `portal` and `use`, so the source file must stay UTF-8. It is a different
+string from D5's Binding explanation, which remains plain ASCII.
 
 After the user assigns the key in System Settings, KDE emits `ShortcutsChanged`; the shared activity rule refreshes the label and state. This route repairs a declined ID without changing its stable GoldenDict shortcut ID.
 
@@ -268,7 +272,10 @@ The previous `QStringLiteral( "Binding portal shortcuts" )` must not remain. The
 
 ## 7. Required amendments to the Qt 6 migration specification
 
-This section implements design D6, approved design lines 445-492. The implementation must change only the seven sites below in `docs/superpowers/specs/2026-10-24-qt6-migration-spec.md`. Each amendment quotes the current target text and then gives the exact replacement text. The present task does not modify that migration specification.
+This section implements design D6, approved design lines 445-492. The implementation must change only the seven sites below in `docs/superpowers/specs/2026-10-24-qt6-migration-spec.md`. Each amendment quotes the current target text and then gives the exact replacement text. The quoted
+current text is a normalized excerpt of the migration specification: line wrapping and the Unicode
+arrow characters (`→`) are normalized for readability, the wording is unchanged, and each cited
+location is exact. The present task does not modify that migration specification.
 
 ### 7.1 `trigger_description` interpretation, migration line 1707
 
@@ -326,7 +333,7 @@ The early-envelope buffer is bounded to this request's 5 s lifetime and cleared 
 Replace it with exactly:
 
 ```text
-The active establishment buffer is bounded by the phase budget and MaxCandidates and is cleared after delivery. A retired request retains that same bounded buffer only for CleanupMs so a late CreateSession success can still expose its session_handle for Request.Close. The buffer is dropped at disposal or on service owner change; cancellation does not unconditionally clear it.
+The active establishment buffer is bounded by the phase budget and MaxCandidates and is cleared after delivery. A retired request retains that same bounded buffer only for CleanupMs so a late CreateSession success can still expose its session_handle for Session.Close (org.freedesktop.portal.Session.Close; Request.Close remains the interface for the predicted and returned request paths and is unchanged by this amendment). The buffer is dropped at disposal or on service owner change; cancellation does not unconditionally clear it.
 ```
 
 ### 7.5 BindShortcuts deadline and retry rule, migration Section 4.12 around lines 1752-1756
@@ -424,7 +431,11 @@ The fake portal receives three additive extensions. Existing scenario behavior a
 
 1. **Active-trigger payloads.** Production Bind input still carries only `description` and `preferred_trigger` (`portalhotkeys.cc:976-983`). The fake portal's `bindPayload()` must add a non-empty `trigger_description`, using the requested preferred-trigger text, unless an entry already has one or a scenario explicitly requests another value. Add scenario `bind-returning-empty-trigger`, which returns requested IDs with an empty `trigger_description`. `boundEntries` remains verbatim so tests can construct empty-trigger payloads directly.
 2. **Per-method barriers.** Add `holdResponse(member)` and `releaseHeldResponse(member)`. They hold only that method's `Response` after that method's method reply has been sent; they never hold the method reply, another method's Response, or predicted-path plumbing. Add `holdMethodReply(member)` and `releaseHeldMethodReply(member)`. They hold only that method's method reply; an early Response for the held method is still emitted when the scenario emits one. Releases preserve arrival order per request.
-3. **ShortcutsChanged emitter.** Add a fake signal emitter for a validated `ShortcutsChanged` payload so the shared activity rule is exercised independently of the Bind response.
+3. **ShortcutsChanged emission.** Do not add a new emitter: the fake already provides
+   `FakePortal::emitShortcutsChanged` (`tests/support/fake_portal.hh:165`,
+   `tests/support/fake_portal.cc:1142-1147`) with correct `oa(sa{sv})` marshalling
+   (`fake_portal.cc:208-215`). Reuse it to exercise the shared activity rule independently of the
+   Bind response.
 
 The two explicit fixture ordering constraints are:
 
@@ -442,7 +453,13 @@ Add these exact tests to `tests/tst_portal_hotkeys/tst_portal_hotkeys.cc`:
 5. `existingBindTimeoutRowNoLongerPassesThroughAListTimeout`: restage `backendRetirementDuringPendingWork:bind-timeout` so List completes and only Bind is held; assert `Binding`, never `Unavailable`.
 6. `declinedSavedIdReportsUnassignedNotBound`: use `bind-returning-empty-trigger`; assert `Denied`, empty `activeIds`, the unassigned label, and not `Assigned by portal`.
 7. `shortcutsChangedWithEmptyTriggerReportsUnassigned`: emit `ShortcutsChanged` naming a requested ID with an empty trigger; assert the state leaves `Bound` and the label is unassigned, killing an ID-presence rule on the signal path.
-8. `bindDeniedThenUserActionRetryUsesNewSession`: produce `bind-denied` and `Denied`, retry through accepted Preferences, then assert two CreateSession calls, one BindShortcuts per session, no protocol violation, and final `Bound`.
+8. `bindDeniedThenRetryUsesNewSession`: produce `bind-denied` and `Denied`, then retry by calling
+   `PortalBackend::bind()` explicitly with the same desired set — the production path an accepted
+   Preferences dialog reaches. This suite is `QTEST_GUILESS_MAIN` and links neither
+   `preferences.cc` nor `mainwindow.cc`, so the dialog is never constructed here. Switch the fake to
+   its success scenario for the second session, then assert two `CreateSession` calls, exactly one
+   `BindShortcuts` per session, no protocol violation, and final `Bound`. Which UI gesture passes
+   `UserAction` is proven by tests 10 and 13 plus desktop acceptance step 6, not by this test.
 9. `consentWaitTerminals`: cover one case each for `unbind()` while waiting, destruction while waiting, portal owner loss while waiting, `Session.Closed` while waiting, and a late success Response after retirement being suppressed.
 
 Add these exact tests to `tests/tst_hotkeys/tst_hotkeys.cc`:
@@ -451,13 +468,46 @@ Add these exact tests to `tests/tst_hotkeys/tst_hotkeys.cc`:
 11. `bindingSettleAndInFlightClassification`: assert the three-way partition of the nine states.
 12. `installGateRemembersOnlyIssuedBinds`: assert that `HotkeyInstallGate` records a desired list when it returns true, does not record it when false, and `reset()` primes a fresh bind.
 13. `mainWindowUsesTheSharedInstallGate`: read `TestSupport::repositoryRoot() + "/mainwindow.cc"` and assert exactly one `installGate.shouldBind(` and no `requestedHotkeys` identifier. This is the source-shape test for the gate because the suite does not link `MainWindow`.
-14. `bindingExplanationNamesTheConfirmationDialog`: assert the exact D5 string through `Preferences::setHotkeyStatus` for a non-active state.
-15. `unassignedBindingLabelAndConfigureEnablement`: assert D4 for both origins of `Denied`: Bind denial has Configure enabled with a live session; CreateSession denial has it disabled. Assert `Bound` and `Partial` enabled, and `Creating`, `Ready`, `Binding`, `Unavailable`, `Closed`, and `Unsupported` disabled. Assert the unassigned label for an inactive ID.
-16. `configureAvailabilityFollowsBindCompletion`: over the private bus, assert `isConfigureAvailable()` is false before a session, false while Bind Response is held in `Binding`, true after a `Bound` Bind response, true after Bind denial, false after CreateSession denial, and false after `Session.Closed`, owner loss, and `unbind()`. Assert `configureAvailabilityChanged()` once per transition and no poll-driven emissions. Call `backend.configure()` directly during `Binding` and assert no ConfigureShortcuts call; call it after Bind denial and assert exactly one. Disconnect the client after a concluded `Bound` bind and assert the live-bus predicate becomes false and direct `configure()` refuses without sending ConfigureShortcuts.
-17. `lateCreateSessionSuccessClosesItsSessionAfterCancellation`: stage an early CreateSession success envelope with its method reply held, call `unbind()`, release the method reply, and assert exactly one Session.Close for the buffered handle and no state resurrection.
-18. `reportedTriggersAreDisplayOnly`: update the existing expectation (`tests/tst_portal_hotkeys/tst_portal_hotkeys.cc:1585-1598`): with one non-empty and one empty trigger, expect `Partial` and the unassigned label for the second ID. `boundEntries` remains verbatim; only the suite expectation changes.
+14. `bindingExplanationNamesTheConfirmationDialog`: obtain the explanation from the **real**
+    production emission — drive `PortalBackend` over the private bus until `startBind()` publishes
+    `State::Binding` and capture the `stateChanged` explanation — assert it equals D5's exact
+    `QStringLiteral`, and only then pass that captured value into
+    `Preferences::setHotkeyStatus` and assert the page renders it for a non-active state. A literal
+    supplied by the test would let the production string drift and still pass.
+15. `unassignedBindingLabelAndConfigureEnablement`: assert D4 for both origins of `Denied`: Bind denial
+    has Configure enabled with a live session; CreateSession denial has it disabled. Assert `Bound` and
+    `Partial` enabled, and `Creating`, `Ready`, `Binding`, `Unavailable`, `Closed`, and `Unsupported`
+    disabled. Assert the unassigned label for an inactive ID. This suite links `portalhotkeys.cc`, so
+    at least one case must take `configureAvailable` from a **real backend** — including a
+    false-capability case — rather than from a hand-supplied boolean; otherwise the
+    unconditional-true predicate mutant survives and this test cannot be one of its killers.
+16. `configureAvailabilityFollowsBindCompletion`: over the private bus, assert `isConfigureAvailable()` is false before a session, false while Bind Response is held in `Binding`, true after a `Bound` Bind response, true after Bind denial, false after CreateSession denial, and false after `Session.Closed`, owner loss, and `unbind()`. Assert `configureAvailabilityChanged()` once per transition and no poll-driven emissions. Call `backend.configure()` directly during `Binding` and assert no ConfigureShortcuts call; call it after Bind denial and assert exactly one. Break the **actual client transport** after a concluded `Bound` bind by stopping the private bus
+daemon while the backend's retained connection and cached session/version terms stay intact
+(`QDBusConnection::disconnectFromBus` alone leaves those handles live and would not kill the mutant),
+then assert `isSupported()` and `isConfigureAvailable()` become false and that direct `configure()`
+refuses with the unavailable-session explanation and sends no ConfigureShortcuts.
+17. `lateCreateSessionSuccessClosesItsSessionAfterCancellation`: stage an early CreateSession success
+    envelope with its method reply held; drain that envelope into the client (the existing
+    `flushWire()`/marker pattern, `tests/tst_portal_hotkeys/tst_portal_hotkeys.cc:310-324`, not a
+    received-call count) so the backend has buffered it; then call `unbind()`, release the method
+    reply, and assert exactly one `Session.Close` for the buffered handle and no state resurrection.
+    Without the drain the clear-candidates mutant would be timing-dependent.
+18. `reportedTriggersAreDisplayOnly`: an **update to an existing test in `tst_portal_hotkeys`**, not a
+    new test in `tst_hotkeys`. Change the expectation at
+    `tests/tst_portal_hotkeys/tst_portal_hotkeys.cc:1585-1598`: with one non-empty and one empty
+    trigger, expect `Partial` and the unassigned label for the second ID. `boundEntries` remains
+    verbatim; only the suite expectation changes.
 
-`tst_hotkeys` links `hotkeybackend.cc`, `portalhotkeys.cc`, `preferences.cc`, `preferences.ui`, and `tests/support/fixtures.cc`. `tst_portal_hotkeys` remains the owner of real portal request ordering, private-bus, and session lifecycle assertions.
+Final per-suite inventory, with no change to either test project file:
+
+- `tst_portal_hotkeys` (numbers 1-9 and 18): real portal request ordering, private-bus wiring, session
+  lifecycle, the activity rule through both reply paths, and case 18 as an update to an existing test.
+- `tst_hotkeys` (numbers 10-17): the install-gate decision and memory, the source-shape call check,
+  and the `Preferences` rendering contract. It already links `hotkeybackend.cc`, `portalhotkeys.cc`,
+  `preferences.cc`, `preferences.ui`, and `tests/support/fixtures.cc`.
+
+Neither suite links `mainwindow.cc` or `preferences.cc` from the portal side, and neither test project
+gains a source, so the closed 19-suite inventory stands.
 
 ## 10. Mutation contract and equivalent mutation record
 
@@ -476,11 +526,11 @@ Run each mutation in a disposable copy, assert the named test fails, restore the
 | Make `hotkeyInstallShouldBind()` always false | 10 |
 | Treat `Refresh` as `UserAction` | 10 |
 | Keep `requestedHotkeys` in `mainwindow.cc` | 13 |
-| Make `isConfigureAvailable()` return true unconditionally | 16 and 15 |
+| Make `isConfigureAvailable()` return true unconditionally | 16 and 15 (its real-backend predicate case) |
 | Use cached `d->supported` instead of `isSupported()` | 16, disconnected-connection case |
 | Keep only the old hand-written Configure guards | 16, direct call during `Binding` |
 | Enable Configure by state name instead of capability | 15 |
-| Reword or remove the D5 explanation | 14 |
+| Reword or remove the D5 explanation emitted by `startBind()` | 14 (captures the real `stateChanged` emission) |
 
 Deleting `!retired` from the `UserConsent` `timer.stop()` condition is deliberately recorded as an equivalent mutation rather than assigned a false killing test. `UserConsent` is used only for BindShortcuts; a retired request that reaches `methodFinished()` still reaches the existing retired disposal path, so stopping the cleanup timer earlier produces no observable production lifetime change. The defensive guard remains required. Test 17 proves the observable retained-cleanup behavior through the two distinct mutations that clear the candidate buffer or skip the late session close.
 
