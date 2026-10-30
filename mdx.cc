@@ -161,7 +161,17 @@ public:
     MdictParser::RecordInfo indexEntry;
     vector< char > chunk;
     Mutex::Lock _( idxMutex );
+
+    // getBlock() proves only that the block start lies inside the chunk; the
+    // fixed record header has to fit there as well before it is read.
+    size_t const inChunkOffset = links[ 0 ].articleOffset & 0xffff;
+
     const char * indexEntryPtr = chunks.getBlock( links[ 0 ].articleOffset, chunk );
+
+    if ( chunk.size() < inChunkOffset ||
+         chunk.size() - inChunkOffset < sizeof( indexEntry ) )
+      return false;
+
     memcpy( &indexEntry, indexEntryPtr, sizeof( indexEntry ) );
 
     ScopedMemMap compressed( mddFile, indexEntry.compressedBlockPos, indexEntry.compressedBlockSize );
@@ -177,8 +187,24 @@ public:
       return false;
     }
 
-    result.resize( indexEntry.recordSize );
-    memcpy( &result.front(), decompressed.constData() + indexEntry.recordOffset, indexEntry.recordSize );
+    // The slice comes from the file, so reject negative fields first and then
+    // prove the slice lies inside what was actually decompressed before copying.
+    if ( indexEntry.recordOffset < 0 || indexEntry.recordSize < 0 )
+      return false;
+
+    uint64_t const decompressedSize = (uint64_t)decompressed.size();
+    uint64_t const recordOffset = (uint64_t)indexEntry.recordOffset;
+    uint64_t const recordSize = (uint64_t)indexEntry.recordSize;
+
+    if ( recordOffset > decompressedSize || recordSize > decompressedSize - recordOffset )
+      return false;
+
+    result.clear();
+
+    if ( recordSize )
+      result.assign( decompressed.constData() + recordOffset,
+                     decompressed.constData() + recordOffset + recordSize );
+
     return true;
   }
 
