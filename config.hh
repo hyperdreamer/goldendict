@@ -19,6 +19,20 @@
 #include <QRect>
 #endif
 
+/// One binding as the platform hotkey backend reported it, for display only.
+///
+/// The backend interface (hotkeybackend.hh) publishes a vector of these; the
+/// configuration persists them under <hotkeys>/<portalBindings>. The type is
+/// declared here, at global scope and outside Config, so both the configuration
+/// and the backend can use its exact name without including each other: config.hh
+/// stays a leaf header and no cyclic definition is created. A display record is
+/// never a binding request and never an activation source.
+struct PortalBindingDisplay
+{
+  QString id;
+  QString triggerDescription;
+};
+
 /// GoldenDict's configuration
 namespace Config {
 
@@ -144,6 +158,13 @@ struct HotKey
   Qt::KeyboardModifiers modifiers;
   int key1, key2;
 
+  /// Verbatim text this value was loaded from, nonempty only while the value has
+  /// not been edited through the recorder. It keeps an untouched stored sequence
+  /// byte-for-byte (SD-15); setting a value from the recorder (HotKeyEdit) builds
+  /// a fresh HotKey and therefore clears the marker, so a newly edited value is
+  /// written as PortableText instead. The recorder's own rendering is unchanged.
+  QString rawText;
+
   HotKey();
 
   /// We use the first two keys of QKeySequence, with modifiers being stored
@@ -190,13 +211,9 @@ public:
   static bool anyAvailable();
   /// Returns the default backend or null backend if none is available.
   static InternalPlayerBackend defaultBackend();
-  /// Returns the name list of supported backends.
-  static QStringList nameList();
 
   /// Returns true if built with FFmpeg player support and the name matches.
   bool isFfmpeg() const;
-  /// Returns true if built with Qt Multimedia player support and the name matches.
-  bool isQtmultimedia() const;
 
   QString const & uiName() const
   { return name; }
@@ -216,23 +233,14 @@ private:
   { return InternalPlayerBackend( "FFmpeg+libao" ); }
 #endif
 
-#ifdef MAKE_QTMULTIMEDIA_PLAYER
-  static InternalPlayerBackend qtmultimedia()
-  { return InternalPlayerBackend( "Qt Multimedia" ); }
-#endif
-
   explicit InternalPlayerBackend( QString const & name_ ) : name( name_ )
   {}
 
   QString name;
 };
 
-#if defined( HAVE_X11 ) && QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-  // The ScanPopup window flags customization code has been tested
-  // only in X11 desktop environments and window managers.
-  // None of the window flags configurations I have tried works perfectly well
-  // in XFCE with Qt4. Let us enable customization code for Qt5 exclusively to
-  // avoid regressions with Qt4.
+#ifdef HAVE_X11
+  // This customization is offered only on the actual xcb platform at runtime.
   #define ENABLE_SPWF_CUSTOMIZATION
 #endif
 
@@ -359,9 +367,7 @@ struct Preferences
   InputPhrase sanitizeInputPhrase( QString const & inputPhrase ) const;
 
   unsigned short maxDictionaryRefsInContextMenu;
-#ifndef Q_WS_X11
   bool trackClipboardChanges;
-#endif
 
   bool synonymSearchEnabled;
 
@@ -653,6 +659,16 @@ struct HeadwordsDialog
   {}
 };
 
+/// Hotkey settings that are not part of the existing preference values.
+/// Additive: older configuration files have no <hotkeys> node at all, and a
+/// missing node loads as an empty record set.
+struct Hotkeys
+{
+  /// Display records reported by the platform backend, in the order the portal
+  /// reported them. Known IDs only; never an activation source.
+  QVector< PortalBindingDisplay > portalBindings;
+};
+
 struct Class
 {
   Paths paths;
@@ -661,6 +677,7 @@ struct Class
   Group inactiveDictionaries;
   Groups groups;
   Preferences preferences;
+  Hotkeys hotkeys;
   MediaWikis mediawikis;
   WebSites webSites;
   DictServers dictServers;
@@ -676,7 +693,7 @@ struct Class
   QByteArray popupWindowState; // Binary state saved by QMainWindow
   QByteArray popupWindowGeometry; // Geometry saved by QMainWindow
   QByteArray dictInfoGeometry; // Geometry of "Dictionary info" window
-  QByteArray inspectorGeometry; // Geometry of WebKit inspector window
+  QByteArray inspectorGeometry; // Geometry of the article DevTools window
   QByteArray dictionariesDialogGeometry; // Geometry of Dictionaries dialog
   QByteArray printPreviewDialogGeometry; // Geometry of Print Preview dialog
   QByteArray helpWindowGeometry; // Geometry of help window
@@ -838,6 +855,7 @@ QString getNetworkCacheDir() throw();
 
 }
 
+Q_DECLARE_METATYPE( PortalBindingDisplay )
 Q_DECLARE_METATYPE( Config::InputPhrase )
 
 #endif

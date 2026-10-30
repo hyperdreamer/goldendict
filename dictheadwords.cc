@@ -3,19 +3,19 @@
 
 #include "dictheadwords.hh"
 #include "gddebug.hh"
-#include "mainwindow.hh"
 
-#include <QRegExp>
 #include <QDir>
 #include <QFileDialog>
 #include <QTimer>
 #include <QProgressDialog>
 
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 12, 0 )
 #include <QRegularExpression>
 #include "wildcard.hh"
 #include "gddebug.hh"
-#endif
+
+namespace {
+enum SearchMode { Text, Wildcards, RegularExpression };
+}
 
 #define AUTO_APPLY_LIMIT 150000
 
@@ -38,9 +38,9 @@ DictHeadwords::DictHeadwords( QWidget *parent, Config::Class & cfg_,
   if( cfg.headwordsDialog.headwordsDialogGeometry.size() > 0 )
     restoreGeometry( cfg.headwordsDialog.headwordsDialogGeometry );
 
-  ui.searchModeCombo->addItem( tr( "Text" ), QRegExp::FixedString );
-  ui.searchModeCombo->addItem( tr( "Wildcards" ), QRegExp::WildcardUnix );
-  ui.searchModeCombo->addItem( tr( "RegExp" ), QRegExp::RegExp );
+  ui.searchModeCombo->addItem( tr( "Text" ), Text );
+  ui.searchModeCombo->addItem( tr( "Wildcards" ), Wildcards );
+  ui.searchModeCombo->addItem( tr( "RegExp" ), RegularExpression );
   ui.searchModeCombo->setCurrentIndex( cfg.headwordsDialog.searchMode );
 
   ui.exportButton->setAutoDefault( false );
@@ -214,11 +214,9 @@ void DictHeadwords::filterChangedInternal()
 
 void DictHeadwords::filterChanged()
 {
-  QRegExp::PatternSyntax syntax =
-          QRegExp::PatternSyntax( ui.searchModeCombo->itemData(
-                  ui.searchModeCombo->currentIndex()).toInt() );
+  SearchMode const syntax = static_cast< SearchMode >(
+    ui.searchModeCombo->currentData().toInt() );
 
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 12, 0 )
   QRegularExpression::PatternOptions options = QRegularExpression::UseUnicodePropertiesOption;
   if( !ui.matchCase->isChecked() )
     options |= QRegularExpression::CaseInsensitiveOption;
@@ -226,9 +224,9 @@ void DictHeadwords::filterChanged()
   QString pattern;
   switch( syntax )
   {
-    case QRegExp::FixedString:  pattern = QRegularExpression::escape( ui.filterLine->text() );
+    case Text:                  pattern = QRegularExpression::escape( ui.filterLine->text() );
                                 break;
-    case QRegExp::WildcardUnix: pattern = wildcardsToRegexp( ui.filterLine->text() );
+    case Wildcards:             pattern = wildcardsToRegexp( ui.filterLine->text() );
                                 break;
     default:                    pattern = ui.filterLine->text();
                                 break;
@@ -238,22 +236,14 @@ void DictHeadwords::filterChanged()
 
   if( !regExp.isValid() )
   {
-    gdWarning( "Invalid regexp pattern: %s\n", pattern.toUtf8().data() );
-    regExp.setPattern( QString::fromLatin1( "\1" ) );
+    gdWarning( "Invalid regexp pattern: %s (%s)\n", pattern.toUtf8().constData(),
+               regExp.errorString().toUtf8().constData() );
+    return;
   }
 
   QApplication::setOverrideCursor( Qt::WaitCursor );
 
   proxy->setFilterRegularExpression( regExp );
-#else
-  Qt::CaseSensitivity caseSensitivity = ui.matchCase->isChecked() ? Qt::CaseSensitive
-                                                                  : Qt::CaseInsensitive;
-  QRegExp regExp( ui.filterLine->text(), caseSensitivity, syntax );
-
-  QApplication::setOverrideCursor( Qt::WaitCursor );
-
-  proxy->setFilterRegExp( regExp );
-#endif
 
   proxy->sort( 0 );
 
@@ -371,7 +361,26 @@ void DictHeadwords::saveHeadersToFile()
 
 void DictHeadwords::helpRequested()
 {
-  MainWindow * mainWindow = qobject_cast< MainWindow * >( parentWidget() );
-  if( mainWindow )
-    mainWindow->showGDHelpForID( "Dictionary headwords" );
+  QWidget * owner = parentWidget();
+  if( !owner || !owner->inherits( "MainWindow" ) )
+    return;
+
+  auto * help = owner->findChild< Help::HelpWindow * >( Qt::FindDirectChildrenOnly );
+  if( !help )
+  {
+    // Initialize through the existing GUI slot without pulling MainWindow's
+    // article/browser closure into this dictionary utility.
+    if( !QMetaObject::invokeMethod( owner, "showGDHelp", Qt::DirectConnection ) )
+      return;
+    help = owner->findChild< Help::HelpWindow * >( Qt::FindDirectChildrenOnly );
+  }
+  if( help )
+  {
+    help->showHelpFor( "Dictionary headwords" );
+    if( !help->isVisible() )
+    {
+      help->show();
+      help->activateWindow();
+    }
+  }
 }

@@ -15,11 +15,12 @@
 #include "wstring_qt.hh"
 #include "filetype.hh"
 #include "file.hh"
-#include "qt4x5.hh"
 #include "tiff.hh"
 #include "ftshelpers.hh"
 #include "htmlescape.hh"
 #include "splitfile.hh"
+#include "linkrewrite.hh"
+#include <functional>
 
 #ifdef _MSC_VER
 #include <stub_msvc.h>
@@ -36,9 +37,7 @@
 #include <QDir>
 #include <QDebug>
 
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-#include <QRegularExpression>
-#endif
+#include "wildcard.hh"
 
 #include <string>
 #include <set>
@@ -852,59 +851,42 @@ quint32 ret;
   return ret;
 }
 
-string ZimDictionary::convert( const string & in )
+QString normalizeArticleLinks( QString text, QString const & dictId, int & linksType,
+                               std::function< bool( QString const & ) > const & hasArticle )
 {
-  QString text = QString::fromUtf8( in.c_str() );
+  enum { UNKNOWN, SLASH, NO_SLASH };
+  static QRegularExpression const htmlExtension = Regex::validated( "\\.(s|)htm(l|)$", QRegularExpression::CaseInsensitiveOption );
+  static QRegularExpression const slashPrefix = Regex::validated( ".*/", QRegularExpression::DotMatchesEverythingOption );
+  static QRegularExpression const escapedBreak = Regex::validated( "&lt;br( |)(\\\\|/|)&gt;", QRegularExpression::CaseInsensitiveOption );
+  if( !htmlExtension.isValid() || !slashPrefix.isValid() || !escapedBreak.isValid() )
+  {
+    gdWarning( "Zim article pattern: %s; %s; %s", qPrintable( htmlExtension.errorString() ),
+               qPrintable( slashPrefix.errorString() ), qPrintable( escapedBreak.errorString() ) );
+    return text;
+  }
 
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
   // replace background
-  text.replace( QRegularExpression( "<\\s*body\\s+([^>]*)(background(|-color)):([^;\"]*(;|))" ),
+  text.replace( Regex::validated( "<\\s*body\\s+([^>]*)(background(|-color)):([^;\"]*(;|))" ),
                 QString( "<body \\1" ) );
 
-  // pattern of img and script
-  text.replace( QRegularExpression( "<\\s*(img|script)\\s+([^>]*)src=(\"|)(\\.\\.|)/" ),
-                QString( "<\\1 \\2src=\\3bres://%1/").arg( getId().c_str() ) );
-
-  // Fix links without '"'
-  text.replace( QRegularExpression( "href=(\\.\\.|)/([^\\s>]+)" ),
+  // Fix links without '"'; relative resources are handled by applyBres below.
+  text.replace( Regex::validated( "href=(\\.\\.|)/([^\\s>]+)" ),
                 QString( "href=\"\\1/\\2\"" ) );
 
-  // pattern <link... href="..." ...>
-  text.replace( QRegularExpression( "<\\s*link\\s+([^>]*)href=\"(\\.\\.|)/" ),
-                QString( "<link \\1href=\"bres://%1/").arg( getId().c_str() ) );
-
   // localize the http://en.wiki***.com|org/wiki/<key> series links
   // excluding those keywords that have ":" in it
   QString urlWiki = "\"http(s|)://en\\.(wiki(pedia|books|news|quote|source|voyage|versity)|wiktionary)\\.(org|com)/wiki/([^:\"]*)\"";
-  text.replace( QRegularExpression( "<\\s*a\\s+(class=\"external\"\\s+|)href=" + urlWiki ),
+  text.replace( Regex::validated( "<\\s*a\\s+(class=\"external\"\\s+|)href=" + urlWiki ),
                 QString( "<a href=\"gdlookup://localhost/\\6\"" ) );
-#else
-  // replace background
-  text.replace( QRegExp( "<\\s*body\\s+([^>]*)(background(|-color)):([^;\"]*(|;))" ),
-                QString( "<body \\1" ) );
-
-  // pattern of img and script
-  text.replace( QRegExp( "<\\s*(img|script)\\s+([^>]*)src=(\"|)(\\.\\.|)/" ),
-                QString( "<\\1 \\2src=\\3bres://%1/").arg( getId().c_str() ) );
-
-  // Fix links without '"'
-  text.replace( QRegExp( "href=(\\.\\.|)/([^\\s>]+)" ), QString( "href=\"\\1/\\2\"" ) );
-
-  // pattern <link... href="..." ...>
-  text.replace( QRegExp( "<\\s*link\\s+([^>]*)href=\"(\\.\\.|)/" ),
-                QString( "<link \\1href=\"bres://%1/").arg( getId().c_str() ) );
-
-  // localize the http://en.wiki***.com|org/wiki/<key> series links
-  // excluding those keywords that have ":" in it
-  QString urlWiki = "\"http(s|)://en\\.(wiki(pedia|books|news|quote|source|voyage|versity)|wiktionary)\\.(org|com)/wiki/([^:\"]*)\"";
-  text.replace( QRegExp( "<\\s*a\\s+(class=\"external\"\\s+|)href=" + urlWiki ),
-                QString( "<a href=\"gdlookup://localhost/\\6\"" ) );
-#endif
 
   // pattern <a href="..." ...>, excluding any known protocols such as http://, mailto:, #(comment)
   // these links will be translated into local definitions
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-  QRegularExpression rxLink( "<\\s*a\\s+([^>]*)href=\"(?!(?:\\w+://|#|mailto:|tel:))(/|)([^\"]*)\"\\s*(title=\"[^\"]*\")?[^>]*>" );
+  QRegularExpression const rxLink = Regex::validated( "<\\s*a\\s+([^>]*)href=\"(?!(?:\\w+://|#|mailto:|tel:))(/|)([^\"]*)\"\\s*(title=\"[^\"]*\")?[^>]*>" );
+  if( !rxLink.isValid() )
+  {
+    gdWarning( "Zim link pattern: %s", qPrintable( rxLink.errorString() ) );
+    return text;
+  }
   QRegularExpressionMatchIterator it = rxLink.globalMatch( text );
   int pos = 0;
   QString newText;
@@ -912,150 +894,94 @@ string ZimDictionary::convert( const string & in )
   {
     QRegularExpressionMatch match = it.next();
 
-    newText += text.midRef( pos, match.capturedStart() - pos );
+    newText += text.mid( pos, match.capturedStart() - pos );
     pos = match.capturedEnd();
 
-    QStringList list = match.capturedTexts();
-    // Add empty strings for compatibility with QRegExp behaviour
-    for( int i = match.lastCapturedIndex() + 1; i < 5; i++ )
-      list.append( QString() );
-#else
-  QRegExp rxLink( "<\\s*a\\s+([^>]*)href=\"(?!(\\w+://|#|mailto:|tel:))(/|)([^\"]*)\"\\s*(title=\"[^\"]*\")?[^>]*>",
-                       Qt::CaseSensitive,
-                       QRegExp::RegExp2 );
-  int pos = 0;
-  while( (pos = rxLink.indexIn( text, pos )) >= 0 )
-  {
-    QStringList list = rxLink.capturedTexts();
-#endif
-    QString tag = list[3];     // a url, ex: Precambrian_Chaotian.html
-    if ( !list[4].isEmpty() )  // a title, ex: title="Precambrian/Chaotian"
-      tag = list[4].split("\"")[1];
+    QString tag = match.captured( 3 );
+    QString const title = match.captured( 4 );
+    if( !title.isEmpty() )
+      tag = title.split( '"' ).value( 1 );
 
 
     // Check type of links inside articles
     if( linksType == UNKNOWN && tag.indexOf( '/' ) >= 0 )
     {
       QString word = QUrl::fromPercentEncoding( tag.toLatin1() );
-      word.remove( QRegExp( "\\.(s|)htm(l|)$", Qt::CaseInsensitive ) ).
-           replace( "_", " " );
-
-      vector< WordArticleLink > links;
-      links = findArticles( gd::toWString( word ) );
-
-      if( !links.empty() )
-      {
+      word.remove( htmlExtension ).replace( "_", " " );
+      if( hasArticle( word ) )
         linksType = SLASH;
-      }
-      else
-      {
-        word.remove( QRegExp(".*/") );
-        links = findArticles( gd::toWString( word ) );
-        if( !links.empty() )
-        {
-          linksType = NO_SLASH;
-          links.clear();
-        }
-      }
+      else if( hasArticle( QString( word ).remove( slashPrefix ) ) )
+        linksType = NO_SLASH;
     }
 
-    if( linksType == SLASH || linksType == UNKNOWN )
-    {
-      tag.remove( QRegExp( "\\.(s|)htm(l|)$", Qt::CaseInsensitive ) ).
-          replace( "_", "%20" ).
-          prepend( "<a href=\"gdlookup://localhost/" ).
-          append( "\" " + list[4] + ">" );
-    }
-    else
-    {
-      tag.remove( QRegExp(".*/") ).
-          remove( QRegExp( "\\.(s|)htm(l|)$", Qt::CaseInsensitive ) ).
-          replace( "_", "%20" ).
-          prepend( "<a href=\"gdlookup://localhost/" ).
-          append( "\" " + list[4] + ">" );
-    }
-
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-    newText += tag;
+    if( linksType == NO_SLASH )
+      tag.remove( slashPrefix );
+    tag.remove( htmlExtension ).replace( "_", "%20" );
+    newText += "<a href=\"gdlookup://localhost/" + tag + "\" " + title + ">";
   }
   if( pos )
   {
-    newText += text.midRef( pos );
+    newText += text.mid( pos );
     text = newText;
   }
   newText.clear();
-#else
-    text.replace( pos, list[0].length(), tag );
-    pos += tag.length() + 1;
-  }
-#endif
 
   // Occasionally words needs to be displayed in vertical, but <br/> were changed to <br\> somewhere
   // proper style: <a href="gdlookup://localhost/Neoptera" ... >N<br/>e<br/>o<br/>p<br/>t<br/>e<br/>r<br/>a</a>
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-  QRegularExpression rxBR( "(<a href=\"gdlookup://localhost/[^\"]*\"\\s*[^>]*>)\\s*((\\w\\s*&lt;br(\\\\|/|)&gt;\\s*)+\\w)\\s*</a>",
+  QRegularExpression rxBR = Regex::validated( "(<a href=\"gdlookup://localhost/[^\"]*\"\\s*[^>]*>)\\s*((\\w\\s*&lt;br(\\\\|/|)&gt;\\s*)+\\w)\\s*</a>",
                            QRegularExpression::UseUnicodePropertiesOption );
+  // The Qt5 baseline drove this loop with the rxLink iterator while taking each
+  // match from rxBR, and padded the capture list to QRegExp's arity. That is a
+  // shipped quirk, not an intent, so it is preserved verbatim here rather than
+  // corrected: correcting it changed which elements were rewritten.
   pos = 0;
   QRegularExpressionMatchIterator it2 = rxLink.globalMatch( text );
+  QRegularExpressionMatchIterator brIt = rxBR.globalMatch( text );
   while( it2.hasNext() )
   {
-    QRegularExpressionMatch match = it.next();
+    QRegularExpressionMatch const match = brIt.hasNext() ? brIt.next()
+                                                         : QRegularExpressionMatch();
 
-    newText += text.midRef( pos, match.capturedStart() - pos );
+    newText += text.mid( pos, match.capturedStart() - pos );
     pos = match.capturedEnd();
 
     QStringList list = match.capturedTexts();
-    // Add empty strings for compatibility with QRegExp behaviour
     for( int i = match.lastCapturedIndex() + 1; i < 3; i++ )
       list.append( QString() );
 
-    QString tag = list[2];
-    tag.replace( QRegExp( "&lt;br( |)(\\\\|/|)&gt;", Qt::CaseInsensitive ) , "<br/>" ).
-        prepend( list[1] ).
-        append( "</a>" );
+    QString tag = list.size() > 2 ? list[2] : QString();
+    tag.replace( escapedBreak, "<br/>" )
+       .prepend( list.size() > 1 ? list[1] : QString() )
+       .append( "</a>" );
 
     newText += tag;
   }
   if( pos )
   {
-    newText += text.midRef( pos );
+    newText += text.mid( pos );
     text = newText;
   }
   newText.clear();
-#else
-  QRegExp rxBR( "(<a href=\"gdlookup://localhost/[^\"]*\"\\s*[^>]*>)\\s*((\\w\\s*&lt;br(\\\\|/|)&gt;\\s*)+\\w)\\s*</a>",
-                       Qt::CaseSensitive,
-                       QRegExp::RegExp2 );
-  pos = 0;
-  while( (pos = rxBR.indexIn( text, pos )) >= 0 )
-  {
-    QStringList list = rxBR.capturedTexts();
-    QString tag = list[2];
-    tag.replace( QRegExp( "&lt;br( |)(\\\\|/|)&gt;", Qt::CaseInsensitive ) , "<br/>" ).
-        prepend( list[1] ).
-        append( "</a>" );
 
-    text.replace( pos, list[0].length(), tag );
-    pos += tag.length() + 1;
-  }
-#endif
-
-  // // output all links in the page - only for analysis
-  // QRegExp rxPrintAllLinks( "<\\s*a\\s+[^>]*href=\"[^\"]*\"[^>]*>",
-  //                         Qt::CaseSensitive,
-  //                         QRegExp::RegExp2 );
-  // pos = 0;
-  // while( (pos = rxPrintAllLinks.indexIn( text, pos )) >= 0 )
-  // {
-  //   QStringList list = rxPrintAllLinks.capturedTexts();
-  //   qDebug() << "\n--Alllinks--" << list[0];
-  //   pos += list[0].length() + 1;
-  // }
+  text = LinkRewrite::applyGdLookup( text );
+  text = LinkRewrite::applyBres( text, dictId );
+  text = LinkRewrite::applyGico( text, dictId );
+  text = LinkRewrite::applyGdau( text, dictId );
 
   // Fix outstanding elements
   text += "<br style=\"clear:both;\" />";
 
-  return text.toUtf8().data();
+  return text;
+}
+
+string ZimDictionary::convert( const string & in )
+{
+  int mode = linksType;
+  QString const text = normalizeArticleLinks( QString::fromUtf8( in.c_str() ),
+    QString::fromStdString( getId() ), mode,
+    [this]( QString const & word ) { return !findArticles( gd::toWString( word ) ).empty(); } );
+  linksType = static_cast< LINKS_TYPE >( mode );
+  return text.toUtf8().toStdString();
 }
 
 void ZimDictionary::loadResource( std::string & resourceName, string & data )
@@ -1132,7 +1058,7 @@ void ZimDictionary::makeFTSIndex( QAtomicInt & isCancelled, bool firstIteration 
 
     findArticleLinks( 0, &setOfOffsets, 0, &isCancelled );
 
-    if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+    if( isCancelled.loadAcquire() )
       throw exUserAbort();
 
     // We should sort articles order by cluster number
@@ -1144,7 +1070,7 @@ void ZimDictionary::makeFTSIndex( QAtomicInt & isCancelled, bool firstIteration 
     for( QSet< uint32_t >::ConstIterator it = setOfOffsets.constBegin();
          it != setOfOffsets.constEnd(); ++it )
     {
-      if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+      if( isCancelled.loadAcquire() )
         throw exUserAbort();
 
       Mutex::Lock _( zimMutex );
@@ -1154,7 +1080,7 @@ void ZimDictionary::makeFTSIndex( QAtomicInt & isCancelled, bool firstIteration 
     // Free memory
     setOfOffsets.clear();
 
-    if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+    if( isCancelled.loadAcquire() )
       throw exUserAbort();
 
     std::sort( offsetsWithClusters.begin(), offsetsWithClusters.end() );
@@ -1168,7 +1094,7 @@ void ZimDictionary::makeFTSIndex( QAtomicInt & isCancelled, bool firstIteration 
     offsetsWithClusters.clear();
     offsetsWithClusters.squeeze();
 
-    if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+    if( isCancelled.loadAcquire() )
       throw exUserAbort();
 
     QMap< QString, QVector< uint32_t > > ftsWords;
@@ -1179,7 +1105,7 @@ void ZimDictionary::makeFTSIndex( QAtomicInt & isCancelled, bool firstIteration 
     // index articles for full-text search
     for( int i = 0; i < offsets.size(); i++ )
     {
-      if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+      if( isCancelled.loadAcquire() )
         throw exUserAbort();
 
       QString headword, articleStr;
@@ -1206,7 +1132,7 @@ void ZimDictionary::makeFTSIndex( QAtomicInt & isCancelled, bool firstIteration 
     QMap< QString, QVector< uint32_t > >::iterator it = ftsWords.begin();
     while( it != ftsWords.end() )
     {
-      if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+      if( isCancelled.loadAcquire() )
         throw exUserAbort();
 
       uint32_t offset = chunks.startNewBlock();
@@ -1223,7 +1149,7 @@ void ZimDictionary::makeFTSIndex( QAtomicInt & isCancelled, bool firstIteration 
       {
         for( int i = 0; i < wordsWithOffsets.size(); i++ )
         {
-          if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+          if( isCancelled.loadAcquire() )
             throw exUserAbort();
           indexedWords.addSingleWord( wordsWithOffsets[ i ].first, wordsWithOffsets[ i ].second );
         }
@@ -1236,7 +1162,7 @@ void ZimDictionary::makeFTSIndex( QAtomicInt & isCancelled, bool firstIteration 
 
     for( int i = 0; i < wordsWithOffsets.size(); i++ )
     {
-      if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+      if( isCancelled.loadAcquire() )
         throw exUserAbort();
       indexedWords.addSingleWord( wordsWithOffsets[ i ].first, wordsWithOffsets[ i ].second );
     }
@@ -1246,13 +1172,13 @@ void ZimDictionary::makeFTSIndex( QAtomicInt & isCancelled, bool firstIteration 
     wordsWithOffsets.clear();
     wordsWithOffsets.squeeze();
 
-    if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+    if( isCancelled.loadAcquire() )
       throw exUserAbort();
 
     ftsIdxHeader.chunksOffset = chunks.finish();
     ftsIdxHeader.wordCount = indexedWords.size();
 
-    if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+    if( isCancelled.loadAcquire() )
       throw exUserAbort();
 
     BtreeIndexing::IndexInfo ftsIdxInfo = BtreeIndexing::buildIndex( indexedWords, ftsIdx );
@@ -1287,7 +1213,7 @@ void ZimDictionary::sortArticlesOffsetsForFTS( QVector< uint32_t > & offsets,
   for( QVector< uint32_t >::ConstIterator it = offsets.constBegin();
        it != offsets.constEnd(); ++it )
   {
-    if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+    if( isCancelled.loadAcquire() )
       return;
 
     Mutex::Lock _( zimMutex );
@@ -1414,7 +1340,7 @@ void ZimArticleRequestRunnable::run()
 
 void ZimArticleRequest::run()
 {
-  if ( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+  if ( isCancelled.loadAcquire() )
   {
     finish();
     return;
@@ -1443,7 +1369,7 @@ void ZimArticleRequest::run()
 
   for( unsigned x = 0; x < chain.size(); ++x )
   {
-    if ( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+    if ( isCancelled.loadAcquire() )
     {
       finish();
       return;
@@ -1618,7 +1544,7 @@ void ZimResourceRequestRunnable::run()
 void ZimResourceRequest::run()
 {
   // Some runnables linger enough that they are cancelled before they start
-  if ( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+  if ( isCancelled.loadAcquire() )
   {
     finish();
     return;

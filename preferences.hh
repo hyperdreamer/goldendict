@@ -4,6 +4,7 @@
 #include <QDialog>
 #include "config.hh"
 #include "helpwindow.hh"
+#include "hotkeybackend.hh"
 #include "ui_preferences.h"
 
 /// Preferences dialog -- allows changing various program options.
@@ -24,10 +25,19 @@ public:
   { if( helpWindow ) delete helpWindow; }
 
   Config::Preferences getPreferences();
+  void setHotkeyStatus( QString const & platform, HotkeyBackend::State state,
+                        QString const & explanation, QVector<PortalBindingDisplay> const & bindings,
+                        bool configureAvailable );
+
+signals:
+  void configureShortcutsRequested();
+  void closeMainHelpRequested();
 
 private:
 
   Ui::Preferences ui;
+  bool mainHotkeyEdited = false, clipboardHotkeyEdited = false;
+  bool eventFilter( QObject *, QEvent * ) override;
 
 private slots:
 

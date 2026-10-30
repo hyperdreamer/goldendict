@@ -29,6 +29,7 @@ public:
 
   ScanPopup( QWidget * parent,
              Config::Class & cfg,
+             QWebEngineProfile &,
              ArticleNetworkAccessManager &,
              AudioPlayerPtr const &,
              std::vector< sptr< Dictionary::Class > > const & allDictionaries,
@@ -91,7 +92,6 @@ signals:
 #endif
 
 public slots:
-  void requestWindowFocus();
 
   /// Translates the word from the clipboard, showing the window etc.
   void translateWordFromClipboard();
@@ -165,7 +165,7 @@ private:
   void handleInputWord( QString const & , bool forcePopup = false );
   void engagePopup( bool forcePopup, bool giveFocus = false );
 
-  vector< sptr< Dictionary::Class > > const & getActiveDicts();
+  std::vector< sptr< Dictionary::Class > > const & getActiveDicts();
 
   virtual bool eventFilter( QObject * watched, QEvent * event );
 
@@ -177,7 +177,7 @@ private:
   virtual void mouseMoveEvent( QMouseEvent * );
   virtual void mouseReleaseEvent( QMouseEvent * );
   virtual void leaveEvent( QEvent * event );
-  virtual void enterEvent( QEvent * event );
+  void enterEvent( QEnterEvent * event ) override;
   virtual void showEvent( QShowEvent * );
   virtual void closeEvent( QCloseEvent * );
   virtual void moveEvent( QMoveEvent * );

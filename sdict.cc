@@ -27,14 +27,10 @@
 #include <QThreadPool>
 #include <QAtomicInt>
 #include <QDebug>
-#include <QRegExp>
 
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-#include <QRegularExpression>
-#endif
+#include "wildcard.hh"
 
 #include "ufile.hh"
-#include "qt4x5.hh"
 
 namespace Sdict {
 
@@ -296,61 +292,51 @@ string SdictDictionary::convert( string const & in )
 
     QString result = QString::fromUtf8( inConverted.c_str(), inConverted.size() );
 
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-    result.replace( QRegularExpression( "<\\s*(p|br)\\s*>",
+    result.replace( Regex::validated( "<\\s*(p|br)\\s*>",
                                         QRegularExpression::CaseInsensitiveOption ),
                     "<br/>" );
-    result.remove( QRegularExpression( "<\\s*/p\\s*>",
+    result.remove( Regex::validated( "<\\s*/p\\s*>",
                                        QRegularExpression::CaseInsensitiveOption ) );
 
-    result.replace( QRegularExpression( "<\\s*t\\s*>",
+    result.replace( Regex::validated( "<\\s*t\\s*>",
                                         QRegularExpression::CaseInsensitiveOption ),
                     "<span class=\"sdict_tr\" dir=\"ltr\">" );
-    result.replace( QRegularExpression( "<\\s*f\\s*>",
+    result.replace( Regex::validated( "<\\s*f\\s*>",
                                         QRegularExpression::CaseInsensitiveOption ),
                     "<span class=\"sdict_forms\">" );
-    result.replace( QRegularExpression( "<\\s*/(t|f)\\s*>",
+    result.replace( Regex::validated( "<\\s*/(t|f)\\s*>",
                                         QRegularExpression::CaseInsensitiveOption ),
                     "</span>" );
 
-    result.replace( QRegularExpression( "<\\s*l\\s*>",
+    result.replace( Regex::validated( "<\\s*l\\s*>",
                                         QRegularExpression::CaseInsensitiveOption ),
                     "<ul>" );
-    result.replace( QRegularExpression( "<\\s*/l\\s*>",
+    result.replace( Regex::validated( "<\\s*/l\\s*>",
                                         QRegularExpression::CaseInsensitiveOption ),
                     "</ul>" );
-#else
-    result.replace( QRegExp( "<\\s*(p|br)\\s*>", Qt::CaseInsensitive ), "<br/>" );
-    result.remove( QRegExp( "<\\s*/p\\s*>", Qt::CaseInsensitive ) );
-
-    result.replace( QRegExp( "<\\s*t\\s*>", Qt::CaseInsensitive ), "<span class=\"sdict_tr\" dir=\"ltr\">" );
-    result.replace( QRegExp( "<\\s*f\\s*>", Qt::CaseInsensitive ), "<span class=\"sdict_forms\">" );
-    result.replace( QRegExp( "<\\s*/(t|f)\\s*>", Qt::CaseInsensitive ), "</span>" );
-
-    result.replace( QRegExp( "<\\s*l\\s*>", Qt::CaseInsensitive ), "<ul>" );
-    result.replace( QRegExp( "<\\s*/l\\s*>", Qt::CaseInsensitive ), "</ul>" );
-#endif
 
     // Links handling
 
+    static QRegularExpression const startLinkTag = Regex::validated( "<\\s*r\\s*>",
+                                                   QRegularExpression::CaseInsensitiveOption );
+    static QRegularExpression const endLinkTag = Regex::validated( "<\\s*/r\\s*>",
+                                                 QRegularExpression::CaseInsensitiveOption );
     int n = 0;
     for( ; ; )
     {
-      QRegExp start_link_tag( "<\\s*r\\s*>", Qt::CaseInsensitive );
-      QRegExp end_link_tag( "<\\s*/r\\s*>", Qt::CaseInsensitive );
+      QRegularExpressionMatch const start = startLinkTag.match( result, n );
+      if( !start.hasMatch() )
+        break;
+      n = start.capturedStart();
 
-      n = result.indexOf( start_link_tag, n );
-      if( n < 0 )
+      QRegularExpressionMatch const end = endLinkTag.match( result, n );
+      if( !end.hasMatch() )
         break;
 
-      int end = result.indexOf( end_link_tag, n );
-      if( end < 0 )
-        break;
+      int const tag_len = start.capturedLength();
+      QString const link_text = result.mid( n + tag_len, end.capturedStart() - n - tag_len );
 
-      int tag_len = start_link_tag.cap().length();
-      QString link_text = result.mid( n + tag_len, end - n - tag_len );
-
-      result.replace( end, end_link_tag.cap().length(), "</a>" );
+      result.replace( end.capturedStart(), end.capturedLength(), "</a>" );
       result.replace( n, tag_len, QString( "<a class=\"sdict_wordref\" href=\"bword:" ) + link_text + "\">");
     }
 
@@ -558,7 +544,7 @@ void SdictArticleRequestRunnable::run()
 
 void SdictArticleRequest::run()
 {
-  if ( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+  if ( isCancelled.loadAcquire() )
   {
     finish();
     return;
@@ -587,7 +573,7 @@ void SdictArticleRequest::run()
 
   for( unsigned x = 0; x < chain.size(); ++x )
   {
-    if ( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+    if ( isCancelled.loadAcquire() )
     {
       finish();
       return;

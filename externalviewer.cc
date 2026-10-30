@@ -33,10 +33,12 @@ ExternalViewer::ExternalViewer( const char * data, int size,
 
 void ExternalViewer::start() THROW_SPEC( exCantRunViewer )
 {
-  connect( &viewer, SIGNAL( finished( int, QProcess::ExitStatus ) ),
-           this, SLOT( deleteLater() ) );
-  connect( &viewer, SIGNAL( error( QProcess::ProcessError ) ),
-           this, SLOT( deleteLater() ) );
+  // New-style connections: Qt 6 renamed QProcess::error() to errorOccurred(), and a
+  // string-based connect to the old name fails silently at run time, so a viewer that
+  // could not be launched would leak its object instead of retiring it.
+  connect( &viewer, qOverload< int, QProcess::ExitStatus >( &QProcess::finished ),
+           this, &QObject::deleteLater );
+  connect( &viewer, &QProcess::errorOccurred, this, &QObject::deleteLater );
 
   QStringList args = parseCommandLine( viewerCmdLine );
 

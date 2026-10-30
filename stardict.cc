@@ -19,6 +19,7 @@
 #include "ftshelpers.hh"
 #include "wstring_qt.hh"
 #include "audiolink.hh"
+#include "linkrewrite.hh"
 
 #include <zlib.h>
 #include <map>
@@ -40,16 +41,12 @@
 #include <QThreadPool>
 #include <QAtomicInt>
 #include <QDebug>
-#include <QRegExp>
 #include <QStringList>
 #include <QDomDocument>
 #include <QDomNode>
 #include "ufile.hh"
-#include "qt4x5.hh"
 
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-#include <QRegularExpression>
-#endif
+#include "wildcard.hh"
 
 namespace Stardict {
 
@@ -63,6 +60,42 @@ using gd::wstring;
 using BtreeIndexing::WordArticleLink;
 using BtreeIndexing::IndexedWords;
 using BtreeIndexing::IndexInfo;
+
+// Format syntax is resolved here before the common URL rules see a headword.
+// Kept outside the I/O implementation so the production caller and tests share it.
+QString normalizeArticleLinks( QString article, QString const & dictId )
+{
+  static QRegularExpression const links = Regex::validated( "<a(\\s*[^>]*)href\\s*=\\s*['\"](bword://)?([^'\"]+)['\"]",
+                                         QRegularExpression::CaseInsensitiveOption );
+  if( !links.isValid() )
+  {
+    gdWarning( "StarDict link pattern: %s", qPrintable( links.errorString() ) );
+    return article;
+  }
+  QString result;
+  qsizetype end = 0;
+  auto matches = links.globalMatch( article );
+  while( matches.hasNext() )
+  {
+    auto const match = matches.next();
+    result += article.mid( end, match.capturedStart() - end );
+    end = match.capturedEnd();
+    QString const target = match.captured( 3 );
+    qsizetype const anchor = target.indexOf( '#' );
+    if( target.contains( ':' ) || anchor == 0 )
+      result += match.captured();
+    else if( anchor < 0 )
+      result += "<a" + match.captured( 1 ) + "href=\"bword:" + target + "\"";
+    else
+      result += "<a" + match.captured( 1 ) + "href=\"gdlookup://localhost/"
+                + target.left( anchor ) + "?gdanchor=" + target.mid( anchor + 1 ) + "\"";
+  }
+  result += article.mid( end );
+  result = LinkRewrite::applyGdLookup( result );
+  result = LinkRewrite::applyBres( result, dictId );
+  result = LinkRewrite::applyGico( result, dictId );
+  return LinkRewrite::applyGdau( result, dictId );
+}
 
 namespace {
 
@@ -346,30 +379,18 @@ class PowerWordDataProcessor{
     class PWSyntaxTranslate{
     public:
         PWSyntaxTranslate(const char* re, const char* replacement)
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-            : _re(re, QRegularExpression::UseUnicodePropertiesOption )
-#else
-            : _re(re)
-#endif
+            : _re( Regex::validated( re, QRegularExpression::UseUnicodePropertiesOption ) )
             , _replacement(replacement)
         {
         }
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
         const QRegularExpression & re() const {
-#else
-        const QRegExp& re() const {
-#endif
             return _re;
         }
         const QString & replacement() const {
             return _replacement;
         }
     private:
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
         QRegularExpression _re;
-#else
-        QRegExp _re;
-#endif
         QString _replacement;
     };
 public:
@@ -438,14 +459,10 @@ private:
             }
             old = s;
         }
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-        s.replace(QRegularExpression( "&.\\s*\\{",
+        s.replace(Regex::validated( "&.\\s*\\{",
                                       QRegularExpression::UseUnicodePropertiesOption
                                       | QRegularExpression::DotMatchesEverythingOption),
                   "");
-#else
-        s.replace(QRegExp("&.\\s*\\{"), "");
-#endif
         s.replace("}", "");
     }
 private:
@@ -466,176 +483,7 @@ string StardictDictionary::handleResource( char type, char const * resource, siz
     {
       QString articleText = QString( "<div class=\"sdct_h\">" ) + QString::fromUtf8( resource, size ) + "</div>";
 
-      const QString srcRegexpStr(
-          "(<\\s*(?:img|script)\\s(?:[^>]*\\s)?src\\s*=)(?!\\s*[\"']?(?:data|https?|ftp):)(\\s*[\"']?)" );
-      const QString linkRegexpStr(
-          "(<\\s*link\\s(?:[^>]*\\s)?href\\s*=)(?!\\s*[\"']?(?:data|https?|ftp):)(\\s*[\"']?)" );
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-      QRegularExpression srcRe( srcRegexpStr,
-                                QRegularExpression::CaseInsensitiveOption );
-      QRegularExpression linkRe( linkRegexpStr,
-                                 QRegularExpression::CaseInsensitiveOption );
-#else
-      QRegExp srcRe( srcRegexpStr, Qt::CaseInsensitive );
-      QRegExp linkRe( linkRegexpStr, Qt::CaseInsensitive );
-#endif
-
-      articleText.replace( srcRe, "\\1\\2bres://" + QString::fromStdString( getId() ) + "/" )
-                 .replace( linkRe, "\\1\\2bres://" + QString::fromStdString( getId() ) + "/" );
-
-      // Handle links to articles
-
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-      QRegularExpression linksReg( "<a(\\s*[^>]*)href\\s*=\\s*['\"](bword://)?([^'\"]+)['\"]",
-                                   QRegularExpression::CaseInsensitiveOption );
-#else
-      QRegExp linksReg( "<a(\\s*[^>]*)href\\s*=\\s*['\"](bword://)?([^'\"]+)['\"]", Qt::CaseInsensitive );
-      linksReg.setMinimal( true );
-#endif
-
-      int pos = 0;
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-      QString articleNewText;
-      QRegularExpressionMatchIterator it = linksReg.globalMatch( articleText );
-      while( it.hasNext() )
-      {
-        QRegularExpressionMatch match = it.next();
-        articleNewText += articleText.midRef( pos, match.capturedStart() - pos );
-        pos = match.capturedEnd();
-
-        QString link = match.captured( 3 );
-#else
-      while( pos >= 0 )
-      {
-        pos = linksReg.indexIn( articleText, pos );
-        if( pos < 0 )
-          break;
-
-        QString link = linksReg.cap( 3 );
-#endif
-        if( link.indexOf( ':' ) < 0 )
-        {
-          QString newLink;
-          if( link.indexOf( '#' ) < 0 )
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-            newLink = QString( "<a" ) + match.captured( 1 ) + "href=\"bword:" + link + "\"";
-#else
-            newLink = QString( "<a" ) + linksReg.cap( 1 ) + "href=\"bword:" + link + "\"";
-#endif
-
-          // Anchors
-
-          if( link.indexOf( '#' ) > 0 )
-          {
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-            newLink = QString( "<a" ) + match.captured( 1 ) + "href=\"gdlookup://localhost/" + link + "\"";
-#else
-            newLink = QString( "<a" ) + linksReg.cap( 1 ) + "href=\"gdlookup://localhost/" + link + "\"";
-#endif
-            newLink.replace( "#", "?gdanchor=" );
-          }
-
-          if( !newLink.isEmpty() )
-          {
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-            articleNewText += newLink;
-#else
-            articleText.replace( pos, linksReg.cap( 0 ).size(), newLink );
-            pos += newLink.size();
-#endif
-          }
-          else
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-            articleNewText += match.captured();
-#else
-            pos += linksReg.cap( 0 ).size();
-#endif
-        }
-        else
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-          articleNewText += match.captured();
-      }
-      if( pos )
-      {
-        articleNewText += articleText.midRef( pos );
-        articleText = articleNewText;
-        articleNewText.clear();
-      }
-#else
-          pos += linksReg.cap( 0 ).size();
-      }
-#endif
-
-      // Handle "audio" tags
-
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-      QRegularExpression audioRe( "<\\s*audio\\s*src\\s*=\\s*([\"']+)([^\"']+)([\"'])\\s*>(.*)</audio>",
-                                  QRegularExpression::CaseInsensitiveOption
-                                  | QRegularExpression::DotMatchesEverythingOption
-                                  | QRegularExpression::InvertedGreedinessOption );
-#else
-      QRegExp audioRe( "<\\s*audio\\s*src\\s*=\\s*([\"']+)([^\"']+)([\"'])\\s*>(.*)</audio>", Qt::CaseInsensitive );
-      audioRe.setMinimal( true );
-#endif
-
-      pos = 0;
-
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-      it = audioRe.globalMatch( articleText );
-      while( it.hasNext() )
-      {
-        QRegularExpressionMatch match = it.next();
-        articleNewText += articleText.midRef( pos, match.capturedStart() - pos );
-        pos = match.capturedEnd();
-
-        QString src = match.captured( 2 );
-#else
-      while( pos >= 0 )
-      {
-        pos = audioRe.indexIn( articleText, pos );
-        if( pos < 0 )
-          break;
-
-        QString src = audioRe.cap( 2 );
-#endif
-        if( src.indexOf( "://" ) >= 0 )
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-          articleNewText += match.captured();
-#else
-          pos += audioRe.cap( 0 ).length();
-#endif
-        else
-        {
-          std::string href = "\"gdau://" + getId() + "/" + src.toUtf8().data() + "\"";
-          QString newTag = QString::fromUtf8( ( addAudioLink( href, getId() ) + "<span class=\"sdict_h_wav\"><a href=" + href + ">" ).c_str() );
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-          newTag += match.captured( 4 );
-          if( match.captured( 4 ).indexOf( "<img " ) < 0 )
-#else
-          newTag += audioRe.cap( 4 );
-          if( audioRe.cap( 4 ).indexOf( "<img " ) < 0 )
-#endif
-            newTag += " <img src=\"qrcx://localhost/icons/playsound.png\" border=\"0\" alt=\"Play\">";
-          newTag += "</a></span>";
-
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-          articleNewText += newTag;
-#else
-          articleText.replace( pos, audioRe.cap( 0 ).length(), newTag );
-          pos += newTag.length();
-#endif
-        }
-      }
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-      if( pos )
-      {
-        articleNewText += articleText.midRef( pos );
-        articleText = articleNewText;
-        articleNewText.clear();
-      }
-#endif
-
-      return ( articleText.toUtf8().data() );
+      return normalizeArticleLinks( articleText, QString::fromStdString( getId() ) ).toUtf8().toStdString();
     }
     case 'm': // Pure meaning, usually means preformatted text
       return "<div class=\"sdct_m\">" + Html::preformat( string( resource, size ), isToLanguageRTL() ) + "</div>";
@@ -689,32 +537,34 @@ void StardictDictionary::pangoToHtml( QString & text )
  * Attributes "fallback", "lang", "gravity", "gravity_hint" just ignored
  */
 
-  QRegExp spanRegex( "<span\\s*([^>]*)>", Qt::CaseInsensitive );
-  QRegExp styleRegex( "(\\w+)=\"([^\"]*)\"" );
+  QRegularExpression const spanRegex = Regex::validated( "<span\\s*([^>]*)>", QRegularExpression::CaseInsensitiveOption );
+  QRegularExpression const styleRegex = Regex::validated( "(\\w+)=\"([^\"]*)\"", QRegularExpression::UseUnicodePropertiesOption );
 
   text.replace( "\n", "<br>" );
 
-  int pos = 0;
-  do
+  qsizetype pos = 0;
+  for( ; ; )
   {
-    pos = spanRegex.indexIn( text, pos );
-    if( pos >= 0 )
+    QRegularExpressionMatch const spanMatch = spanRegex.match( text, pos );
+    if( !spanMatch.hasMatch() )
+      break;
+    pos = spanMatch.capturedStart();
     {
-      QString styles = spanRegex.cap( 1 );
+      QString const styles = spanMatch.captured( 1 );
       QString newSpan( "<span style=\"" );
-      int stylePos = 0;
-      do
+      auto styleMatches = styleRegex.globalMatch( styles );
+      while( styleMatches.hasNext() )
       {
-        stylePos = styleRegex.indexIn( styles, stylePos );
-        QString style = styleRegex.cap( 1 );
-        if( stylePos >= 0 )
+        QRegularExpressionMatch const styleMatch = styleMatches.next();
+        QString const style = styleMatch.captured( 1 );
+        QString const styleValue = styleMatch.captured( 2 );
         {
           if( style.compare( "font_desc", Qt::CaseInsensitive ) == 0
               || style.compare( "font", Qt::CaseInsensitive ) == 0 )
           {
             // Parse font description
 
-            QStringList list = styleRegex.cap( 2 ).split( " ", Qt4x5::skipEmptyParts() );
+            QStringList list = styleValue.split( " ", Qt::SkipEmptyParts );
             int n;
             QString sizeStr, stylesStr, familiesStr;
             for( n = list.size() - 1; n >= 0; n-- )
@@ -839,30 +689,30 @@ void StardictDictionary::pangoToHtml( QString & text )
           }
           else if( style.compare( "font_family", Qt::CaseInsensitive ) == 0
                    || style.compare( "face", Qt::CaseInsensitive ) == 0 )
-            newSpan += QString( "font-family:" ) + styleRegex.cap( 2 ) + ";";
+            newSpan += QString( "font-family:" ) + styleValue + ";";
           else if( style.compare( "font_size", Qt::CaseInsensitive ) == 0
                    || style.compare( "size", Qt::CaseInsensitive ) == 0 )
           {
-            if( styleRegex.cap( 2 )[ 0 ].isLetter()
-                || styleRegex.cap( 2 ).endsWith( "px", Qt::CaseInsensitive )
-                || styleRegex.cap( 2 ).endsWith( "pt", Qt::CaseInsensitive )
-                || styleRegex.cap( 2 ).endsWith( "em", Qt::CaseInsensitive )
-                || styleRegex.cap( 2 ).endsWith( "%" ) )
-              newSpan += QString( "font-size:" ) + styleRegex.cap( 2 ) +";";
+            if( !styleValue.isEmpty() && ( styleValue[ 0 ].isLetter()
+                || styleValue.endsWith( "px", Qt::CaseInsensitive )
+                || styleValue.endsWith( "pt", Qt::CaseInsensitive )
+                || styleValue.endsWith( "em", Qt::CaseInsensitive )
+                || styleValue.endsWith( "%" ) ) )
+              newSpan += QString( "font-size:" ) + styleValue +";";
             else
             {
-              int size = styleRegex.cap( 2 ).toInt();
+              int size = styleValue.toInt();
               if( size )
                 newSpan += QString( "font-size:%1pt;" ).arg( size / 1024.0, 0, 'f', 3 );
             }
           }
           else if( style.compare( "font_style", Qt::CaseInsensitive ) == 0
                    || style.compare( "style", Qt::CaseInsensitive ) == 0)
-            newSpan += QString( "font-style:" ) + styleRegex.cap( 2 ) + ";";
+            newSpan += QString( "font-style:" ) + styleValue + ";";
           else if( style.compare( "weight", Qt::CaseInsensitive ) == 0
                    || style.compare( "weight", Qt::CaseInsensitive ) == 0)
           {
-            QString str = styleRegex.cap( 2 );
+            QString str = styleValue;
             if( str.compare( "ultralight", Qt::CaseInsensitive ) == 0 )
               newSpan += QString( "font-weight:100;" );
             else if( str.compare( "light", Qt::CaseInsensitive ) == 0 )
@@ -877,15 +727,15 @@ void StardictDictionary::pangoToHtml( QString & text )
           else if( style.compare( "font_variant", Qt::CaseInsensitive ) == 0
                    || style.compare( "variant", Qt::CaseInsensitive ) == 0 )
           {
-            if( styleRegex.cap( 2 ).compare( "smallcaps", Qt::CaseInsensitive ) == 0 )
+            if( styleValue.compare( "smallcaps", Qt::CaseInsensitive ) == 0 )
               newSpan += QString( "font-variant:small-caps" );
             else
-              newSpan += QString( "font-variant:" ) + styleRegex.cap( 2 ) + ";";
+              newSpan += QString( "font-variant:" ) + styleValue + ";";
           }
           else if( style.compare( "font_stretch", Qt::CaseInsensitive ) == 0
                    || style.compare( "stretch", Qt::CaseInsensitive ) == 0 )
           {
-            QString str = styleRegex.cap( 2 );
+            QString str = styleValue;
             if( str.compare( "ultracondensed", Qt::CaseInsensitive ) == 0 )
               newSpan += QString( "font-stretch:ultra-condensed;" );
             else if( str.compare( "extracondensed", Qt::CaseInsensitive ) == 0 )
@@ -904,77 +754,73 @@ void StardictDictionary::pangoToHtml( QString & text )
           else if( style.compare( "foreground", Qt::CaseInsensitive ) == 0
                    || style.compare( "fgcolor", Qt::CaseInsensitive ) == 0
                    || style.compare( "color", Qt::CaseInsensitive ) == 0 )
-            newSpan += QString( "color:" ) + styleRegex.cap( 2 ) + ";";
+            newSpan += QString( "color:" ) + styleValue + ";";
           else if( style.compare( "background", Qt::CaseInsensitive ) == 0
                    || style.compare( "bgcolor", Qt::CaseInsensitive ) == 0 )
-            newSpan += QString( "background-color:" ) + styleRegex.cap( 2 ) + ";";
+            newSpan += QString( "background-color:" ) + styleValue + ";";
           else if( style.compare( "underline_color", Qt::CaseInsensitive ) == 0
                    || style.compare( "strikethrough_color", Qt::CaseInsensitive ) == 0 )
-            newSpan += QString( "text-decoration-color:" ) + styleRegex.cap( 2 ) + ";";
+            newSpan += QString( "text-decoration-color:" ) + styleValue + ";";
           else if( style.compare( "underline", Qt::CaseInsensitive ) == 0 )
           {
-            if( styleRegex.cap( 2 ).compare( "none", Qt::CaseInsensitive ) )
+            if( styleValue.compare( "none", Qt::CaseInsensitive ) )
               newSpan += QString( "text-decoration-line:none;" );
             else
             {
               newSpan += QString( "text-decoration-line:underline; " );
-              if( styleRegex.cap( 2 ).compare( "low", Qt::CaseInsensitive ) )
+              if( styleValue.compare( "low", Qt::CaseInsensitive ) )
                 newSpan += QString( "text-decoration-style:dotted;" );
-              else if( styleRegex.cap( 2 ).compare( "single", Qt::CaseInsensitive ) )
+              else if( styleValue.compare( "single", Qt::CaseInsensitive ) )
                 newSpan += QString( "text-decoration-style:solid;" );
-              else if( styleRegex.cap( 2 ).compare( "error", Qt::CaseInsensitive ) )
+              else if( styleValue.compare( "error", Qt::CaseInsensitive ) )
                 newSpan += QString( "text-decoration-style:wavy;" );
               else
-                newSpan += QString( "text-decoration-style:" ) + styleRegex.cap( 2 ) + ";";
+                newSpan += QString( "text-decoration-style:" ) + styleValue + ";";
             }
           }
           else if( style.compare( "strikethrough", Qt::CaseInsensitive ) == 0 )
           {
-            if( styleRegex.cap( 2 ).compare( "true", Qt::CaseInsensitive ) )
+            if( styleValue.compare( "true", Qt::CaseInsensitive ) )
               newSpan += QString( "text-decoration-line:line-through;" );
             else
               newSpan += QString( "text-decoration-line:none;" );
           }
           else if( style.compare( "rise", Qt::CaseInsensitive ) == 0 )
           {
-            if( styleRegex.cap( 2 ).endsWith( "px", Qt::CaseInsensitive )
-                || styleRegex.cap( 2 ).endsWith( "pt", Qt::CaseInsensitive )
-                || styleRegex.cap( 2 ).endsWith( "em", Qt::CaseInsensitive )
-                || styleRegex.cap( 2 ).endsWith( "%" ) )
-              newSpan += QString( "vertical-align:" ) + styleRegex.cap( 2 ) +";";
+            if( styleValue.endsWith( "px", Qt::CaseInsensitive )
+                || styleValue.endsWith( "pt", Qt::CaseInsensitive )
+                || styleValue.endsWith( "em", Qt::CaseInsensitive )
+                || styleValue.endsWith( "%" ) )
+              newSpan += QString( "vertical-align:" ) + styleValue +";";
             else
             {
-              int riseValue = styleRegex.cap( 2 ).toInt();
+              int riseValue = styleValue.toInt();
               if( riseValue )
                 newSpan += QString( "vertical-align:%1pt;" ).arg( riseValue / 1024.0, 0, 'f', 3 );
             }
           }
           else if( style.compare( "letter_spacing", Qt::CaseInsensitive ) == 0 )
           {
-            if( styleRegex.cap( 2 ).endsWith( "px", Qt::CaseInsensitive )
-                || styleRegex.cap( 2 ).endsWith( "pt", Qt::CaseInsensitive )
-                || styleRegex.cap( 2 ).endsWith( "em", Qt::CaseInsensitive )
-                || styleRegex.cap( 2 ).endsWith( "%" ) )
-              newSpan += QString( "letter-spacing:" ) + styleRegex.cap( 2 ) +";";
+            if( styleValue.endsWith( "px", Qt::CaseInsensitive )
+                || styleValue.endsWith( "pt", Qt::CaseInsensitive )
+                || styleValue.endsWith( "em", Qt::CaseInsensitive )
+                || styleValue.endsWith( "%" ) )
+              newSpan += QString( "letter-spacing:" ) + styleValue +";";
             else
             {
-              int spacing = styleRegex.cap( 2 ).toInt();
+              int spacing = styleValue.toInt();
               if( spacing )
                 newSpan += QString( "letter-spacing:%1pt;" ).arg( spacing / 1024.0, 0, 'f', 3 );
             }
           }
-
-          stylePos += styleRegex.matchedLength();
         }
       }
-      while( stylePos >= 0 );
 
       newSpan += "\">";
-      text.replace( pos, spanRegex.matchedLength(), newSpan );
+      text.replace( pos, spanMatch.capturedLength(), newSpan );
       pos += newSpan.size();
     }
   }
-  while( pos >= 0 );
 
   text.replace( "  ", "&nbsp;&nbsp;" );
 }
@@ -1343,7 +1189,7 @@ void StardictHeadwordsRequestRunnable::run()
 
 void StardictHeadwordsRequest::run()
 {
-  if ( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+  if ( isCancelled.loadAcquire() )
   {
     finish();
     return;
@@ -1357,7 +1203,7 @@ void StardictHeadwordsRequest::run()
 
     for( unsigned x = 0; x < chain.size(); ++x )
     {
-      if ( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+      if ( isCancelled.loadAcquire() )
       {
         finish();
         return;
@@ -1466,7 +1312,7 @@ void StardictArticleRequestRunnable::run()
 
 void StardictArticleRequest::run()
 {
-  if ( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+  if ( isCancelled.loadAcquire() )
   {
     finish();
     return;
@@ -1497,7 +1343,7 @@ void StardictArticleRequest::run()
 
     for( unsigned x = 0; x < chain.size(); ++x )
     {
-      if ( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+      if ( isCancelled.loadAcquire() )
       {
         finish();
         return;
@@ -1759,7 +1605,7 @@ void StardictResourceRequestRunnable::run()
 void StardictResourceRequest::run()
 {
   // Some runnables linger enough that they are cancelled before they start
-  if ( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+  if ( isCancelled.loadAcquire() )
   {
     finish();
     return;
@@ -1848,8 +1694,7 @@ void StardictResourceRequest::run()
       QString id = QString::fromUtf8( dict.getId().c_str() );
       int pos = 0;
 
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-      QRegularExpression links( "url\\(\\s*(['\"]?)([^'\"]*)(['\"]?)\\s*\\)",
+      QRegularExpression links = Regex::validated( "url\\(\\s*(['\"]?)([^'\"]*)(['\"]?)\\s*\\)",
                                 QRegularExpression::CaseInsensitiveOption );
 
       QString newCSS;
@@ -1857,7 +1702,7 @@ void StardictResourceRequest::run()
       while( it.hasNext() )
       {
         QRegularExpressionMatch match = it.next();
-        newCSS += css.midRef( pos, match.capturedStart() - pos );
+        newCSS += css.mid( pos, match.capturedStart() - pos );
         pos = match.capturedEnd();
 
         QString url = match.captured( 2 );
@@ -1875,32 +1720,10 @@ void StardictResourceRequest::run()
       }
       if( pos )
       {
-        newCSS += css.midRef( pos );
+        newCSS += css.mid( pos );
         css = newCSS;
         newCSS.clear();
       }
-#else
-      QRegExp links( "url\\(\\s*(['\"]?)([^'\"]*)(['\"]?)\\s*\\)", Qt::CaseInsensitive, QRegExp::RegExp );
-      for( ; ; )
-      {
-        pos = links.indexIn( css, pos );
-        if( pos < 0 )
-          break;
-        QString url = links.cap( 2 );
-
-        if( url.indexOf( ":/" ) >= 0 || url.indexOf( "data:" ) >= 0)
-        {
-          // External link
-          pos += links.cap().size();
-          continue;
-        }
-
-        QString newUrl = QString( "url(" ) + links.cap( 1 ) + "bres://"
-                                           + id + "/" + url + links.cap( 3 ) + ")";
-        css.replace( pos, links.cap().size(), newUrl );
-        pos += newUrl.size();
-      }
-#endif
 
       dict.isolateCSS( css );
       QByteArray bytes = css.toUtf8();

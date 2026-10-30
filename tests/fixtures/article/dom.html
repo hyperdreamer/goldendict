@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<!--
+  GoldenDict DOM/selection fixture.
+
+  Every target is a fixed, uniquely addressable element whose text is stable, so
+  a selection, highlight, context or zoom assertion never depends on layout
+  heuristics. The text covers the scripts the bridge has to round-trip:
+  Latin, Cyrillic, CJK, combining marks, typographic apostrophes, and a
+  supplementary-plane surrogate pair.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>dom fixture</title>
+<style>
+  body { font: 16px/1.4 sans-serif; margin: 0; padding: 0; }
+  .word { display: block; padding: 4px 0; }
+  #zoom-target { width: 320px; }
+  #highlight-target { background: rgb(4, 5, 6); }
+</style>
+</head>
+<body>
+<div id="dom-root">
+  <span class="word" id="word-latin">latin fixture word</span>
+  <span class="word" id="word-cyrillic">Привет</span>
+  <span class="word" id="word-cjk">中文词条</span>
+  <span class="word" id="word-combining">é combining mark</span>
+  <span class="word" id="word-apostrophe">rock’n’roll</span>
+  <span class="word" id="word-surrogate">😀 supplementary</span>
+  <p id="context-target">context sentence around the context fixture word</p>
+  <p id="highlight-target">highlight fixture word appears here</p>
+  <div id="zoom-target">zoom fixture word at the known rectangle</div>
+  <div id="selection-target">selection fixture word</div>
+</div>
+</body>
+</html>

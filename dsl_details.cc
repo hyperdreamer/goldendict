@@ -8,6 +8,7 @@
 #include "gddebug.hh"
 #include "ufile.hh"
 #include "wstring_qt.hh"
+#include "wildcard.hh"
 #include "utf8.hh"
 
 #include <stdio.h>
@@ -144,8 +145,10 @@ string findCodeForDslId( int id )
 bool isAtSignFirst( wstring const & str )
 {
   // Test if '@' is first in string except spaces and dsl tags
-  QRegExp reg( "[ \\t]*(?:\\[[^\\]]+\\][ \\t]*)*@", Qt::CaseInsensitive, QRegExp::RegExp2 );
-  return reg.indexIn( gd::toQString( str ) ) == 0;
+  QRegularExpression const reg = Regex::validated( "[ \\t]*(?:\\[[^\\]]+\\][ \\t]*)*@",
+                                QRegularExpression::CaseInsensitiveOption );
+  QRegularExpressionMatch const match = reg.match( gd::toQString( str ) );
+  return match.hasMatch() && match.capturedStart() == 0;
 }
 
 /////////////// ArticleDom
@@ -1428,7 +1431,7 @@ void expandTildes( wstring & str, wstring const & tildeReplacement )
       if( x > 0 && str[ x - 1 ] == '^' && ( x < 2 || str[ x - 2 ] != '\\' ) )
       {
         str.replace( x - 1, 2, tildeValue );
-        str[ x - 1 ] = QChar( str[ x - 1 ] ).isUpper() ? QChar::toLower( (uint)str[ x - 1 ] )
+        str[ x - 1 ] = QChar( char16_t( str[ x - 1 ] ) ).isUpper() ? QChar::toLower( (uint)str[ x - 1 ] )
                                                        : QChar::toUpper( (uint)str[ x - 1 ] );
         x = x - 1 + tildeValue.size();
       }

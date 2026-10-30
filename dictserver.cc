@@ -9,10 +9,9 @@
 #include <list>
 #include "gddebug.hh"
 #include "htmlescape.hh"
+#include "linkrewrite.hh"
 
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-#include <QRegularExpression>
-#endif
+#include "wildcard.hh"
 
 namespace DictServer {
 
@@ -21,6 +20,36 @@ using namespace Dictionary;
 enum {
   DefaultPort = 2628
 };
+
+QString normalizeArticleText( QString article, bool plainText )
+{
+  if( !plainText )
+    return article;
+  static QRegularExpression const refs = Regex::validated( "\\{([^\\{\\}]+)\\}", QRegularExpression::CaseInsensitiveOption );
+  static QRegularExpression const phonetic = Regex::validated( "\\\\([^\\\\]+)\\\\", QRegularExpression::CaseInsensitiveOption );
+  static QRegularExpression const divs = Regex::validated( "</div([^>]*)><div([^>]*)>", QRegularExpression::CaseInsensitiveOption );
+  if( !refs.isValid() || !phonetic.isValid() || !divs.isValid() )
+  {
+    gdWarning( "DICT server article pattern: %s; %s; %s", qPrintable( refs.errorString() ),
+               qPrintable( phonetic.errorString() ), qPrintable( divs.errorString() ) );
+    return article;
+  }
+  article.replace( refs, "<a href=\"gdlookup://localhost/\\1\">\\1</a>" );
+  QString result;
+  qsizetype end = 0;
+  auto matches = phonetic.globalMatch( article );
+  while( matches.hasNext() )
+  {
+    auto const match = matches.next();
+    result += article.mid( end, match.capturedStart() - end );
+    end = match.capturedEnd();
+    QString text = match.captured( 1 );
+    text.replace( divs, "</span></div\\1><div\\2><span class=\"dictd_phonetic\">" );
+    result += "<span class=\"dictd_phonetic\">" + text + "</span>";
+  }
+  result += article.mid( end );
+  return LinkRewrite::applyGdLookup( result );
+}
 
 namespace {
 
@@ -36,7 +65,7 @@ bool readLine( QTcpSocket & socket, QString & line,
 
   for( ; ; )
   {
-    if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+    if( isCancelled.loadAcquire() )
       return false;
 
     if( socket.canReadLine() )
@@ -65,7 +94,7 @@ bool connectToServer( QTcpSocket & socket, QString const & url,
 
   for( ; ; )
   {
-    if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+    if( isCancelled.loadAcquire() )
       return false;
 
     socket.connectToHost( serverUrl.host(), port );
@@ -76,7 +105,7 @@ bool connectToServer( QTcpSocket & socket, QString const & url,
         break;
     }
 
-    if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+    if( isCancelled.loadAcquire() )
       return false;
 
     if( !readLine( socket, reply, errorString, isCancelled ) )
@@ -94,7 +123,7 @@ bool connectToServer( QTcpSocket & socket, QString const & url,
     if( !socket.waitForBytesWritten( 1000 ) )
       break;
 
-    if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+    if( isCancelled.loadAcquire() )
       return false;
 
     if( !readLine( socket, reply, errorString, isCancelled ) )
@@ -105,7 +134,7 @@ bool connectToServer( QTcpSocket & socket, QString const & url,
       QString authCommand = QString( "AUTH " );
       QString authString = msgId;
 
-      int pos = serverUrl.userInfo().indexOf( QRegExp( "[:;]" ) );
+      int pos = serverUrl.userInfo().indexOf( Regex::validated( "[:;]" ) );
       if( pos > 0 )
       {
         authCommand += serverUrl.userInfo().left( pos );
@@ -123,7 +152,7 @@ bool connectToServer( QTcpSocket & socket, QString const & url,
       if( !socket.waitForBytesWritten( 1000 ) )
         break;
 
-      if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+      if( isCancelled.loadAcquire() )
         return false;
 
       if( !readLine( socket, reply, errorString, isCancelled ) )
@@ -141,7 +170,7 @@ bool connectToServer( QTcpSocket & socket, QString const & url,
     if( !socket.waitForBytesWritten( 1000 ) )
       break;
 
-    if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+    if( isCancelled.loadAcquire() )
       return false;
 
     if( !readLine( socket, reply, errorString, isCancelled ) )
@@ -159,7 +188,7 @@ bool connectToServer( QTcpSocket & socket, QString const & url,
     return true;
   }
 
-  if( !Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+  if( !isCancelled.loadAcquire() )
     errorString = QString( "Server connection fault, socket error %1: \"%2\"" )
                   .arg( QString::number( socket.error() ) )
                   .arg( socket.errorString() );
@@ -202,11 +231,11 @@ public:
     if( pos < 0 )
       url = "dict://" + url;
 
-    databases = database_.split( QRegExp( "[ ,;]" ), Qt4x5::skipEmptyParts() );
+    databases = database_.split( Regex::validated( "[ ,;]" ), Qt::SkipEmptyParts );
     if( databases.isEmpty() )
       databases.append( "*" );
 
-    strategies = strategies_.split( QRegExp( "[ ,;]" ), Qt4x5::skipEmptyParts() );
+    strategies = strategies_.split( Regex::validated( "[ ,;]" ), Qt::SkipEmptyParts );
     if( strategies.isEmpty() )
       strategies.append( "prefix" );
   }
@@ -410,7 +439,7 @@ void DictServerWordSearchRequestRunnable::run()
 
 void DictServerWordSearchRequest::run()
 {
-  if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+  if( isCancelled.loadAcquire() )
   {
     finish();
     return;
@@ -440,7 +469,7 @@ void DictServerWordSearchRequest::run()
         socket->write( matchReq.toUtf8() );
         socket->waitForBytesWritten( 1000 );
 
-        if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+        if( isCancelled.loadAcquire() )
           break;
 
         QString reply;
@@ -448,7 +477,7 @@ void DictServerWordSearchRequest::run()
         if( !readLine( *socket, reply, errorString, isCancelled ) )
           break;
 
-        if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+        if( isCancelled.loadAcquire() )
           break;
 
         if( reply.left( 3 ) == "250" )
@@ -457,7 +486,7 @@ void DictServerWordSearchRequest::run()
           if( !readLine( *socket, reply, errorString, isCancelled ) )
             break;
 
-          if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+          if( isCancelled.loadAcquire() )
             break;
         }
 
@@ -487,7 +516,7 @@ void DictServerWordSearchRequest::run()
           // Read matches
           for( int x = 0; x <= count; x++ )
           {
-            if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+            if( isCancelled.loadAcquire() )
               break;
 
             if( !readLine( *socket, reply, errorString, isCancelled ) )
@@ -511,12 +540,12 @@ void DictServerWordSearchRequest::run()
               matchesList.append( word );
             }
           }
-          if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) || !errorString.isEmpty() )
+          if( isCancelled.loadAcquire() || !errorString.isEmpty() )
             break;
         }
       }
 
-      if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) || !errorString.isEmpty() )
+      if( isCancelled.loadAcquire() || !errorString.isEmpty() )
         break;
 
       matchesList.removeDuplicates();
@@ -524,7 +553,7 @@ void DictServerWordSearchRequest::run()
         break;
     }
 
-    if( !Qt4x5::AtomicInt::loadAcquire( isCancelled ) && errorString.isEmpty() )
+    if( !isCancelled.loadAcquire() && errorString.isEmpty() )
     {
       matchesList.removeDuplicates();
 
@@ -545,13 +574,13 @@ void DictServerWordSearchRequest::run()
     gdWarning( "Prefix find in \"%s\" fault: %s\n", dict.getName().c_str(),
                 errorString.toUtf8().data() );
 
-  if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+  if( isCancelled.loadAcquire() )
     socket->abort();
   else
     disconnectFromServer( *socket );
 
   delete socket;
-  if( !Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+  if( !isCancelled.loadAcquire() )
     finish();
 }
 
@@ -624,7 +653,7 @@ void DictServerArticleRequestRunnable::run()
 
 void DictServerArticleRequest::run()
 {
-  if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+  if( isCancelled.loadAcquire() )
   {
     finish();
     return;
@@ -652,13 +681,13 @@ void DictServerArticleRequest::run()
 
       QString reply;
 
-      if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+      if( isCancelled.loadAcquire() )
         break;
 
       if( !readLine( *socket, reply, errorString, isCancelled ) )
         break;
 
-      if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+      if( isCancelled.loadAcquire() )
         break;
 
       if( reply.left( 3 ) == "250" )
@@ -667,7 +696,7 @@ void DictServerArticleRequest::run()
         if( !readLine( *socket, reply, errorString, isCancelled ) )
           break;
 
-        if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+        if( isCancelled.loadAcquire() )
           break;
       }
 
@@ -699,7 +728,7 @@ void DictServerArticleRequest::run()
         // Read articles
         for( int x = 0; x < count; x++ )
         {
-          if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+          if( isCancelled.loadAcquire() )
             break;
 
           if( !readLine( *socket, reply, errorString, isCancelled ) )
@@ -767,12 +796,8 @@ void DictServerArticleRequest::run()
 
             // Retreive MIME headers if any
 
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-            static QRegularExpression contentTypeExpr( "Content-Type\\s*:\\s*text/html",
+            static QRegularExpression contentTypeExpr = Regex::validated( "Content-Type\\s*:\\s*text/html",
                                                        QRegularExpression::CaseInsensitiveOption );
-#else
-            QRegExp contentTypeExpr( "Content-Type\\s*:\\s*text/html", Qt::CaseInsensitive );
-#endif
             bool contentInHtml = false;
             for( ; ; )
             {
@@ -782,14 +807,9 @@ void DictServerArticleRequest::run()
               if( reply == "\r\n" )
                 break;
 
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
               QRegularExpressionMatch match = contentTypeExpr.match( reply );
               if( match.hasMatch() )
                 contentInHtml = true;
-#else
-              if( contentTypeExpr.indexIn( reply ) >= 0 )
-                contentInHtml = true;
-#endif
             }
 
             // Retrieve article text
@@ -806,134 +826,29 @@ void DictServerArticleRequest::run()
               articleText += reply;
             }
 
-            if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) || !errorString.isEmpty() )
+            if( isCancelled.loadAcquire() || !errorString.isEmpty() )
               break;
 
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-            static QRegularExpression phonetic( "\\\\([^\\\\]+)\\\\",
-                                                QRegularExpression::CaseInsensitiveOption ); // phonetics: \stuff\ ...
-            static QRegularExpression divs_inside_phonetic( "</div([^>]*)><div([^>]*)>",
-                                                            QRegularExpression::CaseInsensitiveOption );
-            static QRegularExpression refs( "\\{([^\\{\\}]+)\\}",
-                                            QRegularExpression::CaseInsensitiveOption );     // links: {stuff}
-            static QRegularExpression links( "<a href=\"gdlookup://localhost/([^\"]*)\">",
-                                             QRegularExpression::CaseInsensitiveOption );
-            static QRegularExpression tags( "<[^>]*>",
-                                            QRegularExpression::CaseInsensitiveOption );
-#else
-            QRegExp phonetic( "\\\\([^\\\\]+)\\\\", Qt::CaseInsensitive ); // phonetics: \stuff\ ...
-            QRegExp divs_inside_phonetic( "</div([^>]*)><div([^>]*)>", Qt::CaseInsensitive );
-            QRegExp refs( "\\{([^\\{\\}]+)\\}", Qt::CaseInsensitive );     // links: {stuff}
-            QRegExp links( "<a href=\"gdlookup://localhost/([^\"]*)\">", Qt::CaseInsensitive );
-            QRegExp tags( "<[^>]*>", Qt::CaseInsensitive );
-#endif
             string articleStr;
             if( contentInHtml )
               articleStr = articleText.toUtf8().data();
             else
               articleStr = Html::preformat( articleText.toUtf8().data() );
 
-            articleText = QString::fromUtf8( articleStr.c_str(), articleStr.size() );
-            if( !contentInHtml )
-            {
-              articleText = articleText.replace(refs, "<a href=\"gdlookup://localhost/\\1\">\\1</a>" );
-
-              pos = 0;
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-              QString articleNewText;
-
-              // Handle phonetics
-
-              QRegularExpressionMatchIterator it = phonetic.globalMatch( articleText );
-              while( it.hasNext() )
-              {
-                QRegularExpressionMatch match = it.next();
-                articleNewText += articleText.midRef( pos, match.capturedStart() - pos );
-                pos = match.capturedEnd();
-
-                QString phonetic_text = match.captured( 1 );
-                phonetic_text.replace( divs_inside_phonetic, "</span></div\\1><div\\2><span class=\"dictd_phonetic\">" );
-
-                articleNewText += "<span class=\"dictd_phonetic\">" + phonetic_text + "</span>";
-              }
-              if( pos )
-              {
-                articleNewText += articleText.midRef( pos );
-                articleText = articleNewText;
-                articleNewText.clear();
-              }
-
-              // Handle links
-
-              pos = 0;
-              it = links.globalMatch( articleText );
-              while( it.hasNext() )
-              {
-                QRegularExpressionMatch match = it.next();
-                articleNewText += articleText.midRef( pos, match.capturedStart() - pos );
-                pos = match.capturedEnd();
-
-                QString link = match.captured( 1 );
-                link.replace( tags, " " );
-                link.replace( "&nbsp;", " " );
-
-                QString newLink = match.captured();
-                newLink.replace( 30, match.capturedLength( 1 ),
-                                 QString::fromUtf8( QUrl::toPercentEncoding( link.simplified() ) ) );
-                articleNewText += newLink;
-              }
-              if( pos )
-              {
-                articleNewText += articleText.midRef( pos );
-                articleText = articleNewText;
-                articleNewText.clear();
-              }
-#else
-              // Handle phonetics
-
-              for( ; ; )
-              {
-                pos = articleText.indexOf( phonetic, pos );
-                if( pos < 0 )
-                  break;
-
-                QString phonetic_text = phonetic.cap( 1 );
-                phonetic_text.replace( divs_inside_phonetic, "</span></div\\1><div\\2><span class=\"dictd_phonetic\">" );
-                phonetic_text = "<span class=\"dictd_phonetic\">" + phonetic_text + "</span>";
-                articleText.replace( pos, phonetic.cap().length(), phonetic_text );
-                pos += phonetic_text.length();
-              }
-
-              // Handle links
-
-              pos = 0;
-              for( ; ; )
-              {
-                pos = articleText.indexOf( links, pos );
-                if( pos < 0 )
-                  break;
-
-                QString link = links.cap( 1 );
-                link.replace( tags, " " );
-                link.replace( "&nbsp;", " " );
-                articleText.replace( pos + 30, links.cap( 1 ).length(),
-                                     QString::fromUtf8( QUrl::toPercentEncoding( link.simplified() ) ) );
-                pos += 30;
-              }
-#endif
-            }
+            articleText = normalizeArticleText(
+              QString::fromUtf8( articleStr.c_str(), articleStr.size() ), !contentInHtml );
 
             articleData += string( "<div class=\"dictd_article\">" )
                            + articleText.toUtf8().data()
                            + "<br></div>";
           }
 
-          if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) || !errorString.isEmpty() )
+          if( isCancelled.loadAcquire() || !errorString.isEmpty() )
             break;
         }
       }
     }
-    if( !Qt4x5::AtomicInt::loadAcquire( isCancelled ) && errorString.isEmpty() && !articleData.empty() )
+    if( !isCancelled.loadAcquire() && errorString.isEmpty() && !articleData.empty() )
     {
       Mutex::Lock _( dataMutex );
 
@@ -948,13 +863,13 @@ void DictServerArticleRequest::run()
     gdWarning( "Articles request from \"%s\" fault: %s\n", dict.getName().c_str(),
                 errorString.toUtf8().data() );
 
-  if( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+  if( isCancelled.loadAcquire() )
     socket->abort();
   else
     disconnectFromServer( *socket );
 
   delete socket;
-  if( !Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+  if( !isCancelled.loadAcquire() )
     finish();
 }
 

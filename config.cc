@@ -3,6 +3,7 @@
 
 #include "config.hh"
 #include "folding.hh"
+#include "hotkeysyntax.hh"
 #include "wstring_qt.hh"
 #include <QDir>
 #include <QFile>
@@ -20,18 +21,10 @@
 #endif
 
 #include "atomic_rename.hh"
-#include "qt4x5.hh"
-
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
 #include <QStandardPaths>
-#else
-#include <QDesktopServices>
-#endif
 
-#if defined( HAVE_X11 ) && QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-// Whether XDG Base Directory specification might be followed.
-// Only Qt5 builds are supported, as Qt4 doesn't provide all functions needed
-// to get XDG Base Directory compliant locations.
+#ifdef HAVE_X11
+// Preserve the existing XDG paths for builds with Linux desktop support.
 #define XDG_BASE_DIRECTORY_COMPLIANCE
 #endif
 
@@ -101,28 +94,32 @@ HotKey::HotKey(): modifiers(), key1( 0 ), key2( 0 )
 {
 }
 
-// Does anyone know how to separate modifiers from the keycode? We'll
-// use our own mask.
-
-uint32_t const keyMask = 0x01FFFFFF;
-
 HotKey::HotKey( QKeySequence const & seq ):
-  modifiers( seq[ 0 ] & ~keyMask ),
-  key1( seq[ 0 ] & keyMask ),
-  key2( seq[ 1 ] & keyMask )
+  modifiers( seq.count() > 0 ? seq[ 0 ].keyboardModifiers() : Qt::KeyboardModifiers() ),
+  key1( seq.count() > 0 ? int( seq[ 0 ].key() ) : 0 ),
+  // Only the first combination carries modifiers in the stored format. The
+  // Qt6 QKeyCombination accessors replace the old bitmask on the Qt5 indexed
+  // int, which no longer exists.
+  key2( seq.count() > 1 ? int( seq[ 1 ].key() ) : 0 )
 {
 }
 
 QKeySequence HotKey::toKeySequence() const
 {
-  int v2 = key2 ? ( key2 | modifiers ): 0;
+  if( key1 == 0 )
+    return QKeySequence();
 
-  return QKeySequence( key1 | modifiers, v2 );
+  QKeyCombination const first( modifiers, Qt::Key( key1 ) );
+
+  if( key2 == 0 )
+    return QKeySequence( first );
+
+  return QKeySequence( first, QKeyCombination( modifiers, Qt::Key( key2 ) ) );
 }
 
 bool InternalPlayerBackend::anyAvailable()
 {
-#if defined( MAKE_FFMPEG_PLAYER ) || defined( MAKE_QTMULTIMEDIA_PLAYER )
+#ifdef MAKE_FFMPEG_PLAYER
   return true;
 #else
   return false;
@@ -131,25 +128,11 @@ bool InternalPlayerBackend::anyAvailable()
 
 InternalPlayerBackend InternalPlayerBackend::defaultBackend()
 {
-#if defined( MAKE_FFMPEG_PLAYER )
+#ifdef MAKE_FFMPEG_PLAYER
   return ffmpeg();
-#elif defined( MAKE_QTMULTIMEDIA_PLAYER )
-  return qtmultimedia();
 #else
   return InternalPlayerBackend( QString() );
 #endif
-}
-
-QStringList InternalPlayerBackend::nameList()
-{
-  QStringList result;
-#ifdef MAKE_FFMPEG_PLAYER
-  result.push_back( ffmpeg().uiName() );
-#endif
-#ifdef MAKE_QTMULTIMEDIA_PLAYER
-  result.push_back( qtmultimedia().uiName() );
-#endif
-  return result;
 }
 
 bool InternalPlayerBackend::isFfmpeg() const
@@ -161,14 +144,114 @@ bool InternalPlayerBackend::isFfmpeg() const
 #endif
 }
 
-bool InternalPlayerBackend::isQtmultimedia() const
+namespace {
+
+/// Loads one stored hotkey. The verbatim text is kept next to the parsed
+/// combination so an untouched value is written back byte-for-byte (SD-15); an
+/// unsupported or multi-key sequence is never replaced merely because a portal
+/// cannot bind it. Only a value produced by the recorder starts without the
+/// marker and is therefore serialized from its combination.
+HotKey loadHotKey( QString const & storedText )
 {
-#ifdef MAKE_QTMULTIMEDIA_PLAYER
-  return *this == qtmultimedia();
+  HotKey key;
+  QString error;
+
+  if( !HotkeySyntax::parse( storedText, &key, &error ) )
+  {
+    // Not representable as a Config::HotKey at all: keep the text only.
+    key = HotKey();
+  }
+
+  key.rawText = storedText;
+  return key;
+}
+
+/// The text a save must write for a hotkey: the original text while the value is
+/// untouched, PortableText once the recorder produced a new value.
+QString hotKeyStorageText( HotKey const & key )
+{
+  return key.rawText.isEmpty() ? HotkeySyntax::serialize( key ) : key.rawText;
+}
+
+/// Stable application action IDs that a platform backend may bind and that the
+/// configuration may persist. Anything else is a historical/foreign display
+/// record: ignored on load, never bound and never an activation source.
+bool isKnownPortalBindingId( QString const & id )
+{
+  return id == QLatin1String( "main-window" ) || id == QLatin1String( "clipboard-lookup" );
+}
+
+/// Loads <hotkeys>/<portalBindings>. A missing section is an empty record set.
+/// Unknown IDs are ignored; duplicate known IDs are last-wins for display (never
+/// for the bind wire validation, which lives in the portal backend). Stored
+/// descriptions are escaped XML attributes decoded by QDom and are display-only.
+QVector< PortalBindingDisplay > loadPortalBindings( QDomElement const & portalBindings )
+{
+  QVector< PortalBindingDisplay > result;
+  QDomNodeList const nodes = portalBindings.elementsByTagName( "binding" );
+
+  for( int x = 0; x < nodes.length(); ++x )
+  {
+    QDomElement const binding = nodes.item( x ).toElement();
+    QString const id = binding.attribute( "id" );
+
+    if( !isKnownPortalBindingId( id ) )
+      continue;
+
+    PortalBindingDisplay display;
+    display.id = id;
+    display.triggerDescription = binding.attribute( "triggerDescription" );
+
+    bool replaced = false;
+    for( PortalBindingDisplay & existing : result )
+    {
+      if( existing.id == id )
+      {
+        existing = display;
+        replaced = true;
+        break;
+      }
+    }
+
+    if( !replaced )
+      result.push_back( display );
+  }
+
+  return result;
+}
+
+/// In-memory audio backend migration (§4.13). An ffmpeg build normalizes every
+/// stored non-ffmpeg backend name -- the removed "Qt Multimedia" and any unknown
+/// name -- to the public default backend. Already-ffmpeg settings stay. A
+/// no_ffmpeg_player build keeps the stored text verbatim so a later build can use
+/// it; that build reports the internal player as unavailable at runtime instead.
+InternalPlayerBackend loadInternalPlayerBackend( QString const & storedName )
+{
+#ifdef MAKE_FFMPEG_PLAYER
+  InternalPlayerBackend const defaultBackend = InternalPlayerBackend::defaultBackend();
+
+  if( storedName.isEmpty() )
+    return defaultBackend;
+
+  InternalPlayerBackend stored = defaultBackend;
+  stored.setUiName( storedName );
+
+  if( stored != defaultBackend )
+  {
+    gdWarning( "Unsupported internal player backend \"%s\" in the configuration; using \"%s\".\n",
+               storedName.toUtf8().constData(), defaultBackend.uiName().toUtf8().constData() );
+    return defaultBackend;
+  }
+
+  return stored;
 #else
-  return false;
+  InternalPlayerBackend stored = InternalPlayerBackend::defaultBackend();
+  stored.setUiName( storedName );
+  return stored;
 #endif
 }
+
+} // namespace
 
 ScanPopupWindowFlags spwfFromInt( int id )
 {
@@ -188,8 +271,8 @@ InputPhrase Preferences::sanitizeInputPhrase( QString const & inputPhrase ) cons
 
   if( limitInputPhraseLength && inputPhrase.size() > inputPhraseLengthLimit )
   {
-    gdDebug( "Ignoring an input phrase %d symbols long. The configured maximum input phrase length is %d symbols.",
-             inputPhrase.size(), inputPhraseLengthLimit );
+    gdDebug( "Ignoring an input phrase %lld symbols long. The configured maximum input phrase length is %d symbols.",
+             static_cast< long long >( inputPhrase.size() ), inputPhraseLengthLimit );
     return result;
   }
 
@@ -271,9 +354,7 @@ Preferences::Preferences():
 , limitInputPhraseLength( false )
 , inputPhraseLengthLimit( 1000 )
 , maxDictionaryRefsInContextMenu ( 20 )
-#ifndef Q_WS_X11
 , trackClipboardChanges( false )
-#endif
 , synonymSearchEnabled( true )
 {
 }
@@ -407,17 +488,17 @@ Group loadGroup( QDomElement grp, unsigned * nextId = 0 )
 
   QDomNodeList dicts = grp.elementsByTagName( "dictionary" );
 
-  for( Qt4x5::Dom::size_type y = 0; y < dicts.length(); ++y )
+  for( qsizetype y = 0; y < dicts.length(); ++y )
     g.dictionaries.push_back( DictionaryRef( dicts.item( y ).toElement().text(),
                                              dicts.item( y ).toElement().attribute( "name" ) ) );
 
   QDomNode muted = grp.namedItem( "mutedDictionaries" );
   dicts = muted.toElement().elementsByTagName( "mutedDictionary" );
-  for( Qt4x5::Dom::size_type x = 0; x < dicts.length(); ++x )
+  for( qsizetype x = 0; x < dicts.length(); ++x )
     g.mutedDictionaries.insert( dicts.item( x ).toElement().text() );
 
   dicts = muted.toElement().elementsByTagName( "popupMutedDictionary" );
-  for( Qt4x5::Dom::size_type x = 0; x < dicts.length(); ++x )
+  for( qsizetype x = 0; x < dicts.length(); ++x )
     g.popupMutedDictionaries.insert( dicts.item( x ).toElement().text() );
 
   return g;
@@ -432,7 +513,7 @@ MutedDictionaries loadMutedDictionaries( QDomNode mutedDictionaries )
     QDomNodeList nl = mutedDictionaries.toElement().
                         elementsByTagName( "mutedDictionary" );
 
-    for( Qt4x5::Dom::size_type x = 0; x < nl.length(); ++x )
+    for( qsizetype x = 0; x < nl.length(); ++x )
       result.insert( nl.item( x ).toElement().text() );
   }
 
@@ -595,7 +676,7 @@ Class load() THROW_SPEC( exError )
   {
     QDomNodeList nl = paths.toElement().elementsByTagName( "path" );
 
-    for( Qt4x5::Dom::size_type x = 0; x < nl.length(); ++x )
+    for( qsizetype x = 0; x < nl.length(); ++x )
       c.paths.push_back(
         Path( nl.item( x ).toElement().text(),
               nl.item( x ).toElement().attribute( "recursive" ) == "1" ) );
@@ -607,7 +688,7 @@ Class load() THROW_SPEC( exError )
   {
     QDomNodeList nl = soundDirs.toElement().elementsByTagName( "sounddir" );
 
-    for( Qt4x5::Dom::size_type x = 0; x < nl.length(); ++x )
+    for( qsizetype x = 0; x < nl.length(); ++x )
       c.soundDirs.push_back(
         SoundDir( nl.item( x ).toElement().text(),
                   nl.item( x ).toElement().attribute( "name" ),
@@ -632,7 +713,7 @@ Class load() THROW_SPEC( exError )
 
     QDomNodeList nl = groups.toElement().elementsByTagName( "group" );
 
-    for( Qt4x5::Dom::size_type x = 0; x < nl.length(); ++x )
+    for( qsizetype x = 0; x < nl.length(); ++x )
     {
       QDomElement grp = nl.item( x ).toElement();
 
@@ -648,7 +729,7 @@ Class load() THROW_SPEC( exError )
 
     QDomNodeList nl = hunspell.toElement().elementsByTagName( "enabled" );
 
-    for( Qt4x5::Dom::size_type x = 0; x < nl.length(); ++x )
+    for( qsizetype x = 0; x < nl.length(); ++x )
       c.hunspell.enabledDictionaries.push_back( nl.item( x ).toElement().text() );
   }
 
@@ -712,7 +793,7 @@ Class load() THROW_SPEC( exError )
   {
     QDomNodeList nl = programs.toElement().elementsByTagName( "program" );
 
-    for( Qt4x5::Dom::size_type x = 0; x < nl.length(); ++x )
+    for( qsizetype x = 0; x < nl.length(); ++x )
     {
       QDomElement pr = nl.item( x ).toElement();
 
@@ -739,7 +820,7 @@ Class load() THROW_SPEC( exError )
   {
     QDomNodeList nl = mws.toElement().elementsByTagName( "mediawiki" );
 
-    for( Qt4x5::Dom::size_type x = 0; x < nl.length(); ++x )
+    for( qsizetype x = 0; x < nl.length(); ++x )
     {
       QDomElement mw = nl.item( x ).toElement();
 
@@ -767,7 +848,7 @@ Class load() THROW_SPEC( exError )
   {
     QDomNodeList nl = wss.toElement().elementsByTagName( "website" );
 
-    for( Qt4x5::Dom::size_type x = 0; x < nl.length(); ++x )
+    for( qsizetype x = 0; x < nl.length(); ++x )
     {
       QDomElement ws = nl.item( x ).toElement();
 
@@ -795,7 +876,7 @@ Class load() THROW_SPEC( exError )
   {
     QDomNodeList nl = dss.toElement().elementsByTagName( "server" );
 
-    for( Qt4x5::Dom::size_type x = 0; x < nl.length(); ++x )
+    for( qsizetype x = 0; x < nl.length(); ++x )
     {
       QDomElement ds = nl.item( x ).toElement();
 
@@ -824,7 +905,7 @@ Class load() THROW_SPEC( exError )
   {
     QDomNodeList nl = ves.toElement().elementsByTagName( "voiceEngine" );
 
-    for ( Qt4x5::Dom::size_type x = 0; x < nl.length(); ++x )
+    for ( qsizetype x = 0; x < nl.length(); ++x )
     {
       QDomElement ve = nl.item( x ).toElement();
       VoiceEngine v;
@@ -885,10 +966,10 @@ Class load() THROW_SPEC( exError )
 
     applyBoolOption( c.preferences.enableMainWindowHotkey, preferences.namedItem( "enableMainWindowHotkey" ) );
     if ( !preferences.namedItem( "mainWindowHotkey" ).isNull() )
-      c.preferences.mainWindowHotkey = QKeySequence::fromString( preferences.namedItem( "mainWindowHotkey" ).toElement().text() );
+      c.preferences.mainWindowHotkey = loadHotKey( preferences.namedItem( "mainWindowHotkey" ).toElement().text() );
     applyBoolOption( c.preferences.enableClipboardHotkey, preferences.namedItem( "enableClipboardHotkey" ) );
     if ( !preferences.namedItem( "clipboardHotkey" ).isNull() )
-      c.preferences.clipboardHotkey = QKeySequence::fromString( preferences.namedItem( "clipboardHotkey" ).toElement().text() );
+      c.preferences.clipboardHotkey = loadHotKey( preferences.namedItem( "clipboardHotkey" ).toElement().text() );
 
     c.preferences.enableScanPopup = ( preferences.namedItem( "enableScanPopup" ).toElement().text() == "1" );
     c.preferences.startWithScanPopupOn = ( preferences.namedItem( "startWithScanPopupOn" ).toElement().text() == "1" );
@@ -921,7 +1002,8 @@ Class load() THROW_SPEC( exError )
       c.preferences.useInternalPlayer = false;
 
     if ( !preferences.namedItem( "internalPlayerBackend" ).isNull() )
-      c.preferences.internalPlayerBackend.setUiName( preferences.namedItem( "internalPlayerBackend" ).toElement().text() );
+      c.preferences.internalPlayerBackend =
+        loadInternalPlayerBackend( preferences.namedItem( "internalPlayerBackend" ).toElement().text() );
 
     if ( !preferences.namedItem( "audioPlaybackProgram" ).isNull() )
       c.preferences.audioPlaybackProgram = preferences.namedItem( "audioPlaybackProgram" ).toElement().text();
@@ -997,10 +1079,8 @@ Class load() THROW_SPEC( exError )
     if ( !preferences.namedItem( "maxDictionaryRefsInContextMenu" ).isNull() )
       c.preferences.maxDictionaryRefsInContextMenu = preferences.namedItem( "maxDictionaryRefsInContextMenu" ).toElement().text().toUShort();
 
-#ifndef Q_WS_X11
     if ( !preferences.namedItem( "trackClipboardChanges" ).isNull() )
       c.preferences.trackClipboardChanges = ( preferences.namedItem( "trackClipboardChanges" ).toElement().text() == "1" );
-#endif
 
     if ( !preferences.namedItem( "synonymSearchEnabled" ).isNull() )
       c.preferences.synonymSearchEnabled = ( preferences.namedItem( "synonymSearchEnabled" ).toElement().text() == "1" );
@@ -1195,6 +1275,18 @@ Class load() THROW_SPEC( exError )
 
     if ( !headwordsDialog.namedItem( "headwordsDialogGeometry" ).isNull() )
       c.headwordsDialog.headwordsDialogGeometry = QByteArray::fromBase64( headwordsDialog.namedItem( "headwordsDialogGeometry" ).toElement().text().toLatin1() );
+  }
+
+  // Additive hotkey display records. A configuration written by an older
+  // version has no <hotkeys> node at all, which simply loads as no records.
+  QDomNode hotkeys = root.namedItem( "hotkeys" );
+
+  if ( !hotkeys.isNull() )
+  {
+    QDomNode portalBindings = hotkeys.namedItem( "portalBindings" );
+
+    if ( !portalBindings.isNull() )
+      c.hotkeys.portalBindings = loadPortalBindings( portalBindings.toElement() );
   }
 
   return c;
@@ -1762,7 +1854,7 @@ void save( Class const & c ) THROW_SPEC( exError )
     preferences.appendChild( opt );
 
     opt = dd.createElement( "mainWindowHotkey" );
-    opt.appendChild( dd.createTextNode( c.preferences.mainWindowHotkey.toKeySequence().toString() ) );
+    opt.appendChild( dd.createTextNode( hotKeyStorageText( c.preferences.mainWindowHotkey ) ) );
     preferences.appendChild( opt );
 
     opt = dd.createElement( "enableClipboardHotkey" );
@@ -1770,7 +1862,7 @@ void save( Class const & c ) THROW_SPEC( exError )
     preferences.appendChild( opt );
 
     opt = dd.createElement( "clipboardHotkey" );
-    opt.appendChild( dd.createTextNode( c.preferences.clipboardHotkey.toKeySequence().toString() ) );
+    opt.appendChild( dd.createTextNode( hotKeyStorageText( c.preferences.clipboardHotkey ) ) );
     preferences.appendChild( opt );
 
     opt = dd.createElement( "enableScanPopup" );
@@ -1976,11 +2068,9 @@ void save( Class const & c ) THROW_SPEC( exError )
     opt.appendChild( dd.createTextNode( QString::number( c.preferences.maxDictionaryRefsInContextMenu ) ) );
     preferences.appendChild( opt );
 
-#ifndef Q_WS_X11
     opt = dd.createElement( "trackClipboardChanges" );
     opt.appendChild( dd.createTextNode( c.preferences.trackClipboardChanges ? "1" : "0" ) );
     preferences.appendChild( opt );
-#endif
 
     opt = dd.createElement( "synonymSearchEnabled" );
     opt.appendChild( dd.createTextNode( c.preferences.synonymSearchEnabled ? "1" : "0" ) );
@@ -2219,6 +2309,28 @@ void save( Class const & c ) THROW_SPEC( exError )
     hd.appendChild( opt );
   }
 
+  {
+    // Additive hotkey display records; only what a platform backend reported is
+    // stored, at this existing save point. Unknown IDs are never persisted and a
+    // stored description stays inert escaped XML text.
+    QDomElement hotkeys = dd.createElement( "hotkeys" );
+    root.appendChild( hotkeys );
+
+    QDomElement portalBindings = dd.createElement( "portalBindings" );
+    hotkeys.appendChild( portalBindings );
+
+    for( PortalBindingDisplay const & display : c.hotkeys.portalBindings )
+    {
+      if( !isKnownPortalBindingId( display.id ) )
+        continue;
+
+      QDomElement binding = dd.createElement( "binding" );
+      binding.setAttribute( "id", display.id );
+      binding.setAttribute( "triggerDescription", display.triggerDescription );
+      portalBindings.appendChild( binding );
+    }
+  }
+
   QByteArray result( dd.toByteArray() );
 
   if ( configFile.write( result ) != result.size() )
@@ -2395,15 +2507,11 @@ QString getStylesDir() throw()
 QString getCacheDir() throw()
 {
   return isPortableVersion() ? portableHomeDirPath() + "/cache"
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
   #ifdef HAVE_X11
                              : QStandardPaths::writableLocation( QStandardPaths::GenericCacheLocation ) + "/goldendict";
   #else
                              : QStandardPaths::writableLocation( QStandardPaths::CacheLocation );
   #endif
-#else
-                             : QDesktopServices::storageLocation( QDesktopServices::CacheLocation );
-#endif
 }
 
 QString getNetworkCacheDir() throw()

@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<!--
+  GoldenDict nested-frame fixture.
+
+  The embedded frame has a known border (3 px), padding (4 px) and margin (10 px)
+  so a coordinate/word-at-point assertion can compute the expected offset of the
+  nested word target instead of guessing it:
+    frame content offset = 10 (margin) + 3 (border) + 4 (padding) = 17 px
+  The frame's document is second.html, which exposes `#word-target` and
+  `#second-marker`, so a nested-word lookup proves the recursion walks into the
+  iframe rather than only the top document.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>nested frame page</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="website-marker">
+<h1 id="nested-marker">nested page</h1>
+<p><a id="nested-click-target" href="first.html">to the first page</a></p>
+<iframe id="nested-frame" name="nested-frame" src="second.html"
+        style="display:block; margin:10px; border:3px solid rgb(60,60,60); padding:4px; width:320px; height:200px;"></iframe>
+<p id="nested-word-target">wordword</p>
+<p id="nested-context-target">contextword</p>
+</body>
+</html>

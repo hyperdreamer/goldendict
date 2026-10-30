@@ -26,39 +26,32 @@ CONFIG( release, debug|release ) {
   DEFINES += NDEBUG NO_GD_DPRINTF
 }
 
-# DEPENDPATH += . generators
-INCLUDEPATH += .
-
-QT += core \
-      gui \
-      xml \
-      network \
-      svg
-
-greaterThan(QT_MAJOR_VERSION, 4) {
-    QT += widgets \
-          webkitwidgets \
-          printsupport \
-          help
-
-    # QMediaPlayer is not available in Qt4.
-    !CONFIG( no_qtmultimedia_player ) {
-      QT += multimedia
-      DEFINES += MAKE_QTMULTIMEDIA_PLAYER
-    }
-} else {
-    QT += webkit
-    CONFIG += help
-}
-
-!CONFIG( no_ffmpeg_player ) {
-  DEFINES += MAKE_FFMPEG_PLAYER
-}
-
-QT += sql
-CONFIG += exceptions \
+CONFIG += c++17 \
+    exceptions \
     rtti \
     stl
+
+# The application targets Qt 6 only. This is the complete module set; no
+# compatibility module is part of it. SVG needs no svgwidgets module: the
+# existing use is QSvgRenderer.
+QT = core \
+     gui \
+     widgets \
+     xml \
+     network \
+     sql \
+     printsupport \
+     help \
+     svg \
+     webenginecore \
+     webenginewidgets \
+     webchannel \
+     dbus \
+     pdf \
+     pdfwidgets
+
+# DEPENDPATH += . generators
+INCLUDEPATH += .
 OBJECTS_DIR = build
 UI_DIR = build
 MOC_DIR = build
@@ -67,6 +60,10 @@ LIBS += \
         -lz \
         -lbz2 \
         -llzo2
+
+!CONFIG( no_ffmpeg_player ) {
+  DEFINES += MAKE_FFMPEG_PLAYER
+}
 
 win32 {
     TARGET = GoldenDict
@@ -126,6 +123,8 @@ win32 {
             -lavcodec-gd
     }
 
+    # Theme-aware window frames are a Windows-only helper.
+    LIBS += -luxtheme
 
     RC_FILE = goldendict.rc
     INCLUDEPATH += winlibs/include
@@ -142,10 +141,6 @@ win32 {
     !CONFIG( no_chinese_conversion_support ) {
         CONFIG += chinese_conversion_support
     }
-
-    greaterThan(QT_MAJOR_VERSION, 4) {
-      LIBS += -luxtheme
-    }
 }
 
 unix:!mac {
@@ -153,12 +148,6 @@ unix:!mac {
   # This is to keep symbols for backtraces
   QMAKE_CXXFLAGS += -rdynamic
   QMAKE_LFLAGS += -rdynamic
-
-    greaterThan(QT_MAJOR_VERSION, 4) {
-      greaterThan(QT_MINOR_VERSION, 0) {
-        QT += x11extras
-      }
-    }
 
     CONFIG += link_pkgconfig
     PKGCONFIG += vorbisfile \
@@ -172,10 +161,39 @@ unix:!mac {
             libavcodec \
             libswresample \
     }
-    arm {
+    # iconv is part of glibc and must not be linked explicitly; only the Android
+    # (bionic) target of the original project needed the standalone library.
+    android {
         LIBS += -liconv
     } else {
+        # X11 and Xtst carry the compiled XRecord hotkey recorder.
         LIBS += -lX11 -lXtst
+    }
+
+    # Optional KDE window-system helper, used for best-effort window activation
+    # on Wayland. It is enabled only when both the header and the library are
+    # found; a missing framework must never break core Wayland startup.
+    isEmpty( KWINDOWSYSTEM_INCLUDEPATH ): KWINDOWSYSTEM_INCLUDEPATH = /usr/include/KF6/KWindowSystem
+    GD_KWIN_HEADER = $$KWINDOWSYSTEM_INCLUDEPATH/kwindowsystem.h
+
+    isEmpty( KWINDOWSYSTEM_LIBDIR ) {
+        # Let the compiler's own search path answer; -print-file-name echoes the
+        # bare file name back when it cannot resolve it.
+        GD_KWIN_LIBFILE = $$system($${QMAKE_CXX} -print-file-name=libKF6WindowSystem.so)
+        equals( GD_KWIN_LIBFILE, libKF6WindowSystem.so ): GD_KWIN_LIBFILE =
+        GD_KWIN_LIBDIR_ARG =
+    } else {
+        GD_KWIN_LIBFILE = $$KWINDOWSYSTEM_LIBDIR/libKF6WindowSystem.so
+        GD_KWIN_LIBDIR_ARG = -L$$KWINDOWSYSTEM_LIBDIR
+    }
+
+    exists( $$GD_KWIN_HEADER ):!isEmpty( GD_KWIN_LIBFILE ) {
+        exists( $$GD_KWIN_LIBFILE ) {
+            INCLUDEPATH += $$KWINDOWSYSTEM_INCLUDEPATH
+            isEmpty( GD_KWIN_LIBDIR_ARG ): LIBS += -lKF6WindowSystem
+            else: LIBS += $$GD_KWIN_LIBDIR_ARG -lKF6WindowSystem
+            DEFINES += HAVE_KWINDOWSYSTEM
+        }
     }
 
     # Install prefix: first try to use qmake's PREFIX variable,
@@ -297,7 +315,6 @@ HEADERS += folding.hh \
     audioplayerinterface.hh \
     audioplayerfactory.hh \
     ffmpegaudioplayer.hh \
-    multimediaaudioplayer.hh \
     externalaudioplayer.hh \
     externalviewer.hh \
     wordfinder.hh \
@@ -369,7 +386,6 @@ HEADERS += folding.hh \
     zim.hh \
     categorized_logging.hh \
     gddebug.hh \
-    qt4x5.hh \
     gestures.hh \
     tiff.hh \
     dictheadwords.hh \
@@ -383,7 +399,22 @@ HEADERS += folding.hh \
     splitfile.hh \
     favoritespanewidget.hh \
     cpp_features.hh \
-    treeview.hh
+    treeview.hh \
+    wildcard.hh \
+    encoding.hh \
+    linkrewrite.hh \
+    articleurls.hh \
+    articleschemes.hh \
+    articlebridge.hh \
+    websiteframes.hh \
+    articlehistory.hh \
+    printpipeline.hh \
+    articleprofile.hh \
+    savearticle.hh \
+    hotkeybackend.hh \
+    hotkeysyntax.hh \
+    portalhotkeys.hh \
+    platformwindow.hh
 
 FORMS += groups.ui \
     dictgroupwidget.ui \
@@ -432,7 +463,6 @@ SOURCES += folding.cc \
     scanpopup.cc \
     articleview.cc \
     audioplayerfactory.cc \
-    multimediaaudioplayer.cc \
     externalaudioplayer.cc \
     externalviewer.cc \
     wordfinder.cc \
@@ -513,7 +543,22 @@ SOURCES += folding.cc \
     gls.cc \
     splitfile.cc \
     favoritespanewidget.cc \
-    treeview.cc
+    treeview.cc \
+    wildcard.cc \
+    encoding.cc \
+    linkrewrite.cc \
+    articleurls.cc \
+    articleschemes.cc \
+    articlebridge.cc \
+    websiteframes.cc \
+    articlehistory.cc \
+    printpipeline.cc \
+    articleprofile.cc \
+    savearticle.cc \
+    hotkeybackend.cc \
+    hotkeysyntax.cc \
+    portalhotkeys.cc \
+    platformwindow.cc
 
 win32 {
     FORMS   += texttospeechsource.ui
@@ -550,14 +595,15 @@ unix:!mac {
     SOURCES += scanflag.cc
 }
 
-greaterThan(QT_MAJOR_VERSION, 4) {
-    HEADERS += wildcard.hh
-    SOURCES += wildcard.cc
-}
-
 CONFIG( zim_support ) {
   DEFINES += MAKE_ZIM_SUPPORT
-  LIBS += -llzma -lzstd
+  LIBS += -llzma
+  CONFIG += link_pkgconfig
+  packagesExist( libzstd ) {
+    PKGCONFIG += libzstd
+  } else {
+    LIBS += -lzstd
+  }
 }
 
 !CONFIG( no_extra_tiff_handler ) {
@@ -667,10 +713,7 @@ TRANSLATIONS += locale/ru_RU.ts \
 }
 
 # This makes qmake generate translations
-
-win32:# Windows doesn't seem to have *-qt4 symlinks
 isEmpty(QMAKE_LRELEASE):QMAKE_LRELEASE = $$[QT_INSTALL_BINS]/lrelease
-isEmpty(QMAKE_LRELEASE):QMAKE_LRELEASE = $$[QT_INSTALL_BINS]/lrelease-qt4
 
 # The *.qm files might not exist when qmake is run for the first time,
 # causing the standard install rule to be ignored, and no translations
@@ -693,3 +736,34 @@ PRE_TARGETDEPS += $$TS_OUT
 
 include( qtsingleapplication/src/qtsingleapplication.pri )
 
+# Root test gate. The wrapper is expanded by make, never by qmake, and wraps the
+# build and the run separately so a gate script observes both invocations.
+#
+# The aggregate is generated *inside* tests/ and run from there, because that is
+# the layout the suite projects were written for: every suite keeps its objects,
+# moc output and .moc include in its own build directory under tests/. Generating
+# the same aggregate in the repository root instead makes qmake emit per-suite
+# dependencies without the rules that create the moc files, so the gate fails on
+# `#include "tst_x.moc"` before it runs a single test.
+CHECK_MAKEFILE = Makefile.tests
+
+tests-makefile.target = tests-makefile
+# $$QMAKE is the generated makefile's qmake variable and is empty while the
+# project is being evaluated; $$QMAKE_QMAKE is the qmake that is running now.
+tests-makefile.commands = $$QMAKE_QMAKE $$PWD/tests/tests.pro -o $$PWD/tests/$$CHECK_MAKEFILE
+
+tests-build.target = tests-build
+tests-build.depends = tests-makefile
+# The suites are independent projects with private object directories, so the
+# build half runs in parallel: a serial cold build of all 18 suites does not fit
+# the gate's own 900 s budget (measured: 900 s built 3 of 18 suites). The run
+# half stays serial for deterministic test execution.
+tests-build.commands = $(GD_TEST_WRAPPER) $(MAKE) -C $$PWD/tests -f $$CHECK_MAKEFILE -j$(shell nproc)
+
+tests-run.target = tests-run
+tests-run.depends = tests-build
+tests-run.commands = $(GD_TEST_WRAPPER) $(MAKE) -C $$PWD/tests -f $$CHECK_MAKEFILE check
+
+check.target = check
+check.depends = tests-run
+QMAKE_EXTRA_TARGETS += check tests-makefile tests-build tests-run

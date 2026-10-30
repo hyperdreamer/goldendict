@@ -28,7 +28,7 @@
 #include "termination.hh"
 #include "atomic_rename.hh"
 
-#include <QWebSecurityOrigin>
+#include "articleschemes.hh"
 #include <QMessageBox>
 #include <QDebug>
 #include <QFile>
@@ -39,26 +39,11 @@
 
 #include "gddebug.hh"
 
-#if defined( Q_OS_MAC ) && QT_VERSION < QT_VERSION_CHECK(5, 0, 0)
-#include "lionsupport.h"
-#endif
-
-#if ( QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 ) )
-
 void gdMessageHandler( QtMsgType type, const QMessageLogContext &context, const QString &mess )
 {
   Q_UNUSED( context );
   QString message( mess );
-  QByteArray msg = message.toUtf8().constData();
-
-#else
-
-void gdMessageHandler( QtMsgType type, const char *msg_ )
-{
-  QString message = QString::fromUtf8( msg_ );
-  QByteArray msg = QByteArray::fromRawData( msg_, strlen( msg_ ) );
-
-#endif
+  QByteArray msg = message.toUtf8();
 
   switch (type) {
 
@@ -94,14 +79,12 @@ void gdMessageHandler( QtMsgType type, const char *msg_ )
         fprintf(stderr, "Fatal: %s\n", msg.constData());
       abort();
 
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 5, 0 )
     case QtInfoMsg:
       if( logFilePtr && logFilePtr->isOpen() )
         message.insert( 0, "Info: " );
       else
         fprintf(stderr, "Info: %s\n", msg.constData());
       break;
-#endif
   }
 
   if( logFilePtr && logFilePtr->isOpen() )
@@ -225,11 +208,7 @@ void GDCommandLine::handleUriSchemes()
     if( !word.startsWith( scheme ) )
       continue;
 
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-    int schemeSize = scheme.size();
-#else
-    int schemeSize = strlen( scheme.latin1() );
-#endif
+    qsizetype schemeSize = scheme.size();
     if( word.size() > schemeSize && word.at( schemeSize ) == QLatin1Char( '/' ) )
       ++schemeSize; // support dict:///word as well
 
@@ -257,27 +236,9 @@ public:
 
 int main( int argc, char ** argv )
 {
-#ifdef Q_OS_UNIX
-    // GoldenDict use lots of X11 functions and it currently cannot work
-    // natively on Wayland. This workaround will force GoldenDict to use
-    // XWayland.
-    char * xdg_envc = getenv("XDG_SESSION_TYPE");
-    QString xdg_session = xdg_envc ? QString::fromLatin1(xdg_envc) : QString();
-    if (!QString::compare(xdg_session, QString("wayland"), Qt::CaseInsensitive))
-    {
-        setenv("QT_QPA_PLATFORM", "xcb", 1);
-    }
-#endif
+  registerArticleSchemes();
   #ifdef Q_OS_MAC
     setenv("LANG", "en_US.UTF-8", 1);
-
-#if QT_VERSION < QT_VERSION_CHECK(5, 0, 0)
-   // Check for retina display
-   if( LionSupport::isRetinaDisplay() )
-     QApplication::setGraphicsSystem( "native" );
-   else
-     QApplication::setGraphicsSystem( "raster" );
-#endif
   #endif
 
   // The following clause fixes a race in the MinGW runtime where throwing
@@ -398,13 +359,8 @@ int main( int argc, char ** argv )
 
   app.setApplicationName( "GoldenDict" );
   app.setOrganizationDomain( "http://goldendict.org/" );
-#if QT_VERSION >= 0x040600
   app.setStyle(new GdAppStyle);
-#endif
-
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 7, 0 )
   app.setDesktopFileName( QStringLiteral( "org.goldendict.GoldenDict" ) );
-#endif
 
   #ifndef Q_OS_MAC
     app.setWindowIcon( QIcon( ":/icons/programicon.png" ) );
@@ -423,7 +379,7 @@ int main( int argc, char ** argv )
 
   if ( !qtTranslator.load( "qt_" + localeName, Config::getLocDir() ) )
     qtTranslator.load( "qt_" + localeName,
-                       QLibraryInfo::location( QLibraryInfo::TranslationsPath ) );
+                       QLibraryInfo::path( QLibraryInfo::TranslationsPath ) );
 
   app.installTranslator( &qtTranslator );
 
@@ -509,11 +465,7 @@ int main( int argc, char ** argv )
     logFilePtr->write( line );
 
     // Install message handler
-#if ( QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 ) )
     qInstallMessageHandler( gdMessageHandler );
-#else
-    qInstallMsgHandler( gdMessageHandler );
-#endif
   }
 
   if ( Config::isPortableVersion() )
@@ -534,7 +486,7 @@ int main( int argc, char ** argv )
 
     if ( !qtTranslator.load( "qt_" + localeName, Config::getLocDir() ) )
       qtTranslator.load( "qt_" + localeName,
-                                 QLibraryInfo::location( QLibraryInfo::TranslationsPath ) );
+                                 QLibraryInfo::path( QLibraryInfo::TranslationsPath ) );
 
     translator.load( Config::getLocDir() + "/" + localeName );
   }
@@ -543,12 +495,6 @@ int main( int argc, char ** argv )
   // and with the main window closed.
   app.setQuitOnLastWindowClosed( false );
 
-#if QT_VERSION >= 0x040600
-  // Add the dictionary scheme we use as local, so that the file:// links would
-  // work in the articles. The function was introduced in Qt 4.6.
-  QWebSecurityOrigin::addLocalScheme( "gdlookup" );
-#endif
-
   MainWindow m( cfg );
 
   app.addDataCommiter( m );
@@ -556,17 +502,12 @@ int main( int argc, char ** argv )
   QObject::connect( &app, SIGNAL(messageReceived(const QString&)),
     &m, SLOT(messageFromAnotherInstanceReceived(const QString&)));
 
-  if( gdcl.needToggleScanPopup() )
-    m.toggleScanPopup();
-
-  if( gdcl.needSetGroup() )
-    m.setGroupByName( gdcl.getGroupName(), true );
-
-  if( gdcl.needSetPopupGroup() )
-    m.setGroupByName( gdcl.getPopupGroupName(), false );
-
-  if( gdcl.needTranslateWord() )
-    m.wordReceived( gdcl.wordToTranslate() );
+  QObject::connect( &m, &MainWindow::startupReady, &m, [&] {
+    if( gdcl.needToggleScanPopup() ) m.toggleScanPopup();
+    if( gdcl.needSetGroup() ) m.setGroupByName( gdcl.getGroupName(), true );
+    if( gdcl.needSetPopupGroup() ) m.setGroupByName( gdcl.getPopupGroupName(), false );
+    if( gdcl.needTranslateWord() ) m.wordReceived( gdcl.wordToTranslate() );
+  } );
 
   int r = app.exec();
 

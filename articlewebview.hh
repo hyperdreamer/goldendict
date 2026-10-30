@@ -1,65 +1,86 @@
-/* This file is (c) 2008-2012 Konstantin Isakov <ikm@goldendict.org>
- * Part of GoldenDict. Licensed under GPLv3 or later, see the LICENSE file */
+/* Part of GoldenDict. Licensed under GPLv3 or later, see LICENSE. */
+#ifndef GOLDENDICT_ARTICLEWEBVIEW_HH_INCLUDED
+#define GOLDENDICT_ARTICLEWEBVIEW_HH_INCLUDED
 
-#ifndef __ARTICLEWEBVIEW_HH_INCLUDED__
-#define __ARTICLEWEBVIEW_HH_INCLUDED__
+#include <QPointer>
+#include <QWebEnginePage>
+#include <QWebEngineView>
+#include "articleurls.hh"
 
-#include <QWebView>
-#include "config.hh"
-
+class ArticleBridge;
 class ArticleInspector;
+class QContextMenuEvent;
+class QMouseEvent;
+namespace Config { struct Class; }
 
-/// A thin wrapper around QWebView to accommodate to some ArticleView's needs.
-/// Currently the only added features:
-/// 1. Ability to know if the middle mouse button is pressed or not according
-///    to the view's current state. This is used to open links in new tabs when
-///    they are clicked with middle button. There's also an added possibility to
-///    get double-click events after the fact with the doubleClicked() signal.
-/// 2. Manage our own QWebInspector instance. In order to show inspector correctly,
-///    use triggerPageAction( QWebPage::InspectElement ) instead.
-class ArticleWebView: public QWebView
+class ArticleWebPage : public QWebEnginePage
 {
   Q_OBJECT
-
 public:
-
-  ArticleWebView( QWidget * parent );
-  ~ArticleWebView();
-
-  void setUp( Config::Class * cfg );
-
-  bool isMidButtonPressed() const
-  { return midButtonPressed; }
-  void setSelectionBySingleClick( bool set )
-  { selectionBySingleClick = set; }
-
-  void triggerPageAction( QWebPage::WebAction action, bool checked = false );
-
+  ArticleWebPage( QWebEngineProfile * profile, QObject * parent = nullptr );
+  ~ArticleWebPage() override;
 signals:
-
-  /// Signals that the user has just double-clicked. The signal is delivered
-  /// after the event was processed by the view -- that's the difference from
-  /// installing an event filter. This is used for translating the double-clicked
-  /// word, which gets selected by the view in response to double-click.
-  void doubleClicked( QPoint pos );
-
+  void userLink( QUrl const & url, bool newTab );
+  void navigationRequested( QUrl const & url, NavigationKind kind );
 protected:
-
-  bool event( QEvent * event );
-  void mousePressEvent( QMouseEvent * event );
-  void mouseReleaseEvent( QMouseEvent * event );
-  void mouseDoubleClickEvent( QMouseEvent * event );
-  void focusInEvent( QFocusEvent * event );
-  void wheelEvent( QWheelEvent * event );
-
+  bool acceptNavigationRequest( QUrl const & url, NavigationType type, bool isMainFrame ) override;
+  QWebEnginePage * createWindow( WebWindowType type ) override;
 private:
-
-  Config::Class * cfg;
-  ArticleInspector * inspector;
-
-  bool midButtonPressed;
-  bool selectionBySingleClick;
-  bool showInspectorDirectly;
+  friend class ArticleWebView;
+  friend class ArticleBridgeTest;
+  bool navigationPermit = true, controlledNavigation = false;
 };
 
+/// Owns its configured page and bridge; borrows the controller's shared profile.
+class ArticleWebView : public QWebEngineView
+{
+  Q_OBJECT
+public:
+  explicit ArticleWebView( QWidget * parent = nullptr );
+  ~ArticleWebView() override;
+  void configure( QWebEngineProfile * profile, Config::Class * config );
+  void setSelectionBySingleClick( bool enabled );
+  bool isMidButtonPressed() const noexcept;
+  QString selectedText() const { return selection; }
+  bool hasSelection() const { return !selection.isEmpty(); }
+  void triggerPageAction( QWebEnginePage::WebAction action, bool checked = false );
+  // Controlled entry points install the next generation before asking Chromium
+  // to navigate. The ArticleView history coordinator can capture state first.
+  void load( QUrl const & url );
+  void navigate( QUrl const & url, NavigationKind kind );
+  void setHtml( QString const & html, QUrl const & baseUrl = QUrl() );
+signals:
+  void doubleClicked( QPoint position, Qt::KeyboardModifiers modifiers );
+  void userLink( QUrl const & url, bool newTab );
+  void navigationRequested( QUrl const & url, NavigationKind kind );
+protected:
+  bool event( QEvent * event ) override;
+  bool eventFilter( QObject * watched, QEvent * event ) override;
+  void focusInEvent( QFocusEvent * event ) override;
+  void wheelEvent( QWheelEvent * event ) override;
+  void contextMenuEvent( QContextMenuEvent * event ) override;
+private:
+  friend class ArticleBridge;
+  friend class ArticleWebPage;
+  friend class ArticleView;
+  friend class ArticleBridgeTest;
+  QPointer<ArticleWebPage> ownedPage;
+  QPointer<ArticleBridge> bridge;
+  QPointer<ArticleInspector> inspector;
+  Config::Class * config = nullptr;
+  bool midButtonPressed = false, selectionBySingleClick = false, navigated = false;
+  bool syntheticClick = false, selectionReady = false;
+  QString selection;
+  QPointer<ArticleWebPage> inputPage;
+  int inputGeneration = 0;
+  QPoint pressPosition;
+  Qt::KeyboardModifiers pressModifiers = Qt::NoModifier;
+  Qt::MouseButton pressButton = Qt::NoButton;
+  bool dragging = false, doubleClick = false;
+  void queueLookup( QPoint const &, Qt::KeyboardModifiers );
+  void installPage( QWebEngineProfile * profile );
+  void recreatePage( ArticleBridge * exhausted );
+  bool prepareNavigation();
+  void watchChildren( QObject * object );
+};
 #endif

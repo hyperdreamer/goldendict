@@ -1,0 +1,161 @@
+digraph qt6_migration_execution {
+  rankdir=LR;
+  node [shape=box, style=rounded, fontsize=10];
+  subgraph cluster_build {
+    label="build";
+    style=dashed;
+    T34 [label="T34\nSwitch the root application to the completed Qt6 source closure\n(Advanced)"];
+  }
+  subgraph cluster_codec {
+    label="codec";
+    style=dashed;
+    T2 [label="T2\nImplement immutable iconv Encoding with fixed scalar oracles\n(Capable)"];
+    T3 [label="T3\nCentralize link rules and establish the source-tagged regex ledger\n(Advanced)"];
+    T8 [label="T8\nMigrate all legacy encoding callers and the inline website resolver\n(Capable)"];
+    T9 [label="T9\nConvert dictionary parser regex families without index changes\n(Capable)"];
+    T10 [label="T10\nCarry FTS source syntax and compiled expressions through typed APIs\n(Advanced)"];
+  }
+  subgraph cluster_desktop {
+    label="desktop";
+    style=dashed;
+    T11 [label="T11\nAdd hotkey syntax, capability contracts and portable audio config migration\n(Advanced)"];
+    T12 [label="T12\nImplement platform-safe geometry, flags and activation helpers\n(Standard)"];
+    T13 [label="T13\nRetain X11 RECORD behind runtime platform checks\n(Advanced)"];
+    T30 [label="T30\nImplement deadline-bounded PortalRequest early-response correlation\n(Frontier)"];
+    T31 [label="T31\nValidate portal sessions and historical shortcut display before binding\n(Frontier)"];
+    T32 [label="T32\nComplete one-bind portal states, configuration and backend selection\n(Frontier)"];
+    T33 [label="T33\nIntegrate desktop consumers, startup readiness and shutdown in one owner\n(Capable)"];
+  }
+  subgraph cluster_mechanize {
+    label="mechanize";
+    style=dashed;
+    T5 [label="T5\nAdapt recursive locking, scalar utilities and fixed-width time APIs\n(Standard)"];
+    T6 [label="T6\nAdapt widget utilities and the compiled single-instance vendor closure\n(Advanced)"];
+    T7 [label="T7\nAdapt remaining non-parser engines and playback utilities\n(Standard)"];
+  }
+  subgraph cluster_tests {
+    label="tests";
+    style=dashed;
+    T1 [label="T1\nEstablish the test aggregate, environment guards and pure baseline\n(Advanced)"];
+    T15 [label="T15\nSupply deterministic dictionary readers, HTTP origins and private portal fixtures\n(Advanced)"];
+    T35 [label="T35\nProve the four root-gate probes and Qt6-only application audit\n(Capable)"];
+    T36 [label="T36\nDocument verified parity limits and the acceptance evidence format\n(Standard)"];
+    T37 [label="T37\nRun native Wayland and explicit X11 live parity acceptance\n(Advanced)"];
+    T38 [label="T38\nRun and record the complete migration gate\n(Capable)"];
+  }
+  subgraph cluster_webcore {
+    label="webcore";
+    style=dashed;
+    T4 [label="T4\nDefine URL, FTS and reader contracts and implement pure URL dispatch\n(Advanced)"];
+    T14 [label="T14\nRegister schemes and decouple ArticleNetworkAccessManager from WebKit\n(Capable)"];
+    T16 [label="T16\nImplement the thread-safe streaming device and real reader-failure boundaries\n(Capable)"];
+    T17 [label="T17\nPin Chromium Range semantics against real scheme jobs\n(Advanced)"];
+    T18 [label="T18\nOwn the shared profile, immutable page policy and network barriers\n(Capable)"];
+    T26 [label="T26\nProve page-local external content policy with complete real articles\n(Capable)"];
+  }
+  subgraph cluster_webview {
+    label="webview";
+    style=dashed;
+    T19 [label="T19\nEstablish generation-stamped bridge startup before document navigation\n(Frontier)"];
+    T20 [label="T20\nReinstrument native website frames across subsequent navigations\n(Frontier)"];
+    T22 [label="T22\nSwitch ArticleView to coordinated asynchronous document workflows\n(Frontier)"];
+    T23 [label="T23\nPreserve user-action dispatch, dictionary targeting and anchor precedence\n(Advanced)"];
+    T24 [label="T24\nRestore asynchronous selection, word hit testing and context menus\n(Capable)"];
+    T25 [label="T25\nImplement renderer find results and Unicode-safe FTS marks\n(Advanced)"];
+    T29 [label="T29\nIntegrate save, print, DevTools and explicit renderer teardown\n(Capable)"];
+  }
+  subgraph cluster_workflow {
+    label="workflow";
+    style=dashed;
+    T21 [label="T21\nModel indexed application history and bounded asynchronous state capture\n(Advanced)"];
+    T27 [label="T27\nPublish complete saves atomically and verify outgoing history on a real page\n(Capable)"];
+    T28 [label="T28\nBuild PDF snapshots with a Ready barrier and synchronous printer painting\n(Capable)"];
+  }
+  T1 -> T2;
+  T2 -> T3;
+  T1 -> T4;
+  T2 -> T4;
+  T1 -> T5;
+  T5 -> T6;
+  T6 -> T7;
+  T4 -> T7;
+  T3 -> T8;
+  T4 -> T8;
+  T5 -> T8;
+  T6 -> T8;
+  T8 -> T9;
+  T7 -> T9;
+  T9 -> T10;
+  T4 -> T10;
+  T1 -> T11;
+  T4 -> T11;
+  T6 -> T11;
+  T7 -> T11;
+  T8 -> T11;
+  T11 -> T12;
+  T12 -> T13;
+  T7 -> T13;
+  T4 -> T14;
+  T9 -> T14;
+  T10 -> T14;
+  T1 -> T15;
+  T4 -> T15;
+  T9 -> T15;
+  T11 -> T15;
+  T14 -> T15;
+  T15 -> T16;
+  T14 -> T16;
+  T5 -> T16;
+  T16 -> T17;
+  T17 -> T18;
+  T11 -> T18;
+  T18 -> T19;
+  T15 -> T19;
+  T10 -> T19;
+  T19 -> T20;
+  T8 -> T20;
+  T20 -> T21;
+  T4 -> T21;
+  T20 -> T22;
+  T21 -> T22;
+  T10 -> T22;
+  T13 -> T22;
+  T22 -> T23;
+  T17 -> T23;
+  T23 -> T24;
+  T24 -> T25;
+  T10 -> T25;
+  T18 -> T26;
+  T25 -> T26;
+  T21 -> T27;
+  T26 -> T27;
+  T27 -> T28;
+  T20 -> T28;
+  T25 -> T29;
+  T28 -> T29;
+  T26 -> T29;
+  T13 -> T30;
+  T15 -> T30;
+  T30 -> T31;
+  T31 -> T32;
+  T32 -> T33;
+  T29 -> T33;
+  T26 -> T33;
+  T10 -> T33;
+  T7 -> T34;
+  T10 -> T34;
+  T17 -> T34;
+  T26 -> T34;
+  T28 -> T34;
+  T29 -> T34;
+  T33 -> T34;
+  T15 -> T35;
+  T34 -> T35;
+  T35 -> T36;
+  T36 -> T37;
+  T37 -> T38;
+  T34 -> T38;
+  T28 -> T38;
+  T29 -> T38;
+  T33 -> T38;
+}

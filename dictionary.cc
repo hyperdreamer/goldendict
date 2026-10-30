@@ -4,6 +4,7 @@
 #include <vector>
 #include <algorithm>
 #include <cstdio>
+#include <limits>
 #include "dictionary.hh"
 
 #include <QCryptographicHash>
@@ -22,31 +23,26 @@
 
 #include <QImage>
 #include <QPainter>
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-#include <QRegularExpression>
-#else
-#include <QRegExp>
-#endif
+#include "wildcard.hh"
 
-#include "qt4x5.hh"
 #include "zipfile.hh"
 
 namespace Dictionary {
 
 bool Request::isFinished()
 {
-  return Qt4x5::AtomicInt::loadAcquire( isFinishedFlag );
+  return isFinishedFlag.loadAcquire();
 }
 
 void Request::update()
 {
-  if ( !Qt4x5::AtomicInt::loadAcquire( isFinishedFlag ) )
+  if ( !isFinishedFlag.loadAcquire() )
     emit updated();
 }
 
 void Request::finish()
 {
-  if ( !Qt4x5::AtomicInt::loadAcquire( isFinishedFlag ) )
+  if ( !isFinishedFlag.loadAcquire() )
   {
     isFinishedFlag.ref();
 
@@ -282,16 +278,10 @@ void Class::isolateCSS( QString & css, QString const & wrapperSelector )
   if( css.isEmpty() )
     return;
 
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-  QRegularExpression reg1( "\\/\\*(?:.(?!\\*\\/))*.?\\*\\/",
+  QRegularExpression const reg1 = Regex::validated( "\\/\\*(?:.(?!\\*\\/))*.?\\*\\/",
                            QRegularExpression::DotMatchesEverythingOption );
-  QRegularExpression reg2( "[ \\*\\>\\+,;:\\[\\{\\]]" );
-  QRegularExpression reg3( "[,;\\{]" );
-#else
-  QRegExp reg1( "\\/\\*(?:.(?!\\*\\/))*.?\\*\\/" );
-  QRegExp reg2( "[ \\*\\>\\+,;:\\[\\{\\]]" );
-  QRegExp reg3( "[,;\\{]" );
-#endif
+  QRegularExpression const reg2 = Regex::validated( "[ \\*\\>\\+,;:\\[\\{\\]]" );
+  QRegularExpression const reg3 = Regex::validated( "[,;\\{]" );
 
   int currentPos = 0;
   QString newCSS;
@@ -497,13 +487,19 @@ bool needToRebuildIndex( vector< string > const & dictionaryFiles,
       ZipFile::SplitZipFile zf( name );
       if( !zf.exists() )
         return true;
-      ts = zf.lastModified().toTime_t();
+      qint64 const seconds = zf.lastModified().toSecsSinceEpoch();
+      if( seconds < 0 || seconds > std::numeric_limits< quint32 >::max() )
+        return true;
+      ts = static_cast< quint32 >( seconds );
     }
     else
     {
       if ( !fileInfo.exists() )
         return true;
-      ts = fileInfo.lastModified().toTime_t();
+      qint64 const seconds = fileInfo.lastModified().toSecsSinceEpoch();
+      if( seconds < 0 || seconds > std::numeric_limits< quint32 >::max() )
+        return true;
+      ts = static_cast< quint32 >( seconds );
     }
 
     if ( ts > lastModified )
@@ -515,7 +511,10 @@ bool needToRebuildIndex( vector< string > const & dictionaryFiles,
   if ( !fileInfo.exists() )
     return true;
 
-  return fileInfo.lastModified().toTime_t() < lastModified;
+  qint64 const indexSeconds = fileInfo.lastModified().toSecsSinceEpoch();
+  if( indexSeconds < 0 || indexSeconds > std::numeric_limits< quint32 >::max() )
+    return true;
+  return static_cast< quint32 >( indexSeconds ) < lastModified;
 }
 
 QString generateRandomDictionaryId()

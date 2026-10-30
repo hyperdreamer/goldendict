@@ -3,26 +3,35 @@
 
 #include "broken_xrecord.hh"
 
-#include <QtGui>
+#include <QtGlobal>
 
 #ifdef HAVE_X11
+#include "platformwindow.hh"
 #include <X11/Xlib.h>
-#include <X11/extensions/record.h>
-#include <QX11Info>
+
+#include <cstring>
 #endif
 
 bool isRECORDBroken()
 {
 #ifdef HAVE_X11
 
- char const * vendor = ServerVendor( QX11Info::display() );
+  // The check asks the running session's server. A Wayland or offscreen session
+  // has no X11 display, and asking a null one would crash; there is no broken
+  // RECORD extension where there is no RECORD extension at all.
+  Display * const display = PlatformWindow::x11Display();
 
- if ( vendor && strstr( vendor, "X.Org" ) )
- {
-   int release = VendorRelease( QX11Info::display() );
+  if ( !display )
+    return false;
 
-   return release >= 10600000 && release < 10701000;
- }
+  char const * const vendor = ServerVendor( display );
+
+  if ( vendor && strstr( vendor, "X.Org" ) )
+  {
+    int const release = VendorRelease( display );
+
+    return release >= 10600000 && release < 10701000;
+  }
 
 #endif
 

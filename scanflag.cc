@@ -1,19 +1,14 @@
 #include <QCursor>
-#include <QDesktopWidget>
+#include <QScreen>
 
+#include "platformwindow.hh"
 #include "scanflag.hh"
 #include "ui_scanflag.h"
-
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 11, 0 )
-#include <QScreen>
-#endif
 
 static Qt::WindowFlags popupWindowFlags =
 
 Qt::ToolTip | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint
-#if QT_VERSION >= 0x050000
  | Qt::WindowDoesNotAcceptFocus
-#endif
 ;
 
 ScanFlag::ScanFlag(QWidget *parent) :
@@ -59,11 +54,19 @@ void ScanFlag::showScanFlag()
 
   QPoint currentPos = QCursor::pos();
 
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 11, 0 )
-  QRect const desktop = QGuiApplication::screenAt( currentPos )->geometry();
-#else
-  QRect const desktop = QApplication::desktop()->screenGeometry();
-#endif
+  // The screen under the cursor, as the platform reports it. A session without a
+  // screen cannot place anything: leave the window where it is instead of working
+  // with an empty rectangle.
+  QScreen * const screen = PlatformWindow::screenForPoint( currentPos );
+
+  if ( !screen )
+  {
+    show();
+    hideTimer.start();
+    return;
+  }
+
+  QRect const desktop = screen->geometry();
 
   QSize windowSize = geometry().size();
 

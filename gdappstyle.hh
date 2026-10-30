@@ -6,8 +6,6 @@
 
 #include <QtGlobal>
 
-#if QT_VERSION >= 0x040600
-
 #include <QStyle>
 #include <QProxyStyle>
 #include <QStyleOption>
@@ -29,7 +27,5 @@ private:
   bool dictionaryBarButton(const QWidget * widget) const;
 
 };
-
-#endif // QT_VERSION
 
 #endif // GDAPPSTYLE_HH

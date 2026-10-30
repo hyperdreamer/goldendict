@@ -5,6 +5,7 @@
 #include "wstring_qt.hh"
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
+#include <QUrl>
 #include <QtXml>
 #include <list>
 #include "audiolink.hh"
@@ -14,7 +15,6 @@
 #include "langcoder.hh"
 #include "utf8.hh"
 #include "gddebug.hh"
-#include "qt4x5.hh"
 
 namespace Forvo {
 
@@ -220,14 +220,17 @@ void ForvoArticleRequest::requestFinished( QNetworkReply * r )
     if ( netReply->error() == QNetworkReply::NoError )
     {
       QDomDocument dd;
-  
-      QString errorStr;
-      int errorLine, errorColumn;
-  
-      if ( !dd.setContent( netReply.get(), false, &errorStr, &errorLine, &errorColumn  ) )
+
+      // Qt 6 reports a DOM parse through ParseResult instead of out parameters.
+      QDomDocument::ParseResult const parsed =
+        dd.setContent( netReply.get(), QDomDocument::ParseOption::Default );
+
+      if ( !parsed )
       {
         setErrorString( QString( tr( "XML parse error: %1 at %2,%3" ).
-                                 arg( errorStr ).arg( errorLine ).arg( errorColumn ) ) );
+                                 arg( parsed.errorMessage ).
+                                 arg( parsed.errorLine ).
+                                 arg( parsed.errorColumn ) ) );
       }
       else
       {
@@ -249,7 +252,9 @@ void ForvoArticleRequest::requestFinished( QNetworkReply * r )
 
             articleBody += "<table class=\"forvo_play\">";
 
-            for( Qt4x5::Dom::size_type x = 0; x < nl.length(); ++x )
+            // QDomNodeList::length() counts in int, so the loop index keeps the
+            // concrete DOM count type and visits every node of the list.
+            for( int x = 0; x < nl.length(); ++x )
             {
               QDomElement item = nl.item( x ).toElement();
 
@@ -378,7 +383,7 @@ vector< sptr< Dictionary::Class > > makeDictionaries(
 
   if ( forvo.enable )
   {
-    QStringList codes = forvo.languageCodes.split( ',', Qt4x5::skipEmptyParts() );
+    QStringList codes = forvo.languageCodes.split( ',', Qt::SkipEmptyParts );
 
     QSet< QString > usedCodes;
 

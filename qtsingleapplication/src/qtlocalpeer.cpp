@@ -41,6 +41,7 @@
 
 #include "qtlocalpeer.h"
 #include <QCoreApplication>
+#include <QRegularExpression>
 #include <QTime>
 #include <QDataStream>
 
@@ -78,13 +79,15 @@ QtLocalPeer::QtLocalPeer(QObject* parent, const QString &appId)
 #endif
         prefix = id.section(QLatin1Char('/'), -1);
     }
-    prefix.remove(QRegExp("[^a-zA-Z]"));
+    const QRegularExpression expression(QStringLiteral("[^a-zA-Z]"));
+    Q_ASSERT(expression.isValid());
+    prefix.remove(expression);
     prefix.truncate(6);
 
     QByteArray idc = id.toUtf8();
-    quint16 idNum = qChecksum(idc.constData(), idc.size());
+    const auto checksum = qChecksum(QByteArrayView(idc), Qt::ChecksumIso3309);
     socketName = QLatin1String("qtsingleapp-") + prefix
-                 + QLatin1Char('-') + QString::number(idNum, 16);
+                 + QLatin1Char('-') + QString::number(checksum, 16);
 
 #if defined(Q_OS_WIN)
     if (!pProcessIdToSessionId) {
@@ -119,7 +122,7 @@ bool QtLocalPeer::isClient()
         return true;
 
     bool res = server->listen(socketName);
-#if defined(Q_OS_UNIX) && (QT_VERSION >= QT_VERSION_CHECK(4,5,0))
+#if defined(Q_OS_UNIX)
     // ### Workaround
     if (!res && server->serverError() == QAbstractSocket::AddressInUseError) {
         QFile::remove(QDir::cleanPath(QDir::tempPath())+QLatin1Char('/')+socketName);

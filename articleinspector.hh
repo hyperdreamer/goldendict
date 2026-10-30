@@ -1,37 +1,35 @@
 #ifndef ARTICLEINSPECTOR_HH
 #define ARTICLEINSPECTOR_HH
 
-#include <QtGlobal>
-
-#if QT_VERSION >= 0x040600
-
-#include <QWebInspector>
+#include <QPointer>
+#include <QWidget>
 #include <list>
 #include "config.hh"
 #include "ex.hh"
 
-class ArticleInspector : public QWebInspector
-{
-Q_OBJECT
+class QCloseEvent;
+class QShowEvent;
+class QWebEnginePage;
+class QWebEngineView;
 
+/// Owns the DevTools page; borrows the inspected page and its shared profile.
+class ArticleInspector : public QWidget
+{
+  Q_OBJECT
 public:
   DEF_EX( exInit, "Article inspector failed to init", std::exception )
-
-  explicit ArticleInspector( Config::Class * cfg,  QWidget* parent = 0 );
-  ~ArticleInspector();
-
+  explicit ArticleInspector( QWebEnginePage *, Config::Class *, QWidget * parent = nullptr );
+  ~ArticleInspector() override;
+  QWebEnginePage * page() const noexcept;
 public slots:
   void beforeClosed();
-
 protected:
-  void showEvent( QShowEvent *event );
-
+  void showEvent( QShowEvent * ) override;
+  void closeEvent( QCloseEvent * ) override;
 private:
   Config::Class * cfg;
-
-  static std::list< ArticleInspector * > openedInspectors;
+  QPointer<QWebEnginePage> inspectedPage, toolsPage;
+  void destroyPage();
+  static std::list<ArticleInspector *> openedInspectors;
 };
-
-#endif // QT_VERSION
-
-#endif // ARTICLEINSPECTOR_HH
+#endif

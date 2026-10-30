@@ -1,0 +1,27 @@
+/*
+ * GoldenDict article fixture stylesheet.
+ *
+ * Fixed oracles:
+ *   .gd-fixture-marker  the unique marker class rendered by #style-marker
+ *   a relative image    resolved against the document's own origin
+ *
+ * No external dependency: the only image reference is the sibling pixel.png, so
+ * the article scheme tests observe exactly one relative resource request.
+ */
+
+.gd-fixture-marker {
+  color: rgb(1, 2, 3);
+  font-weight: 700;
+}
+
+#bres-image {
+  display: block;
+  width: 1px;
+  height: 1px;
+  background-image: url(pixel.png);
+}
+
+#long-text {
+  max-height: 200px;
+  overflow: hidden;
+}

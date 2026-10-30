@@ -5,6 +5,8 @@
 
 #include <QDir>
 #include <QTextStream>
+#include <QStringConverter>
+#include <QRegularExpression>
 #include <QTextDocumentFragment>
 #include "gddebug.hh"
 #include "fsencoding.hh"
@@ -13,6 +15,18 @@
 #include "wstring_qt.hh"
 #include "folding.hh"
 #include "epwing_charmap.hh"
+
+namespace {
+/// The legacy branch of the old compatibility shim: the path is made absolute-ish
+/// hosted URL, which Qt6's setPath() no longer does on its own.
+inline QString ensureLeadingSlash( QString const & path )
+{
+  QLatin1Char const slash( '/' );
+  if ( path.startsWith( slash ) )
+    return path;
+  return slash + path;
+}
+} // namespace
 
 #if defined( Q_OS_WIN32 ) || defined( Q_OS_MAC )
 #define _FILE_OFFSET_BITS 64
@@ -151,9 +165,9 @@ EB_Error_Code hook_iso8859_1( EB_Book * book, EB_Appendix *, void * container,
                               EB_Hook_Code, int, const unsigned int * argv )
 {
   EpwingBook * ebook = static_cast< EpwingBook * >( container );
-  if( ebook->codecISO() )
+  if( ebook->codecISO().isValid() )
   {
-    QByteArray b = ebook->codecISO()->toUnicode( (const char *)argv, 1 ).toUtf8();
+    QByteArray b = ebook->codecISO().decode( QByteArray( (const char *)argv, 1 ) ).toUtf8();
     eb_write_text( book, b.data(), b.size() );
   }
   return EB_SUCCESS;
@@ -187,9 +201,9 @@ EB_Error_Code hook_narrow_jisx0208( EB_Book * book, EB_Appendix *,
     if( out_code == 0 )
     {
       EContainer * cont = static_cast< EContainer * >( container );
-      if( cont->book->codecEuc() )
+      if( cont->book->codecEuc().isValid() )
       {
-        QByteArray str = cont->book->codecEuc()->toUnicode( (const char *)buf, 2 ).toUtf8();
+        QByteArray str = cont->book->codecEuc().decode( QByteArray( (const char *)buf, 2 ) ).toUtf8();
         eb_write_text( book, str.data(), str.size() );
       }
       else
@@ -211,9 +225,9 @@ EB_Error_Code hook_wide_jisx0208( EB_Book * book, EB_Appendix *, void * ptr,
   buf[1] = *argv & 0xFF;
   buf[0] = ( *argv & 0xFF00 ) >> 8;
 
-  if( ebook->codecEuc() )
+  if( ebook->codecEuc().isValid() )
   {
-    QByteArray b = ebook->codecEuc()->toUnicode( buf, 2 ).toUtf8();
+    QByteArray b = ebook->codecEuc().decode( QByteArray( buf, 2 ) ).toUtf8();
     eb_write_text( book, b.data(), b.size() );
   }
   else
@@ -231,9 +245,9 @@ EB_Error_Code hook_gb2312( EB_Book * book, EB_Appendix *, void * container,
   buf[1] = *argv & 0xFF;
   buf[0] = ( *argv & 0xFF00 ) >> 8 ;
 
-  if( ebook->codecGB() )
+  if( ebook->codecGB().isValid() )
   {
-    QByteArray b = ebook->codecGB()->toUnicode( buf, 2 ).toUtf8();
+    QByteArray b = ebook->codecGB().decode( QByteArray( buf, 2 ) ).toUtf8();
     eb_write_text( book, b.data(), b.size() );
   }
   else
@@ -397,9 +411,9 @@ EB_Error_Code hook_reference( EB_Book * book, EB_Appendix *, void * container,
 EpwingBook::EpwingBook() :
   currentSubBook( -1 )
 {
-  codec_ISO = QTextCodec::codecForName( "ISO8859-1" );
-  codec_GB = QTextCodec::codecForName( "GB2312" );
-  codec_Euc = QTextCodec::codecForName("EUC-JP");
+  if( auto codec = Encoding::byName( QStringLiteral( "ISO8859-1" ) ) ) codec_ISO = *codec;
+  if( auto codec = Encoding::byName( QStringLiteral( "GB2312" ) ) ) codec_GB = *codec;
+  if( auto codec = Encoding::byName( QStringLiteral( "EUC-JP" ) ) ) codec_Euc = *codec;
 
   eb_initialize_book( &book );
   eb_initialize_appendix( &appendix );
@@ -420,10 +434,10 @@ EpwingBook::~EpwingBook()
 
 void EpwingBook::setErrorString( QString const & func, EB_Error_Code code )
 {
-  QTextCodec * const localeCodec = gdCodecForLocale();
+  const Encoding localeCodec = Encoding::forLocale();
   error_string = QString( "EB \"%1\" function error: %2 (%3)" )
-                 .arg( func, localeCodec->toUnicode( eb_error_string( code ) ),
-                       localeCodec->toUnicode( eb_error_message( code ) ) );
+                 .arg( func, localeCodec.decode( QByteArray( eb_error_string( code ) ) ),
+                       localeCodec.decode( QByteArray( eb_error_message( code ) ) ) );
 
   if( currentPosition.page != 0 )
     error_string += QString( " on page %1, offset %2" ).arg( QString::number( currentPosition.page ) )
@@ -493,9 +507,9 @@ int EpwingBook::setBook( string const & directory )
     setErrorString( "eb_appendix_subbook_list", ret );
   }
 
-  if( !codec_Euc
-      || ( book.character_code == EB_CHARCODE_ISO8859_1 && !codec_ISO )
-      || ( book.character_code == EB_CHARCODE_JISX0208_GB2312 && !codec_GB ) )
+  if( !codec_Euc.isValid()
+      || ( book.character_code == EB_CHARCODE_ISO8859_1 && !codec_ISO.isValid() )
+      || ( book.character_code == EB_CHARCODE_JISX0208_GB2312 && !codec_GB.isValid() ) )
     throw exEpwing( "No required codec to decode dictionary" );
 
   rootDir = FsEncoding::decode( directory.c_str() );
@@ -550,12 +564,12 @@ bool EpwingBook::setSubBook( int book_nom )
   if( f.open( QFile::ReadOnly | QFile::Text ) )
   {
     QTextStream ts( &f );
-    ts.setCodec( "UTF-8" );
+    ts.setEncoding( QStringConverter::Utf8 );
 
     QString line = ts.readLine();
     while( !line.isEmpty() )
     {
-      QStringList list = line.remove( '\n' ).split( ' ', Qt4x5::skipEmptyParts() );
+      QStringList list = line.remove( '\n' ).split( ' ', Qt::SkipEmptyParts );
       if( list.count() == 2 )
         customFontsMap[ list[ 0 ] ] = list[ 1 ];
       line = ts.readLine();
@@ -652,8 +666,8 @@ QString EpwingBook::title()
   }
 
   buf[ EB_MAX_TITLE_LENGTH ] = 0;
-  if( codec_Euc )
-    return codec_Euc->toUnicode( buf );
+  if( codec_Euc.isValid() )
+    return codec_Euc.decode( QByteArray( buf ) );
 
   return QString();
 }
@@ -853,7 +867,7 @@ bool EpwingBook::getNextHeadword( EpwingHeadword & head )
 {
   EB_Position pos;
 
-  QRegExp badLinks( "#(v|n)\\d" );
+  const auto & badLinks = detail::badLinksPattern();
 
   // At first we check references queue
   while( !LinksQueue.isEmpty() )
@@ -1017,15 +1031,14 @@ bool EpwingBook::isHeadwordCorrect( QString const & headword )
   if( headword.isEmpty() )
     return false;
 
-  if( book.character_code == EB_CHARCODE_ISO8859_1 && codec_ISO )
-    buf = codec_ISO->fromUnicode( headword );
+  if( book.character_code == EB_CHARCODE_ISO8859_1 )
+    buf = EncodingCallers::epwingSearchBytes( codec_ISO, headword );
   else
-  if( ( book.character_code == EB_CHARCODE_JISX0208 || book.character_code == EB_CHARCODE_JISX0208_GB2312 )
-      && codec_Euc )
-    buf = codec_Euc->fromUnicode( headword );
+  if( book.character_code == EB_CHARCODE_JISX0208 || book.character_code == EB_CHARCODE_JISX0208_GB2312 )
+    buf = EncodingCallers::epwingSearchBytes( codec_Euc, headword );
 
-  if( book.character_code == EB_CHARCODE_JISX0208_GB2312 && codec_GB )
-    buf2 = codec_GB->fromUnicode( headword );
+  if( book.character_code == EB_CHARCODE_JISX0208_GB2312 )
+    buf2 = EncodingCallers::epwingSearchBytes( codec_GB, headword );
 
   if( !buf.isEmpty() && eb_search_exactword( &book, buf.data() ) == EB_SUCCESS )
   {
@@ -1055,7 +1068,8 @@ void EpwingBook::fixHeadword( QString & headword )
     return;
 
   QString fixed = headword;
-  fixed.remove( QRegExp( "/[^/]+/", Qt::CaseSensitive ) );
+  const auto & pronunciation = detail::pronunciationPattern();
+  fixed.remove( pronunciation );
 
   if( isHeadwordCorrect( fixed ) )
   {
@@ -1229,8 +1243,8 @@ void EpwingBook::finalizeText( QString & text )
   // Replace references
 
   int pos = 0;
-  QRegExp reg1( "<R[^<]*>" );
-  QRegExp reg2( "</R[^<]*>" );
+  const auto & reg1 = detail::referenceOpenPattern();
+  const auto & reg2 = detail::referenceClosePattern();
 
   EContainer cont( this, true );
 
@@ -1238,9 +1252,10 @@ void EpwingBook::finalizeText( QString & text )
 
   for( int x = 0; x < refCloseCount; x++ )
   {
-    pos = text.indexOf( reg1, pos );
-    if( pos < 0 )
+    const auto opening = reg1.match( text, pos );
+    if( !opening.hasMatch() )
       break;
+    pos = opening.capturedStart();
 
     EB_Position ebpos;
     ebpos.page = refPages[ x ];
@@ -1261,18 +1276,20 @@ void EpwingBook::finalizeText( QString & text )
     {
       QString headword = QString::fromUtf8( buf, length );
       fixHeadword( headword );
-      url.setPath( Qt4x5::Url::ensureLeadingSlash( headword ) );
+      url.setPath( ensureLeadingSlash( headword ) );
     }
 
     QString link = "<a href=\"" + url.toEncoded() + "\">";
 
-    text.replace( reg1.cap(), link );
+    text.replace( pos, opening.capturedLength(), link );
+    pos += link.size();
 
-    pos = text.indexOf( reg2, pos );
-    if( pos < 0 )
+    const auto closing = reg2.match( text, pos );
+    if( !closing.hasMatch() )
       break;
-
-    text.replace( reg2.cap(), "</a>" );
+    pos = closing.capturedStart();
+    text.replace( pos, closing.capturedLength(), QStringLiteral( "</a>" ) );
+    pos += 4;
   }
 }
 
@@ -1322,7 +1339,7 @@ QByteArray EpwingBook::handleColorImage( EB_Hook_Code code,
   QUrl url;
   url.setScheme( "bres" );
   url.setHost( dictID );
-  url.setPath( Qt4x5::Url::ensureLeadingSlash( name ) );
+  url.setPath( ensureLeadingSlash( name ) );
   QByteArray urlStr = "<p class=\"epwing_image\"><img src=\"" + url.toEncoded()
                       + "\" alt=\"" + name.toUtf8() + "\"></p>";
 
@@ -1405,7 +1422,7 @@ QByteArray EpwingBook::handleMonoImage( EB_Hook_Code code,
   QUrl url;
   url.setScheme( "bres" );
   url.setHost( dictID );
-  url.setPath( Qt4x5::Url::ensureLeadingSlash( name ) );
+  url.setPath( ensureLeadingSlash( name ) );
   QByteArray urlStr = "<span class=\"epwing_image\"><img src=\"" + url.toEncoded()
                       + "\" alt=\"" + name.toUtf8() + "\"/></span>";
 
@@ -1478,7 +1495,7 @@ QByteArray EpwingBook::handleWave( EB_Hook_Code code, const unsigned int * argv 
   QUrl url;
   url.setScheme( "gdau" );
   url.setHost( dictID );
-  url.setPath( Qt4x5::Url::ensureLeadingSlash( name ) );
+  url.setPath( ensureLeadingSlash( name ) );
 
   string ref = string( "\"" )+ url.toEncoded().data() + "\"";
   QByteArray result = addAudioLink( ref , dictID.toUtf8().data() ).c_str();
@@ -1555,7 +1572,7 @@ QByteArray EpwingBook::handleMpeg( EB_Hook_Code code, const unsigned int * argv 
   QUrl url;
   url.setScheme( "gdvideo" );
   url.setHost( dictID );
-  url.setPath( Qt4x5::Url::ensureLeadingSlash( name ) );
+  url.setPath( ensureLeadingSlash( name ) );
 
   QByteArray result = QByteArray( "<span class=\"epwing_mpeg\"><a href=" ) + url.toEncoded() + ">";
 
@@ -1639,7 +1656,7 @@ QByteArray EpwingBook::handleNarrowFont( const unsigned int * argv,
   QUrl url;
   url.setScheme( "file" );
   url.setHost( "/");
-  url.setPath( Qt4x5::Url::ensureLeadingSlash( QDir::fromNativeSeparators( fullName ) ) );
+  url.setPath( ensureLeadingSlash( QDir::fromNativeSeparators( fullName ) ) );
 
   QByteArray link = "<img class=\"epwing_narrow_font\" src=\"" + url.toEncoded() + "\"/>";
 
@@ -1709,7 +1726,7 @@ QByteArray EpwingBook::handleWideFont( const unsigned int * argv,
   QUrl url;
   url.setScheme( "file" );
   url.setHost( "/");
-  url.setPath( Qt4x5::Url::ensureLeadingSlash( QDir::fromNativeSeparators( fullName ) ) );
+  url.setPath( ensureLeadingSlash( QDir::fromNativeSeparators( fullName ) ) );
 
   QByteArray link = "<img class=\"epwing_wide_font\" src=\"" + url.toEncoded() + "\"/>";
 
@@ -1784,15 +1801,14 @@ bool EpwingBook::getMatches( QString word, QVector< QString > & matches )
   EB_Hit hits[ HitsBufferSize ];
   int hitCount = 0;
 
-  if( book.character_code == EB_CHARCODE_ISO8859_1 && codec_ISO )
-    bword = codec_ISO->fromUnicode( word );
+  if( book.character_code == EB_CHARCODE_ISO8859_1 )
+    bword = EncodingCallers::epwingSearchBytes( codec_ISO, word );
   else
-  if( ( book.character_code == EB_CHARCODE_JISX0208 || book.character_code == EB_CHARCODE_JISX0208_GB2312 )
-      && codec_Euc )
-    bword = codec_Euc->fromUnicode( word );
+  if( book.character_code == EB_CHARCODE_JISX0208 || book.character_code == EB_CHARCODE_JISX0208_GB2312 )
+    bword = EncodingCallers::epwingSearchBytes( codec_Euc, word );
 
-  if( book.character_code == EB_CHARCODE_JISX0208_GB2312 && codec_GB )
-    bword2 = codec_GB->fromUnicode( word );
+  if( book.character_code == EB_CHARCODE_JISX0208_GB2312 )
+    bword2 = EncodingCallers::epwingSearchBytes( codec_GB, word );
 
   if( !bword.isEmpty() )
   {
@@ -1872,15 +1888,14 @@ bool EpwingBook::getArticlePos( QString word, QVector< int > & pages, QVector< i
   EB_Hit hits[ HitsBufferSize ];
   int hitCount = 0;
 
-  if( book.character_code == EB_CHARCODE_ISO8859_1 && codec_ISO )
-    bword = codec_ISO->fromUnicode( word );
+  if( book.character_code == EB_CHARCODE_ISO8859_1 )
+    bword = EncodingCallers::epwingSearchBytes( codec_ISO, word );
   else
-  if( ( book.character_code == EB_CHARCODE_JISX0208 || book.character_code == EB_CHARCODE_JISX0208_GB2312 )
-      && codec_Euc )
-    bword = codec_Euc->fromUnicode( word );
+  if( book.character_code == EB_CHARCODE_JISX0208 || book.character_code == EB_CHARCODE_JISX0208_GB2312 )
+    bword = EncodingCallers::epwingSearchBytes( codec_Euc, word );
 
-  if( book.character_code == EB_CHARCODE_JISX0208_GB2312 && codec_GB )
-    bword2 = codec_GB->fromUnicode( word );
+  if( book.character_code == EB_CHARCODE_JISX0208_GB2312 )
+    bword2 = EncodingCallers::epwingSearchBytes( codec_GB, word );
 
   if( !bword.isEmpty() )
   {

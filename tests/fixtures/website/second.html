@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<!--
+  GoldenDict remote-website fixture, second page.
+
+  Same oracles as first.html, deliberately different values so a test can tell
+  the two documents apart after a navigation:
+    * page marker     `#second-marker` (text `second page`)
+    * measured height `#height-target` is 240 CSS pixels tall (first page: 120)
+    * click target    `#second-click-target` links back to first.html
+    * relative image  `#relative-image` -> ./pixel.png
+    * fetch marker    `#fetch-marker` is filled by relative.js with
+                      `real-origin-fetch`
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>second page</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="website-marker">
+<h1 id="second-marker">second page</h1>
+<div id="height-target" style="height:240px; background:rgb(30,20,10);"></div>
+<p><a id="second-click-target" href="first.html">back to the first page</a></p>
+<p id="context-target">contextword</p>
+<p id="word-target">wordword</p>
+<p><img id="relative-image" src="pixel.png" alt="relative fixture image"></p>
+<p id="fetch-marker"></p>
+<script src="relative.js"></script>
+</body>
+</html>

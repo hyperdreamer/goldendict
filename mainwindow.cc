@@ -33,6 +33,9 @@
 #include <QPrintDialog>
 #include <QRunnable>
 #include <QThreadPool>
+#include <QNetworkProxy>
+#include <QNetworkProxyFactory>
+#include <QAuthenticator>
 #include <QSslConfiguration>
 
 #include <limits.h>
@@ -43,8 +46,18 @@
 #include "dictinfo.hh"
 #include "fsencoding.hh"
 #include "historypanewidget.hh"
-#include "qt4x5.hh"
-#include <QDesktopWidget>
+#include <QScreen>
+#include <QRegularExpression>
+#include <QUrlQuery>
+#include <QDBusPendingCallWatcher>
+#include <QDBusPendingReply>
+#include <QDBusVariant>
+#include "platformwindow.hh"
+#include "portalhotkeys.hh"
+#include "hotkeysyntax.hh"
+#include "articlewebview.hh"
+#include "savearticle.hh"
+#include "printpipeline.hh"
 #include "ui_authentication.h"
 
 #ifdef Q_OS_MAC
@@ -64,7 +77,6 @@
 #endif
 
 #ifdef X11_MAIN_WINDOW_FOCUS_WORKAROUNDS
-#include <QX11Info>
 #include <X11/Xlib.h>
 #include <fixx11h.h>
 #endif
@@ -172,10 +184,8 @@ MainWindow::MainWindow( Config::Class & cfg_ ):
 
   articleMaker.setCollapseParameters( cfg.preferences.collapseBigArticles, cfg.preferences.articleSizeLimit );
 
-#if QT_VERSION >= QT_VERSION_CHECK(4, 6, 0)
   // Set own gesture recognizers
   Gestures::registerRecognizers();
-#endif
 
   // use our own, custom statusbar
   setStatusBar(0);
@@ -465,9 +475,9 @@ MainWindow::MainWindow( Config::Class & cfg_ ):
 
   switchExpandModeAction.setShortcutContext( Qt::WidgetWithChildrenShortcut );
   switchExpandModeAction.setShortcuts( QList< QKeySequence >() <<
-                                       QKeySequence( Qt::CTRL + Qt::Key_8 ) <<
-                                       QKeySequence( Qt::CTRL + Qt::Key_Asterisk ) <<
-                                       QKeySequence( Qt::CTRL + Qt::SHIFT + Qt::Key_8 ) );
+                                       QKeySequence( Qt::CTRL | Qt::Key_8 ) <<
+                                       QKeySequence( Qt::CTRL | Qt::Key_Asterisk ) <<
+                                       QKeySequence( Qt::CTRL | Qt::SHIFT | Qt::Key_8 ) );
 
   connect( &switchExpandModeAction, SIGNAL( triggered() ),
            this, SLOT(switchExpandOptionalPartsMode() ) );
@@ -607,19 +617,13 @@ MainWindow::MainWindow( Config::Class & cfg_ ):
   connect( ui.menuHistory, SIGNAL( aboutToShow() ),
            this, SLOT( updateHistoryMenu() ) );
 
-#if !defined( HAVE_X11 ) || QT_VERSION < QT_VERSION_CHECK( 5, 0, 0 )
-  // Show tray icon early so the user would be happy. It won't be functional
-  // though until the program inits fully.
-  // Do not create dummy tray icon in X. Cause QT5 failed to upgrade systemtray context menu.
-  // And as result menu for some DEs apppear to be empty, for example in MATE DE.
-
-  if ( cfg.preferences.enableTrayIcon )
+  // X11 creates the tray icon with its final menu after initialization.
+  if ( QGuiApplication::platformName() != "xcb" && cfg.preferences.enableTrayIcon )
   {
     trayIcon = new QSystemTrayIcon( QIcon::fromTheme("goldendict-tray", QIcon( ":/icons/programicon_old.png" )), this );
     trayIcon->setToolTip( tr( "Loading..." ) );
     trayIcon->show();
   }
-#endif
 
   connect( navBack, SIGNAL( triggered() ),
            this, SLOT( backClicked() ) );
@@ -637,9 +641,7 @@ MainWindow::MainWindow( Config::Class & cfg_ ):
   ui.tabWidget->setCornerWidget( &addTab, Qt::TopLeftCorner );
   //ui.tabWidget->setCornerWidget( &closeTab, Qt::TopRightCorner );
 
-#if QT_VERSION >= 0x040500
   ui.tabWidget->setMovable( true );
-#endif
 
 #ifndef Q_OS_WIN32
   ui.tabWidget->setDocumentMode( true );
@@ -662,9 +664,7 @@ MainWindow::MainWindow( Config::Class & cfg_ ):
   connect( ui.tabWidget, SIGNAL( customContextMenuRequested(QPoint)) ,
            this, SLOT( tabMenuRequested(QPoint)) );
 
-#if QT_VERSION >= 0x040500
   ui.tabWidget->setTabsClosable( true );
-#endif
 
   connect( ui.quit, SIGNAL( triggered() ),
            this, SLOT( quitApp() ) );
@@ -686,11 +686,11 @@ MainWindow::MainWindow( Config::Class & cfg_ ):
   connect( ui.showReference, SIGNAL( triggered() ),
            this, SLOT( showGDHelp() ) );
 
-  connect( groupListInDock, SIGNAL( currentIndexChanged( QString const & ) ),
-           this, SLOT( currentGroupChanged( QString const & ) ) );
+  connect( groupListInDock, &QComboBox::currentTextChanged,
+           this, &MainWindow::currentGroupChanged );
 
-  connect( groupListInToolbar, SIGNAL( currentIndexChanged( QString const & ) ),
-           this, SLOT( currentGroupChanged( QString const & ) ) );
+  connect( groupListInToolbar, &QComboBox::currentTextChanged,
+           this, &MainWindow::currentGroupChanged );
 
   connect( ui.translateLine, SIGNAL( textChanged( QString const & ) ),
            this, SLOT( translateInputChanged( QString const & ) ) );
@@ -782,15 +782,12 @@ MainWindow::MainWindow( Config::Class & cfg_ ):
   ui.searchPane->setVisible( cfg.preferences.searchInDock );
 
   applyProxySettings();
-  applyWebSettings();
+  articleProfile = std::make_unique<ArticleProfileController>( cfg, articleNetMgr, this );
+  connect( articleProfile.get(), &ArticleProfileController::exitCachesReady,
+           this, [this]( bool ) { if( shuttingDown ) finishShutdown(); } );
 
   connect( &dictNetMgr, SIGNAL( proxyAuthenticationRequired( QNetworkProxy, QAuthenticator * ) ),
            this, SLOT( proxyAuthentication( QNetworkProxy, QAuthenticator * ) ) );
-
-  connect( &articleNetMgr, SIGNAL( proxyAuthenticationRequired( QNetworkProxy, QAuthenticator * ) ),
-           this, SLOT( proxyAuthentication( QNetworkProxy, QAuthenticator * ) ) );
-
-  setupNetworkCache( cfg.preferences.maxNetworkCacheSize );
 
   makeDictionaries();
 
@@ -814,19 +811,27 @@ MainWindow::MainWindow( Config::Class & cfg_ ):
   // Create tab list menu
   createTabList();
 
-  // Show the initial welcome text
-
+  // The constructor's controlled blank must finish before a welcome lookup or
+  // command-line request can replace it. pageLoaded includes the bridge barrier.
+  startupView = getCurrentArticleView();
+  startupDeadline.setSingleShot( true );
+  startupDeadline.setInterval( 20000 );
+  connect( &startupDeadline, &QTimer::timeout, this, [this] {
+    failStartup( tr( "The article renderer did not load its initial document and bridge." ) );
+  } );
+  startupDeadline.start();
+  if( auto web = startupView->findChild<ArticleWebView *>() )
   {
-    ArticleView *view = getCurrentArticleView();
-
-    history.enableAdd( false );
-
-    blockUpdateWindowTitle = true;
-
-    view->showDefinition( tr( "Welcome!" ), Instances::Group::HelpGroupId );
-
-    history.enableAdd( cfg.preferences.storeHistory );
+    connect( web, &QWebEngineView::loadFinished, this, [this]( bool ok ) {
+      if( !ok ) failStartup( tr( "The article renderer failed to load its initial document." ) );
+    } );
+    connect( web->page(), &QWebEnginePage::renderProcessTerminated, this,
+      [this]( QWebEnginePage::RenderProcessTerminationStatus, int code ) {
+        failStartup( tr( "The article renderer exited during startup (code %1)." ).arg( code ) );
+      } );
   }
+  else
+    QTimer::singleShot( 0, this, [this] { failStartup( tr( "The article renderer is missing." ) ); } );
 
   translateLine->setFocus();
 
@@ -915,10 +920,8 @@ MainWindow::MainWindow( Config::Class & cfg_ ):
   ( static_cast< QHotkeyApplication * >( qApp ) )->setMainWindow( this );
 #endif
 
-#if QT_VERSION >= QT_VERSION_CHECK(4, 6, 0)
   ui.centralWidget->grabGesture( Gestures::GDPinchGestureType );
   ui.centralWidget->grabGesture( Gestures::GDSwipeGestureType );
-#endif
 
   if( layoutDirection() == Qt::RightToLeft )
   {
@@ -1008,7 +1011,7 @@ void MainWindow::mousePressEvent( QMouseEvent *event)
     return;
   }
 
-  if( event->button() != Qt4x5::middleButton() )
+  if( event->button() != Qt::MiddleButton )
     return QMainWindow::mousePressEvent(event);
 
   // middle clicked
@@ -1025,6 +1028,9 @@ void MainWindow::mousePressEvent( QMouseEvent *event)
 
 MainWindow::~MainWindow()
 {
+  hotkeyBackend.reset();
+  startupDeadline.stop();
+  scanPopup.reset();
 #ifdef Q_OS_WIN
   if( isMaximized() )
   {
@@ -1042,22 +1048,11 @@ MainWindow::~MainWindow()
 
   ftsIndexing.stopIndexing();
 
-#if QT_VERSION >= QT_VERSION_CHECK(4, 6, 0)
   ui.centralWidget->ungrabGesture( Gestures::GDPinchGestureType );
   ui.centralWidget->ungrabGesture( Gestures::GDSwipeGestureType );
-//  Gestures::unregisterRecognizers();
-#endif
 
-  // Close all tabs -- they should be destroyed before network managers
-  // do.
-  while( ui.tabWidget->count() )
-  {
-    QWidget * w = ui.tabWidget->widget( 0 );
-
-    ui.tabWidget->removeTab( 0 );
-
-    delete w;
-  }
+  destroyArticleViews();
+  articleProfile.reset();
 
 #ifndef NO_EPWING_SUPPORT
   Epwing::finalize();
@@ -1100,14 +1095,11 @@ void MainWindow::removeGroupComboBoxActionsFromDialog( QDialog * dialog, GroupCo
 
 void MainWindow::commitData( QSessionManager & )
 {
-  commitData();
+  quitApp();
 }
 
 void MainWindow::commitData()
 {
-  if( cfg.preferences.clearNetworkCacheOnExit )
-    if( QAbstractNetworkCache * cache = articleNetMgr.cache() )
-      cache->clear();
 
   try
   {
@@ -1229,11 +1221,7 @@ void MainWindow::wheelEvent( QWheelEvent *ev )
 {
   if ( ev->modifiers().testFlag( Qt::ControlModifier ) )
   {
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
     int const delta = ev->angleDelta().y();
-#else
-    int const delta = ev->delta();
-#endif
     if ( delta > 0 )
     {
         zoomin();
@@ -1252,35 +1240,83 @@ void MainWindow::wheelEvent( QWheelEvent *ev )
 
 void MainWindow::closeEvent( QCloseEvent * ev )
 {
+  if( shuttingDown ) { ev->ignore(); return; }
   if ( cfg.preferences.enableTrayIcon && cfg.preferences.closeToTray )
   {
     if( !cfg.preferences.searchInDock )
       translateBox->setPopupEnabled( false );
 
-#ifdef HAVE_X11
-    // Don't ignore the close event, because doing so cancels session logout if
-    // the main window is visible when the user attempts to log out.
-    // The main window will be only hidden, because QApplication::quitOnLastWindowClosed
-    // property is false and Qt::WA_DeleteOnClose widget attribute is not set.
-    Q_ASSERT(!QApplication::quitOnLastWindowClosed());
-    Q_ASSERT(!testAttribute(Qt::WA_DeleteOnClose));
-#else
-    // Ignore the close event because closing the main window breaks global hotkeys on Windows.
     ev->ignore();
     hide();
-#endif
   }
   else
   {
-    ev->accept();
+    ev->ignore();
     quitApp();
   }
 }
 
 void MainWindow::quitApp()
 {
+  if( shuttingDown ) return;
+  shuttingDown = true;
+  startupDeadline.stop();
   commitData();
+  // Keep a visible disabled window while the asynchronous cache barrier runs.
+  show();
+  setEnabled( false );
+  newReleaseCheckTimer.stop();
+  wordFinder.cancel();
+  hotkeyBackend.reset();
+  scanPopup.reset();
+  closeHeadwordsDialog();
+  closeFullTextSearchDialog();
+  closeGDHelp();
+  ftsIndexing.stopIndexing();
+  for( auto save : findChildren<SaveArticle *>() ) save->cancel();
+  for( auto print : findChildren<PrintPipeline *>() ) print->cancel();
+  if( articleProfile && cfg.preferences.clearNetworkCacheOnExit ) articleProfile->clearForExit();
+  else finishShutdown();
+}
+
+void MainWindow::destroyArticleViews()
+{
+  QSignalBlocker blocker( ui.tabWidget );
+  while( ui.tabWidget->count() )
+  {
+    QWidget * view = ui.tabWidget->widget( 0 );
+    ui.tabWidget->removeTab( 0 );
+    delete view;
+  }
+  mruList.clear();
+}
+
+void MainWindow::finishShutdown()
+{
+  if( shutdownComplete ) return;
+  shutdownComplete = true;
+  scanPopup.reset();
+  destroyArticleViews();
   qApp->quit();
+}
+
+void MainWindow::failStartup( QString const & reason )
+{
+  if( startupComplete || startupFailed || shuttingDown ) return;
+  startupFailed = true;
+  startupDeadline.stop();
+  qCritical().noquote() << "Startup failed:" << reason;
+  auto dialog = new QMessageBox( QMessageBox::Critical, tr( "GoldenDict startup failed" ), reason,
+                                 QMessageBox::Close, this );
+  dialog->setAttribute( Qt::WA_DeleteOnClose );
+  connect( dialog, &QDialog::finished, this, [this] {
+    shuttingDown = true;
+    hotkeyBackend.reset();
+    scanPopup.reset();
+    destroyArticleViews();
+    QCoreApplication::exit( 1 );
+  } );
+  dialog->open();
 }
 
 void MainWindow::applyProxySettings()
@@ -1288,6 +1324,7 @@ void MainWindow::applyProxySettings()
   if( cfg.preferences.proxyServer.enabled && cfg.preferences.proxyServer.useSystemProxy )
   {
     QList<QNetworkProxy> proxies = QNetworkProxyFactory::systemProxyForQuery();
+    if( proxies.isEmpty() ) proxies.append( QNetworkProxy( QNetworkProxy::NoProxy ) );
     if( !cfg.preferences.proxyServer.systemProxyUser.isEmpty() )
     {
       proxies.first().setUser( cfg.preferences.proxyServer.systemProxyUser );
@@ -1333,40 +1370,6 @@ void MainWindow::applyProxySettings()
   }
 
   QNetworkProxy::setApplicationProxy( proxy );
-}
-
-void MainWindow::applyWebSettings()
-{
-  QWebSettings *defaultSettings = QWebSettings::globalSettings();
-  defaultSettings->setAttribute(QWebSettings::PluginsEnabled, cfg.preferences.enableWebPlugins);
-  defaultSettings->setAttribute( QWebSettings::DeveloperExtrasEnabled, true );
-}
-
-void MainWindow::setupNetworkCache( int maxSize )
-{
-  // x << 20 == x * 2^20 converts mebibytes to bytes.
-  qint64 const maxCacheSizeInBytes = maxSize <= 0 ? qint64( 0 ) : static_cast< qint64 >( maxSize ) << 20;
-
-  if( QAbstractNetworkCache * abstractCache = articleNetMgr.cache() )
-  {
-    QNetworkDiskCache * const diskCache = qobject_cast< QNetworkDiskCache * >( abstractCache );
-    Q_ASSERT_X( diskCache, Q_FUNC_INFO, "Unexpected network cache type." );
-    diskCache->setMaximumCacheSize( maxCacheSizeInBytes );
-    return;
-  }
-  if( maxCacheSizeInBytes == 0 )
-    return; // There is currently no cache and it is not needed.
-
-  QString const cacheDirectory = Config::getNetworkCacheDir();
-  if( !QDir().mkpath( cacheDirectory ) )
-  {
-    gdWarning( "Cannot create a cache directory %s. Disabling network cache.", cacheDirectory.toUtf8().constData() );
-    return;
-  }
-  QNetworkDiskCache * const diskCache = new QNetworkDiskCache( this );
-  diskCache->setMaximumCacheSize( maxCacheSizeInBytes );
-  diskCache->setCacheDirectory( cacheDirectory );
-  articleNetMgr.setCache( diskCache );
 }
 
 void MainWindow::makeDictionaries()
@@ -1421,8 +1424,8 @@ void MainWindow::updateGroupList()
 
   // currentIndexChanged() signal is very trigger-happy. To avoid triggering
   // it, we disconnect it while we're clearing and filling back groups.
-  disconnect( groupList, SIGNAL( currentIndexChanged( QString const & ) ),
-              this, SLOT( currentGroupChanged( QString const & ) ) );
+  disconnect( groupList, &QComboBox::currentTextChanged,
+              this, &MainWindow::currentGroupChanged );
 
   groupInstances.clear();
 
@@ -1467,8 +1470,8 @@ void MainWindow::updateGroupList()
     view.reload();
   }
 
-  connect( groupList, SIGNAL( currentIndexChanged( QString const & ) ),
-           this, SLOT( currentGroupChanged( QString const & ) ) );
+  connect( groupList, &QComboBox::currentTextChanged,
+           this, &MainWindow::currentGroupChanged );
 }
 
 void MainWindow::updateDictionaryBar()
@@ -1506,7 +1509,7 @@ void MainWindow::makeScanPopup()
        !cfg.preferences.enableClipboardHotkey )
     return;
 
-  scanPopup = new ScanPopup( 0, cfg, articleNetMgr, audioPlayerFactory.player(),
+  scanPopup = new ScanPopup( 0, cfg, *articleProfile->profile(), articleNetMgr, audioPlayerFactory.player(),
                              dictionaries, groupInstances, history );
 
   scanPopup->setStyleSheet( styleSheet() );
@@ -1663,7 +1666,8 @@ void MainWindow::addNewTab()
 ArticleView * MainWindow::createNewTab( bool switchToIt,
                                         QString const & name )
 {
-  ArticleView * view = new ArticleView( this, articleNetMgr, audioPlayerFactory.player(),
+  if( shuttingDown ) return nullptr;
+  ArticleView * view = new ArticleView( this, *articleProfile->profile(), articleNetMgr, audioPlayerFactory.player(),
                                         dictionaries, groupInstances, false, cfg,
                                         *ui.searchInPageAction,
                                         dictionaryBar.toggleViewAction(),
@@ -1675,6 +1679,12 @@ ArticleView * MainWindow::createNewTab( bool switchToIt,
   connect( view, SIGNAL( iconChanged( ArticleView *, QIcon const & ) ),
            this, SLOT( iconChanged( ArticleView *, QIcon const & ) ) );
 
+  connect( view, &ArticleView::articlesChanged, this, [this, view] {
+    if( !shuttingDown && view == getCurrentArticleView() ) updateFoundInDictsList();
+  } );
+  connect( view, &ArticleView::soundAvailabilityChanged, this, [this, view] {
+    if( !shuttingDown && view == getCurrentArticleView() ) updatePronounceAvailability();
+  } );
   connect( view, SIGNAL( pageLoaded( ArticleView * ) ),
            this, SLOT( pageLoaded( ArticleView * ) ) );
 
@@ -1767,7 +1777,6 @@ void MainWindow::tabCloseRequested( int x )
   // if everything is closed, add a new tab
   addNewTab();
 
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
   QWidget const * const focused = focusWidget();
   if( !focused || focused == ui.tabWidget->tabBar() )
   {
@@ -1778,7 +1787,6 @@ void MainWindow::tabCloseRequested( int x )
     Q_ASSERT( getCurrentArticleView() );
     getCurrentArticleView()->focus();
   }
-#endif
 }
 
 void MainWindow::closeCurrentTab()
@@ -1927,6 +1935,28 @@ void MainWindow::updateWindowTitle()
 
 void MainWindow::pageLoaded( ArticleView * view )
 {
+  if( shuttingDown || startupFailed ) return;
+  if( !startupComplete && !startupFailed && view == startupView )
+  {
+    auto web = view->findChild<ArticleWebView *>();
+    if( !web || QUrlQuery( web->url() ).queryItemValue( "blank" ) != "1" )
+    { failStartup( tr( "The startup document was replaced before readiness." ) ); return; }
+    startupComplete = true;
+    startupDeadline.stop();
+    qInfo().noquote() << QString( "startup-ready platform=%1 backend=%2" )
+      .arg( QGuiApplication::platformName(), hotkeyBackendName );
+    QPointer<ArticleView> initialView = view;
+    QTimer::singleShot( 0, this, [this, initialView] {
+      if( shuttingDown || !initialView ) return;
+      history.enableAdd( false );
+      blockUpdateWindowTitle = true;
+      initialView->showDefinition( tr( "Welcome!" ), Instances::Group::HelpGroupId );
+      history.enableAdd( cfg.preferences.storeHistory );
+      emit startupReady();
+      auto const messages = std::exchange( pendingMessages, {} );
+      for( auto const & message : messages ) messageFromAnotherInstanceReceived( message );
+    } );
+  }
   if( view != getCurrentArticleView() )
     return; // It was background action
 
@@ -2092,7 +2122,8 @@ void MainWindow::updatePronounceAvailability()
 
 void MainWindow::editDictionaries( unsigned editDictionaryGroup )
 {
-  hotkeyWrapper.reset(); // No hotkeys while we're editing dictionaries
+  if( shuttingDown ) return;
+  hotkeyBackend.reset(); // Retire shortcuts while dictionaries are being changed.
   scanPopup.reset(); // No scan popup either. No one should use dictionaries.
   closeHeadwordsDialog();
   closeFullTextSearchDialog();
@@ -2172,7 +2203,8 @@ void MainWindow::editCurrentGroup()
 
 void MainWindow::editPreferences()
 {
-  hotkeyWrapper.reset(); // So we could use the keys it hooks
+  if( shuttingDown ) return;
+  // Keep the portal session live for ConfigureShortcuts.
   scanPopup.reset(); // No scan popup either. No one should use dictionaries.
   closeHeadwordsDialog();
   closeFullTextSearchDialog();
@@ -2181,12 +2213,21 @@ void MainWindow::editPreferences()
   ftsIndexing.clearDictionaries();
 
   Preferences preferences( this, cfg );
+  preferencesDialog = &preferences;
+  refreshHotkeyStatus();
+  connect( &preferences, &Preferences::closeMainHelpRequested, this, &MainWindow::closeGDHelp );
+  connect( &preferences, &Preferences::configureShortcutsRequested, this, [this] {
+    if( hotkeyBackend && configureHotkeysAvailable ) hotkeyBackend->configure( {} );
+  } );
 
   hideGDHelp();
 
   preferences.show();
 
-  if ( preferences.exec() == QDialog::Accepted )
+  int const result = preferences.exec();
+  preferencesDialog = nullptr;
+  if( shuttingDown ) return;
+  if( result == QDialog::Accepted )
   {
     Config::Preferences p = preferences.getPreferences();
 
@@ -2197,9 +2238,8 @@ void MainWindow::editPreferences()
     p.hideMenubar = cfg.preferences.hideMenubar;
     p.searchInDock = cfg.preferences.searchInDock;
     p.alwaysOnTop = cfg.preferences.alwaysOnTop;
-#ifndef Q_WS_X11
-    p.trackClipboardChanges = cfg.preferences.trackClipboardChanges;
-#endif
+    if( QGuiApplication::platformName() != "xcb" )
+      p.trackClipboardChanges = cfg.preferences.trackClipboardChanges;
     p.proxyServer.systemProxyUser = cfg.preferences.proxyServer.systemProxyUser;
     p.proxyServer.systemProxyPassword = cfg.preferences.proxyServer.systemProxyPassword;
 
@@ -2258,8 +2298,6 @@ void MainWindow::editPreferences()
     if( cfg.preferences.favoritesStoreInterval != p.favoritesStoreInterval )
       ui.favoritesPaneWidget->setSaveInterval( p.favoritesStoreInterval );
 
-    if( cfg.preferences.maxNetworkCacheSize != p.maxNetworkCacheSize )
-      setupNetworkCache( p.maxNetworkCacheSize );
     cfg.preferences = p;
 
     audioPlayerFactory.setPreferences( cfg.preferences );
@@ -2273,7 +2311,7 @@ void MainWindow::editPreferences()
 
     updateTrayIcon();
     applyProxySettings();
-    applyWebSettings();
+    articleProfile->applyPreferences();
 
     ui.tabWidget->setHideSingleTab(cfg.preferences.hideSingleTab);
 
@@ -3001,7 +3039,7 @@ void MainWindow::showTranslationFor( QString const & word )
 
 void MainWindow::showTranslationFor( QString const & inWord,
                                      QStringList const & dictIDs,
-                                     QRegExp const & searchRegExp,
+                                     FtsHighlightSpec const & searchRegExp,
                                      bool ignoreDiacritics )
 {
   ArticleView *view = getCurrentArticleView();
@@ -3029,7 +3067,7 @@ void MainWindow::toggleMainWindow( bool onlyShow )
     show();
 
 #ifdef Q_OS_WIN32
-    if( !!( hotkeyWrapper ) && hotkeyWrapper->handleViaDLL() )
+    if( hotkeyBackend && hotkeyBackend->isSupported() )
     {
       // Some dances with tambourine
       HWND wId = (HWND) winId();
@@ -3066,7 +3104,7 @@ void MainWindow::toggleMainWindow( bool onlyShow )
   {
     qApp->setActiveWindow( this );
 #ifdef Q_OS_WIN32
-    if( !!( hotkeyWrapper ) && hotkeyWrapper->handleViaDLL() )
+    if( hotkeyBackend && hotkeyBackend->isSupported() )
     {
       // Some dances with tambourine
       HWND wId = (HWND) winId();
@@ -3123,9 +3161,11 @@ void MainWindow::toggleMainWindow( bool onlyShow )
 #ifdef X11_MAIN_WINDOW_FOCUS_WORKAROUNDS
 void MainWindow::forceX11Focus()
 {
+  auto display = PlatformWindow::x11Display();
+  if( !display ) return;
   Window wh = 0;
   int rev = 0;
-  XGetInputFocus( QX11Info::display(), &wh, &rev );
+  XGetInputFocus( display, &wh, &rev );
   if( wh != internalWinId() )
   {
     QPoint const pointRelativeToRoot = mapToGlobal( QPoint( 0, 0 ) );
@@ -3137,63 +3177,114 @@ void MainWindow::forceX11Focus()
     event.xbutton.x_root = pointRelativeToRoot.x();
     event.xbutton.y_root = pointRelativeToRoot.y();
     event.xbutton.window = internalWinId();
-    event.xbutton.root = QX11Info::appRootWindow( QX11Info::appScreen() );
+    event.xbutton.root = DefaultRootWindow( display );
     event.xbutton.state = Button1Mask;
     event.xbutton.button = Button1;
     event.xbutton.same_screen = true;
     event.xbutton.time = CurrentTime;
 
-    XSendEvent( QX11Info::display(), internalWinId(), true, 0xfff, &event );
-    XFlush( QX11Info::display() );
+    XSendEvent( display, internalWinId(), true, 0xfff, &event );
+    XFlush( display );
     event.type = ButtonRelease;
-    XSendEvent( QX11Info::display(), internalWinId(), true, 0xfff, &event );
-    XFlush( QX11Info::display() );
+    XSendEvent( display, internalWinId(), true, 0xfff, &event );
+    XFlush( display );
   }
 }
 #endif
 
 void MainWindow::installHotKeys()
 {
-  hotkeyWrapper.reset(); // Remove the old one
-
-  if ( cfg.preferences.enableMainWindowHotkey ||
-       cfg.preferences.enableClipboardHotkey )
+  if( shuttingDown ) return;
+  auto const platform = QGuiApplication::platformName();
+  bool const portal = platform.startsWith( QLatin1String( "wayland" ) );
+  QVector<HotkeyBinding> desired;
+  auto add = [&]( bool enabled, QString const & id, QString const & description, Config::HotKey const & key ) {
+    if( !enabled ) return;
+    QString sequence, reason;
+    if( portal )
+    {
+      Config::HotKey parsed = key;
+      if( key.rawText.isEmpty() || HotkeySyntax::parse( key.rawText, &parsed, &reason ) )
+        HotkeySyntax::preferredTrigger( parsed, &sequence, &reason );
+    }
+    else sequence = key.rawText.isEmpty() ? HotkeySyntax::serialize( key ) : key.rawText;
+    desired.append( {id, description, sequence} );
+  };
+  add( cfg.preferences.enableMainWindowHotkey, "main-window", tr( "Show or hide the main window" ), cfg.preferences.mainWindowHotkey );
+  add( cfg.preferences.enableClipboardHotkey, "clipboard-lookup", tr( "Translate clipboard text" ), cfg.preferences.clipboardHotkey );
+  if( hotkeyBackend && requestedHotkeys.size() == desired.size() )
   {
-    try
-    {
-      hotkeyWrapper = new HotkeyWrapper( this );
-    }
-    catch( HotkeyWrapper::exInit & )
-    {
-      QMessageBox::critical( this, "GoldenDict",
-        tr( "Failed to initialize hotkeys monitoring mechanism.<br>"
-            "Make sure your XServer has RECORD extension turned on." ) );
-
-      return;
-    }
-
-    if ( cfg.preferences.enableMainWindowHotkey )
-      hotkeyWrapper->setGlobalKey( cfg.preferences.mainWindowHotkey.key1,
-                                   cfg.preferences.mainWindowHotkey.key2,
-                                   cfg.preferences.mainWindowHotkey.modifiers,
-                                   0 );
-
-    if ( cfg.preferences.enableClipboardHotkey && scanPopup.get() )
-    {
-      hotkeyWrapper->setGlobalKey( cfg.preferences.clipboardHotkey.key1,
-                                   cfg.preferences.clipboardHotkey.key2,
-                                   cfg.preferences.clipboardHotkey.modifiers,
-                                   1 );
-    }
-
-    connect( hotkeyWrapper.get(), SIGNAL( hotkeyActivated( int ) ),
-             this, SLOT( hotKeyActivated( int ) ),
-#ifdef Q_OS_WIN32
-             hotkeyWrapper->handleViaDLL() ? Qt::QueuedConnection : Qt::AutoConnection );
-#else
-             Qt::AutoConnection );
-#endif
+    bool equal = true;
+    for( int i = 0; i < desired.size(); ++i )
+      equal = equal && desired[i].id == requestedHotkeys[i].id && desired[i].sequence == requestedHotkeys[i].sequence;
+    if( equal ) { refreshHotkeyStatus(); return; }
   }
+  requestedHotkeys = desired;
+  if( !hotkeyBackend )
+  {
+    hotkeyBackend = createHotkeyBackend( this );
+    hotkeyBackendName = portal ? "portal" : platform == "xcb" && hotkeyBackend->isSupported() ? "x11-record" : "unsupported";
+    connect( hotkeyBackend.get(), &HotkeyBackend::activated, this,
+      [this]( QString const & id, QString const & token ) {
+        if( shuttingDown ) return;
+        if( id == "main-window" )
+        {
+          PlatformWindow::applyActivation( this, token );
+          hotKeyActivated( 0 );
+        }
+        else if( id == "clipboard-lookup" && scanPopup )
+        {
+          PlatformWindow::applyActivation( scanPopup.get(), token );
+          hotKeyActivated( 1 );
+        }
+      } );
+    connect( hotkeyBackend.get(), &HotkeyBackend::bindingsChanged, this,
+      [this]( QVector<PortalBindingDisplay> const & values ) {
+        if( shuttingDown ) return;
+        reportedHotkeys = values;
+        if( QGuiApplication::platformName().startsWith( "wayland" ) ) cfg.hotkeys.portalBindings = values;
+        refreshHotkeyStatus();
+      } );
+    connect( hotkeyBackend.get(), &HotkeyBackend::stateChanged, this,
+      [this]( HotkeyBackend::State state, QString const & reason ) {
+        if( shuttingDown ) return;
+        hotkeyState = state; hotkeyExplanation = reason;
+        configureHotkeysAvailable = false;
+        quint64 const revision = ++hotkeyStatusRevision;
+        refreshHotkeyStatus();
+        if( QGuiApplication::platformName().startsWith( "wayland" ) &&
+            ( state == HotkeyBackend::State::Bound || state == HotkeyBackend::State::Partial ) )
+        {
+          auto call = QDBusMessage::createMethodCall( "org.freedesktop.portal.Desktop",
+            "/org/freedesktop/portal/desktop", "org.freedesktop.DBus.Properties", "Get" );
+          call << "org.freedesktop.portal.GlobalShortcuts" << "version";
+          auto watcher = new QDBusPendingCallWatcher( QDBusConnection::sessionBus().asyncCall( call, 5000 ), this );
+          connect( watcher, &QDBusPendingCallWatcher::finished, this, [this, revision]( QDBusPendingCallWatcher * done ) {
+            QDBusPendingReply<QDBusVariant> reply = *done;
+            done->deleteLater();
+            if( revision != hotkeyStatusRevision || shuttingDown || !hotkeyBackend ) return;
+            configureHotkeysAvailable = !reply.isError() && reply.value().variant().toUInt() >= 2;
+            refreshHotkeyStatus();
+          } );
+        }
+      } );
+  }
+  if( auto backend = qobject_cast<PortalBackend *>( hotkeyBackend.get() ) )
+  {
+    QSet<QString> ids;
+    for( auto const & binding : desired ) ids.insert( binding.id );
+    backend->setDisplayPolicy( ids );
+  }
+  hotkeyBackend->bind( desired );
+  hotkeyState = hotkeyBackend->state();
+  refreshHotkeyStatus();
+}
+
+void MainWindow::refreshHotkeyStatus()
+{
+  if( preferencesDialog )
+    preferencesDialog->setHotkeyStatus( QGuiApplication::platformName(), hotkeyState,
+      hotkeyExplanation, reportedHotkeys, configureHotkeysAvailable );
 }
 
 void MainWindow::hotKeyActivated( int hk )
@@ -3210,7 +3301,10 @@ void MainWindow::hotKeyActivated( int hk )
     // the clipboard empty, silently cancels the translation request, and users report
     // that Ctrl+C+C is broken in these apps. Slightly delay handling the clipboard
     // hotkey to give the active application more time and thus work around the issue.
-    QTimer::singleShot( 10, scanPopup.get(), SLOT( translateWordFromClipboard() ) );
+    if( QGuiApplication::platformName() == "xcb" )
+      QTimer::singleShot( 10, scanPopup.get(), SLOT( translateWordFromClipboard() ) );
+    else
+      scanPopup->translateWordFromClipboard();
 #else
     scanPopup->translateWordFromClipboard();
 #endif
@@ -3252,22 +3346,12 @@ void MainWindow::checkForNewRelease()
   }
   latestReleaseReply = 0;
 
-  QNetworkRequest req(
-    QUrl( "http://goldendict.org/latest_release.php?current="
-          PROGRAM_VERSION "&platform="
-#ifdef HAVE_X11
-          "x11"
-#endif
-#ifdef Q_OS_MAC
-          "mac"
-#endif
-#ifdef Q_WS_QWS
-          "qws"
-#endif
-#ifdef Q_OS_WIN
-          "win"
-#endif
-          ) );
+  QUrl releaseUrl( QStringLiteral( "http://goldendict.org/latest_release.php" ) );
+  QUrlQuery releaseQuery;
+  releaseQuery.addQueryItem( "current", PROGRAM_VERSION );
+  releaseQuery.addQueryItem( "platform", QGuiApplication::platformName() );
+  releaseUrl.setQuery( releaseQuery );
+  QNetworkRequest req( releaseUrl );
 
   latestReleaseReply = articleNetMgr.get( req );
 
@@ -3533,7 +3617,7 @@ void MainWindow::setAutostart(bool autostart)
         reg.remove(QCoreApplication::applicationName());
     }
     reg.sync();
-#elif defined HAVE_X11
+#elif defined Q_OS_LINUX
   const QString destinationPath = QDir::homePath() + "/.config/autostart/goldendict-owned-by-preferences.desktop";
   if( autostart == QFile::exists( destinationPath ) )
     return; // Nothing to do.
@@ -3567,91 +3651,27 @@ void MainWindow::on_pageSetup_triggered()
 
 void MainWindow::on_printPreview_triggered()
 {
-  QPrintPreviewDialog dialog( &getPrinter(), this,
-                              Qt::WindowSystemMenuHint | Qt::WindowMaximizeButtonHint | Qt::WindowCloseButtonHint );
-  dialog.restoreGeometry( cfg.printPreviewDialogGeometry );
-
-  connect( &dialog, SIGNAL( paintRequested( QPrinter * ) ),
-           this, SLOT( printPreviewPaintRequested( QPrinter * ) ) );
-
-  dialog.exec();
-  cfg.printPreviewDialogGeometry = dialog.saveGeometry();
+  if( shuttingDown ) return;
+  if( auto view = getCurrentArticleView() ) view->printPreview( &getPrinter() );
 }
 
 void MainWindow::on_print_triggered()
 {
+  if( shuttingDown ) return;
+  // Capture the initiating view before a dialog can process tab changes.
+  QPointer<ArticleView> view = getCurrentArticleView();
   QPrintDialog dialog( &getPrinter(), this );
-
-  dialog.setWindowTitle( tr( "Print Article") );
-
-  if ( dialog.exec() != QDialog::Accepted )
-   return;
-
-  ArticleView *view = getCurrentArticleView();
-
-  view->print( &getPrinter() );
-}
-
-void MainWindow::printPreviewPaintRequested( QPrinter * printer )
-{
-  ArticleView *view = getCurrentArticleView();
-
-  view->print( printer );
-}
-
-static void filterAndCollectResources( QString & html, QRegExp & rx, const QString & sep,
-                                       const QString & folder, set< QByteArray > & resourceIncluded,
-                                       vector< pair< QUrl, QString > > & downloadResources )
-{
-  int pos = 0;
-  int queryNom = 1;
-
-  while ( ( pos = rx.indexIn( html, pos ) ) != -1 )
-  {
-    QUrl url( rx.cap( 1 ) );
-    QString host = url.host();
-    QString resourcePath = Qt4x5::Url::fullPath( url );
-
-    if ( !host.startsWith( '/' ) )
-      host.insert( 0, '/' );
-    if ( !resourcePath.startsWith( '/' ) )
-      resourcePath.insert( 0, '/' );
-
-    // Replase query part of url (if exist)
-    int n = resourcePath.indexOf( QLatin1Char( '?' ) );
-    if( n >= 0 )
-    {
-      QString q_str = QString( "_q%1" ).arg( queryNom );
-      resourcePath.replace( n, resourcePath.length() - n, q_str );
-      queryNom += 1;
-    }
-
-    QCryptographicHash hash( QCryptographicHash::Md5 );
-    hash.addData( rx.cap().toUtf8() );
-
-    if ( resourceIncluded.insert( hash.result() ).second )
-    {
-      // Gather resource information (url, filename) to be download later
-      downloadResources.push_back( pair<QUrl, QString>( url, folder + host + resourcePath ) );
-    }
-
-    // Modify original url, set to the native one
-    resourcePath = QString::fromLatin1( QUrl::toPercentEncoding( resourcePath, "/" ) );
-    QString newUrl = sep + QDir( folder ).dirName() + host + resourcePath + sep;
-    html.replace( pos, rx.cap().length(), newUrl );
-    pos += newUrl.length();
-  }
+  dialog.setWindowTitle( tr( "Print Article" ) );
+  if( dialog.exec() == QDialog::Accepted && view && !shuttingDown ) view->print( &getPrinter() );
 }
 
 void MainWindow::on_saveArticle_triggered()
 {
-  ArticleView *view = getCurrentArticleView();
-
+  if( shuttingDown ) return;
+  QPointer<ArticleView> view = getCurrentArticleView();
+  if( !view ) return;
   QString fileName = view->getTitle().simplified();
-
-  // Replace reserved filename characters
-  QRegExp rxName( "[/\\\\\\?\\*:\\|<>]" );
-  fileName.replace( rxName, "_" );
+  fileName.replace( QRegularExpression( QStringLiteral( R"([/\\?*:|<>])" ) ), "_" );
 
   fileName += ".html";
   QString savePath;
@@ -3680,94 +3700,17 @@ void MainWindow::on_saveArticle_triggered()
   // The " (*.html)" part of filters[i] is absent from selectedFilter in Qt 5.
   bool const complete = filters.at( 0 ).startsWith( selectedFilter );
 
-  if ( !fileName.isEmpty() )
+  if( !fileName.isEmpty() && view && !shuttingDown )
   {
-
-    QFile file( fileName );
-
-    if ( !file.open( QIODevice::WriteOnly ) )
-    {
-      QMessageBox::critical( this, tr( "Error" ),
-                             tr( "Can't save article: %1" ).arg( file.errorString() ) );
-    }
-    else
-    {
-      QString html = view->toHtml();
-      QFileInfo fi( fileName );
-      cfg.articleSavePath = QDir::toNativeSeparators( fi.absoluteDir().absolutePath() );
-
-      // Convert internal links
-
-      QRegExp rx3( "href=\"(bword:|gdlookup://localhost/)([^\"]+)\"" );
-      int pos = 0;
-      while ( ( pos = rx3.indexIn( html, pos ) ) != -1 )
-      {
-        QString name = QUrl::fromPercentEncoding( rx3.cap( 2 ).simplified().toLatin1() );
-        QString anchor;
-        name.replace( "?gdanchor=", "#" );
-        int n = name.indexOf( '#' );
-        if( n > 0 )
-        {
-          anchor = name.mid( n );
-          name.truncate( n );
-          anchor.replace( QRegExp( "(g[0-9a-f]{32}_)[0-9a-f]+_" ), "\\1" ); // MDict anchors
-        }
-        name.replace( rxName, "_" );
-        name = QString( "href=\"" ) + QUrl::toPercentEncoding( name ) + ".html" + anchor + "\"";
-        html.replace( pos, rx3.cap().length(), name );
-        pos += name.length();
-      }
-
-      // MDict anchors
-      QRegExp anchorLinkRe( "(<\\s*a\\s+[^>]*\\b(?:name|id)\\b\\s*=\\s*[\"']*g[0-9a-f]{32}_)([0-9a-f]+_)(?=[^\"'])", Qt::CaseInsensitive );
-      html.replace( anchorLinkRe, "\\1" );
-
-      if ( complete )
-      {
-        QString folder = fi.absoluteDir().absolutePath() + "/" + fi.baseName() + "_files";
-        QRegExp rx1( "\"((?:bres|gico|gdau|qrcx|gdvideo)://[^\"]+)\"" );
-        QRegExp rx2( "'((?:bres|gico|gdau|qrcx|gdvideo)://[^']+)'" );
-        set< QByteArray > resourceIncluded;
-        vector< pair< QUrl, QString > > downloadResources;
-
-        filterAndCollectResources( html, rx1, "\"", folder, resourceIncluded, downloadResources );
-        filterAndCollectResources( html, rx2, "'", folder, resourceIncluded, downloadResources );
-
-        ArticleSaveProgressDialog * progressDialog = new ArticleSaveProgressDialog( this );
-        // reserve '1' for saving main html file
-        int maxVal = 1;
-
-        // Pull and save resources to files
-        for ( vector< pair< QUrl, QString > >::const_iterator i = downloadResources.begin();
-              i != downloadResources.end(); ++i )
-        {
-          ResourceToSaveHandler * handler = view->saveResource( i->first, i->second );
-          if( !handler->isEmpty() )
-          {
-            maxVal += 1;
-            connect( handler, SIGNAL( done() ), progressDialog, SLOT( perform() ) );
-          }
-        }
-
-        progressDialog->setLabelText( tr("Saving article...") );
-        progressDialog->setRange( 0, maxVal );
-        progressDialog->setValue( 0 );
-        progressDialog->show();
-
-        file.write( html.toUtf8() );
-        progressDialog->setValue( 1 );
-      }
-      else
-      {
-        file.write( html.toUtf8() );
-      }
-    }
+    cfg.articleSavePath = QDir::toNativeSeparators( QFileInfo( fileName ).absolutePath() );
+    view->saveArticle( fileName, complete );
   }
 }
 
 void MainWindow::on_rescanFiles_triggered()
 {
-  hotkeyWrapper.reset(); // No hotkeys while we're editing dictionaries
+  if( shuttingDown ) return;
+  hotkeyBackend.reset(); // Retire shortcuts while dictionaries are being changed.
   scanPopup.reset(); // No scan popup either. No one should use dictionaries.
   closeHeadwordsDialog();
   closeFullTextSearchDialog();
@@ -3853,7 +3796,6 @@ void MainWindow::applyZoomFactor()
   // triggered() signal is no longer emitted, which in turn improves performance.
   adjustCurrentZoomFactor();
 
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
   // Scaling article views asynchronously dramatically improves performance when
   // a zoom action is triggered repeatedly while many or large articles are open
   // in the main window or in scan popup.
@@ -3863,13 +3805,6 @@ void MainWindow::applyZoomFactor()
   // In effect, some intermediate zoom factors are skipped when scaling is slow.
   // The slower the scaling, the more steps are skipped.
   QTimer::singleShot( 0, this, SLOT( scaleArticlesByCurrentZoomFactor() ) );
-#else
-  // The timer trick above usually doesn't improve performance with Qt4
-  // due to a different ordering of keyboard and timer events.
-  // Sometimes, unpredictably, it does work like with Qt5.
-  // Scale article views synchronously to avoid inconsistent or unexpected behavior.
-  scaleArticlesByCurrentZoomFactor();
-#endif
 }
 
 void MainWindow::adjustCurrentZoomFactor()
@@ -3970,15 +3905,15 @@ void MainWindow::applyWordsZoomLevel()
 
   if ( groupList->font().pointSize() != ps )
   {
-    disconnect( groupList, SIGNAL( currentIndexChanged( QString const & ) ),
-                this, SLOT( currentGroupChanged( QString const & ) ) );
+    disconnect( groupList, &QComboBox::currentTextChanged,
+                this, &MainWindow::currentGroupChanged );
     int n = groupList->currentIndex();
     groupList->clear();
     groupList->setFont( font );
     groupList->fill( groupInstances );
     groupList->setCurrentIndex( n );
-    connect( groupList, SIGNAL( currentIndexChanged( QString const & ) ),
-             this, SLOT( currentGroupChanged( QString const & ) ) );
+    connect( groupList, &QComboBox::currentTextChanged,
+             this, &MainWindow::currentGroupChanged );
   }
 
   wordsZoomBase->setEnabled( cfg.preferences.wordsZoomLevel != 0 );
@@ -3996,6 +3931,8 @@ void MainWindow::applyWordsZoomLevel()
 
 void MainWindow::messageFromAnotherInstanceReceived( QString const & message )
 {
+  if( shuttingDown || startupFailed ) return;
+  if( !startupComplete ) { pendingMessages.append( message ); return; }
   if ( message == "bringToFront" )
   {
     toggleMainWindow( true );
@@ -4551,7 +4488,8 @@ void MainWindow::editDictionary( Dictionary::Class * dict )
       QString headword = unescapeTabHeader( ui.tabWidget->tabText( ui.tabWidget->currentIndex() ) );
       command.replace( "%GDWORD%", headword );
     }
-    if( !Qt4x5::Process::startDetached( command ) )
+    auto const commandParts = QProcess::splitCommand( command );
+    if( commandParts.isEmpty() || !QProcess::startDetached( commandParts.first(), commandParts.mid( 1 ) ) )
       QApplication::beep();
   }
 }
@@ -4753,14 +4691,17 @@ void MainWindow::proxyAuthentication( const QNetworkProxy &,
 
 void MainWindow::showFullTextSearchDialog()
 {
+  if( shuttingDown ) return;
   if( !ftsDlg )
   {
-    ftsDlg = new FTS::FullTextSearchDialog( this, cfg, dictionaries, groupInstances, ftsIndexing );
+    ftsDlg = new FTS::FullTextSearchDialog( this, cfg, dictionaries, groupInstances, ftsIndexing,
+                                         translateLine->text() );
     addGlobalActionsToDialog( ftsDlg );
     addGroupComboBoxActionsToDialog( ftsDlg, groupList );
 
-    connect( ftsDlg, SIGNAL( showTranslationFor( QString, QStringList, QRegExp, bool ) ),
-             this, SLOT( showTranslationFor( QString, QStringList, QRegExp, bool ) ) );
+    connect( ftsDlg, &FTS::FullTextSearchDialog::helpRequested, this, &MainWindow::showGDHelpForID );
+    connect( ftsDlg, &FTS::FullTextSearchDialog::showTranslationFor, this,
+      qOverload<QString const &, QStringList const &, FtsHighlightSpec const &, bool>( &MainWindow::showTranslationFor ) );
     connect( ftsDlg, SIGNAL( closeDialog() ),
              this, SLOT( closeFullTextSearchDialog() ), Qt::QueuedConnection );
     connect( &configEvents, SIGNAL( mutedDictionariesChanged() ),

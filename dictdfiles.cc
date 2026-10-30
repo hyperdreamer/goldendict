@@ -7,6 +7,7 @@
 #include "utf8.hh"
 #include "dictzip.h"
 #include "htmlescape.hh"
+#include "linkrewrite.hh"
 #include "fsencoding.hh"
 #include "langcoder.hh"
 #include <map>
@@ -22,9 +23,7 @@
 
 #include <QDebug>
 
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-#include <QRegularExpression>
-#endif
+#include "wildcard.hh"
 
 #ifdef _MSC_VER
 #include <stub_msvc.h>
@@ -44,6 +43,23 @@ using std::list;
 using BtreeIndexing::WordArticleLink;
 using BtreeIndexing::IndexedWords;
 using BtreeIndexing::IndexInfo;
+
+QString normalizeArticleText( QString article )
+{
+  static QRegularExpression const phonetic = Regex::validated( "\\\\([^\\\\]+)\\\\",
+                                            QRegularExpression::CaseInsensitiveOption );
+  static QRegularExpression const refs = Regex::validated( "\\{([^\\{\\}]+)\\}",
+                                        QRegularExpression::CaseInsensitiveOption );
+  if( !phonetic.isValid() || !refs.isValid() )
+  {
+    gdWarning( "DICT article pattern: %s; %s", qPrintable( phonetic.errorString() ),
+               qPrintable( refs.errorString() ) );
+    return article;
+  }
+  article.replace( phonetic, "<span class=\"dictd_phonetic\">\\1</span>" );
+  article.replace( refs, "<a href=\"gdlookup://localhost/\\1\">\\1</a>" );
+  return LinkRewrite::applyGdLookup( article );
+}
 
 namespace {
 
@@ -344,22 +360,6 @@ sptr< Dictionary::DataRequest > DictdDictionary::getArticle( wstring const & wor
       }
       else
       {
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-        static QRegularExpression phonetic( "\\\\([^\\\\]+)\\\\",
-                                            QRegularExpression::CaseInsensitiveOption ); // phonetics: \stuff\ ...
-        static QRegularExpression refs( "\\{([^\\{\\}]+)\\}",
-                                        QRegularExpression::CaseInsensitiveOption );     // links: {stuff}
-        static QRegularExpression links( "<a href=\"gdlookup://localhost/([^\"]*)\">",
-                                         QRegularExpression::CaseInsensitiveOption );
-        static QRegularExpression tags( "<[^>]*>",
-                                        QRegularExpression::CaseInsensitiveOption );
-#else
-        static QRegExp phonetic( "\\\\([^\\\\]+)\\\\", Qt::CaseInsensitive ); // phonetics: \stuff\ ...
-        static QRegExp refs( "\\{([^\\{\\}]+)\\}", Qt::CaseInsensitive );     // links: {stuff}
-        static QRegExp links( "<a href=\"gdlookup://localhost/([^\"]*)\">", Qt::CaseInsensitive );
-        static QRegExp tags( "<[^>]*>", Qt::CaseInsensitive );
-#endif
-
         articleText = string( "<div class=\"dictd_article\"" );
         if( isToLanguageRTL() )
           articleText += " dir=\"rtl\"";
@@ -368,51 +368,7 @@ sptr< Dictionary::DataRequest > DictdDictionary::getArticle( wstring const & wor
         string convertedText = Html::preformat( articleBody, isToLanguageRTL() );
         free( articleBody );
 
-        QString articleString = QString::fromUtf8( convertedText.c_str() )
-                                .replace(phonetic, "<span class=\"dictd_phonetic\">\\1</span>")
-                                .replace(refs, "<a href=\"gdlookup://localhost/\\1\">\\1</a>");
-        convertedText.erase();
-
-        int pos = 0;
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-        QString articleNewString;
-        QRegularExpressionMatchIterator it = links.globalMatch( articleString );
-        while( it.hasNext() )
-        {
-          QRegularExpressionMatch match = it.next();
-          articleNewString += articleString.midRef( pos, match.capturedStart() - pos );
-          pos = match.capturedEnd();
-
-          QString link = match.captured( 1 );
-          link.replace( tags, " " );
-          link.replace( "&nbsp;", " " );
-
-          QString newLink = match.captured();
-          newLink.replace( 30, match.capturedLength( 1 ),
-                           QString::fromUtf8( QUrl::toPercentEncoding( link.simplified() ) ) );
-          articleNewString += newLink;
-        }
-        if( pos )
-        {
-          articleNewString += articleString.midRef( pos );
-          articleString = articleNewString;
-          articleNewString.clear();
-        }
-#else
-        for( ; ; )
-        {
-          pos = articleString.indexOf( links, pos );
-          if( pos < 0 )
-            break;
-
-          QString link = links.cap( 1 );
-          link.replace( tags, " " );
-          link.replace( "&nbsp;", " " );
-          articleString.replace( pos + 30, links.cap( 1 ).length(),
-                                 QString::fromUtf8( QUrl::toPercentEncoding( link.simplified() ) ) );
-          pos += 30;
-        }
-#endif
+        QString articleString = normalizeArticleText( QString::fromUtf8( convertedText.c_str() ) );
 
         articleString += "</div>";
 
@@ -569,15 +525,10 @@ void DictdDictionary::getArticleText( uint32_t articleAddress, QString & headwor
     }
     else
     {
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-      static QRegularExpression phonetic( "\\\\([^\\\\]+)\\\\",
+      static QRegularExpression phonetic = Regex::validated( "\\\\([^\\\\]+)\\\\",
                                           QRegularExpression::CaseInsensitiveOption ); // phonetics: \stuff\ ...
-      static QRegularExpression refs( "\\{([^\\{\\}]+)\\}",
+      static QRegularExpression refs = Regex::validated( "\\{([^\\{\\}]+)\\}",
                                       QRegularExpression::CaseInsensitiveOption );     // links: {stuff}
-#else
-      static QRegExp phonetic( "\\\\([^\\\\]+)\\\\", Qt::CaseInsensitive ); // phonetics: \stuff\ ...
-      static QRegExp refs( "\\{([^\\{\\}]+)\\}", Qt::CaseInsensitive );     // links: {stuff}
-#endif
 
       string convertedText = Html::preformat( articleBody, isToLanguageRTL() );
       free( articleBody );

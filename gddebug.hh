@@ -3,8 +3,6 @@
 
 #include <QFile>
 
-class QTextCodec;
-
 #ifdef NO_CONSOLE
   #define GD_DPRINTF(...) do {} while( 0 )
   #define GD_FDPRINTF(...) do {} while( 0 )
@@ -28,8 +26,6 @@ void gdDebug(const char *, ...)
     __attribute__ ((format (printf, 1, 2)))
 #endif
 ;
-
-QTextCodec * gdCodecForLocale();
 
 extern QFile * logFilePtr;
 

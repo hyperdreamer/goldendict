@@ -39,13 +39,12 @@
 #include <QDir>
 #include <QPainter>
 #include <QDebug>
-#include <QRegExp>
 
 #include <QSemaphore>
 #include <QThreadPool>
 #include <QAtomicInt>
 
-#include "qt4x5.hh"
+#include "wildcard.hh"
 
 namespace Xdxf {
 
@@ -518,7 +517,7 @@ void XdxfArticleRequestRunnable::run()
 
 void XdxfArticleRequest::run()
 {
-  if ( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+  if ( isCancelled.loadAcquire() )
   {
     finish();
     return;
@@ -547,7 +546,7 @@ void XdxfArticleRequest::run()
 
   for( unsigned x = 0; x < chain.size(); ++x )
   {
-    if ( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+    if ( isCancelled.loadAcquire() )
     {
       finish();
       return;
@@ -773,7 +772,6 @@ qint64 GzippedFile::readData( char * data, qint64 maxSize )
   // The returning value translates directly to QIODevice semantics
   int n = gzread( gz, data, maxSize );
 
-#if QT_VERSION >= QT_VERSION_CHECK(5, 0, 0)
   // With QT 5.x QXmlStreamReader ask one byte instead of one UTF-8 char.
   // We read and return all bytes for char.
 
@@ -794,7 +792,6 @@ qint64 GzippedFile::readData( char * data, qint64 maxSize )
     if( addBytes )
       n += gzread( gz, data + 1, addBytes );
   }
-#endif
 
   return n;
 }
@@ -818,21 +815,21 @@ QString readXhtmlData( QXmlStreamReader & stream )
     {
       QString name = stream.name().toString();
 
-      result += "<" + Qt4x5::escape( name ) + " ";
+      result += "<" + name.toHtmlEscaped() + " ";
 
       QXmlStreamAttributes attrs = stream.attributes();
 
       for( int x = 0; x < attrs.size(); ++x )
       {
-        result += Qt4x5::escape( attrs[ x ].name().toString() );
-        result += "=\"" + Qt4x5::escape( attrs[ x ].value().toString() ) + "\"";
+        result += attrs[ x ].name().toString().toHtmlEscaped();
+        result += "=\"" + attrs[ x ].value().toString().toHtmlEscaped() + "\"";
       }
 
       result += ">";
 
       result += readXhtmlData( stream );
 
-      result += "</" + Qt4x5::escape( name ) + ">";
+      result += "</" + name.toHtmlEscaped() + ">";
     }
     else
     if ( stream.isCharacters() || stream.isWhitespace() || stream.isCDATA() )
@@ -852,11 +849,7 @@ namespace {
 /// Deal with Qt 4.5 incompatibility
 QString readElementText( QXmlStreamReader & stream )
 {
-#if QT_VERSION >= 0x040600
     return stream.readElementText( QXmlStreamReader::SkipChildElements );
-#else
-    return stream.readElementText();
-#endif
 }
 
 }
@@ -912,7 +905,7 @@ void indexArticle( GzippedFile & gzFile,
 {
   ArticleFormat format( Default );
 
-  QStringRef formatValue = stream.attributes().value( "f" );
+  QString const formatValue = stream.attributes().value( "f" ).toString();
 
   if ( formatValue == "v" )
     format = Visual;
@@ -1053,7 +1046,7 @@ void XdxfResourceRequestRunnable::run()
 void XdxfResourceRequest::run()
 {
   // Some runnables linger enough that they are cancelled before they start
-  if ( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+  if ( isCancelled.loadAcquire() )
   {
     finish();
     return;
@@ -1264,9 +1257,9 @@ vector< sptr< Dictionary::Class > > makeDictionaries(
               if( !str.empty() )
                 idxHeader.langTo = getLanguageId( str.c_str() );
 
-              QRegExp regNum( "\\d+" );
-              regNum.indexIn( stream.attributes().value( "revision" ).toString() );
-              idxHeader.revisionNumber = regNum.cap().toUInt();
+              QRegularExpression const regNum = Regex::validated( "\\d+", QRegularExpression::UseUnicodePropertiesOption );
+              QRegularExpressionMatch const revision = regNum.match( stream.attributes().value( "revision" ).toString() );
+              idxHeader.revisionNumber = revision.captured().toUInt();
 
               bool isLogical = ( stream.attributes().value( "format" ) == "logical" || idxHeader.revisionNumber >= 34 );
 
@@ -1315,7 +1308,7 @@ vector< sptr< Dictionary::Class > > makeDictionaries(
                     if( isLogical )
                     {
                       desc = desc.simplified();
-                      desc.replace( QRegExp( "<br\\s*>\\s*</br>" ), QChar( '\n' ) );
+                      desc.replace( Regex::validated( "<br\\s*>\\s*</br>" ), QChar( '\n' ) );
                     }
 
                     if ( dictionaryDescription.isEmpty() )

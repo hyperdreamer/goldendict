@@ -32,9 +32,7 @@
 #include <QByteArray>
 #include <QBuffer>
 
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-#include <QRegularExpression>
-#endif
+#include "wildcard.hh"
 
 #include <string>
 #include <list>
@@ -823,173 +821,98 @@ void GlsDictionary::loadArticle( uint32_t address,
 
 QString & GlsDictionary::filterResource( QString & article )
 {
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-  QRegularExpression imgRe( "(<\\s*img\\s+[^>]*src\\s*=\\s*[\"']+)(?!(?:data|https?|ftp|qrcx):)",
+  QRegularExpression imgRe = Regex::validated( "(<\\s*img\\s+[^>]*src\\s*=\\s*[\"']+)(?!(?:data|https?|ftp|qrcx):)",
                             QRegularExpression::CaseInsensitiveOption
                             | QRegularExpression::InvertedGreedinessOption );
-  QRegularExpression linkRe( "(<\\s*link\\s+[^>]*href\\s*=\\s*[\"']+)(?!(?:data|https?|ftp):)",
+  QRegularExpression linkRe = Regex::validated( "(<\\s*link\\s+[^>]*href\\s*=\\s*[\"']+)(?!(?:data|https?|ftp):)",
                              QRegularExpression::CaseInsensitiveOption
                              | QRegularExpression::InvertedGreedinessOption );
-#else
-  QRegExp imgRe( "(<\\s*img\\s+[^>]*src\\s*=\\s*[\"']+)(?!(?:data|https?|ftp|qrcx):)", Qt::CaseInsensitive );
-  imgRe.setMinimal( true );
-  QRegExp linkRe( "(<\\s*link\\s+[^>]*href\\s*=\\s*[\"']+)(?!(?:data|https?|ftp):)", Qt::CaseInsensitive );
-  linkRe.setMinimal( true );
-#endif
   article.replace( imgRe , "\\1bres://" + QString::fromStdString( getId() ) + "/" )
          .replace( linkRe, "\\1bres://" + QString::fromStdString( getId() ) + "/" );
 
   // Handle links to articles
 
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-  QRegularExpression linksReg( "<a(\\s+[^>]*)href\\s*=\\s*['\"](bword://)?([^'\"]+)['\"]",
+  QRegularExpression linksReg = Regex::validated( "<a(\\s+[^>]*)href\\s*=\\s*['\"](bword://)?([^'\"]+)['\"]",
                                QRegularExpression::CaseInsensitiveOption );
-#else
-  QRegExp linksReg( "<a(\\s*[^>]*)href\\s*=\\s*['\"](bword://)?([^'\"]+)['\"]" );
-  linksReg.setMinimal( true );
-#endif
 
   int pos = 0;
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
   QString articleNewText;
   QRegularExpressionMatchIterator it = linksReg.globalMatch( article );
   while( it.hasNext() )
   {
     QRegularExpressionMatch match = it.next();
-    articleNewText += article.midRef( pos, match.capturedStart() - pos );
+    articleNewText += article.mid( pos, match.capturedStart() - pos );
     pos = match.capturedEnd();
 
     QString link = match.captured( 3 );
-#else
-  while( pos >= 0 )
-  {
-    pos = linksReg.indexIn( article, pos );
-    if( pos < 0 )
-      break;
-
-    QString link = linksReg.cap( 3 );
-#endif
     if( link.indexOf( ':' ) < 0 )
     {
       QString newLink;
       if( link.indexOf( '#' ) < 0 )
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
         newLink = QString( "<a" ) + match.captured( 1 ) + "href=\"bword:" + link + "\"";
-#else
-        newLink = QString( "<a" ) + linksReg.cap( 1 ) + "href=\"bword:" + link + "\"";
-#endif
 
       // Anchors
 
       if( link.indexOf( '#' ) > 0 )
       {
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
         newLink = QString( "<a" ) + match.captured( 1 ) + "href=\"gdlookup://localhost/" + link + "\"";
-#else
-        newLink = QString( "<a" ) + linksReg.cap( 1 ) + "href=\"gdlookup://localhost/" + link + "\"";
-#endif
         newLink.replace( "#", "?gdanchor=" );
       }
 
       if( !newLink.isEmpty() )
       {
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
         articleNewText += newLink;
-#else
-        article.replace( pos, linksReg.cap( 0 ).size(), newLink );
-        pos += newLink.size();
-#endif
       }
       else
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
         articleNewText += match.captured();
-#else
-        pos += linksReg.cap( 0 ).size();
-#endif
     }
     else
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
       articleNewText += match.captured();
   }
   if( pos )
   {
-    articleNewText += article.midRef( pos );
+    articleNewText += article.mid( pos );
     article = articleNewText;
     articleNewText.clear();
   }
-#else
-      pos += linksReg.cap( 0 ).size();
-  }
-#endif
 
   // Handle "audio" tags
 
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-  QRegularExpression audioRe( "<\\s*audio\\s+src\\s*=\\s*([\"']+)([^\"']+)([\"'])\\s*>(.*)</audio>",
+  QRegularExpression audioRe = Regex::validated( "<\\s*audio\\s+src\\s*=\\s*([\"']+)([^\"']+)([\"'])\\s*>(.*)</audio>",
                               QRegularExpression::CaseInsensitiveOption
                               | QRegularExpression::DotMatchesEverythingOption
                               | QRegularExpression::InvertedGreedinessOption );
-#else
-  QRegExp audioRe( "<\\s*audio\\s+src\\s*=\\s*([\"']+)([^\"']+)([\"'])\\s*>(.*)</audio>", Qt::CaseInsensitive );
-  audioRe.setMinimal( true );
-#endif
 
   pos = 0;
 
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
   it = audioRe.globalMatch( article );
   while( it.hasNext() )
   {
     QRegularExpressionMatch match = it.next();
-    articleNewText += article.midRef( pos, match.capturedStart() - pos );
+    articleNewText += article.mid( pos, match.capturedStart() - pos );
     pos = match.capturedEnd();
 
     QString src = match.captured( 2 );
-#else
-  while( pos >= 0 )
-  {
-    pos = audioRe.indexIn( article, pos );
-    if( pos < 0 )
-      break;
-
-    QString src = audioRe.cap( 2 );
-#endif
     if( src.indexOf( "://" ) >= 0 )
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
       articleNewText += match.captured();
-#else
-      pos += audioRe.cap( 0 ).length();
-#endif
     else
     {
       std::string href = "\"gdau://" + getId() + "/" + src.toUtf8().data() + "\"";
       QString newTag = QString::fromUtf8( ( addAudioLink( href, getId() ) + "<span class=\"gls_wav\"><a href=" + href + ">" ).c_str() );
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
       newTag += match.captured( 4 );
       if( match.captured( 4 ).indexOf( "<img " ) < 0 )
         newTag += " <img src=\"qrcx://localhost/icons/playsound.png\" border=\"0\" alt=\"Play\">";
       newTag += "</a></span>";
 
       articleNewText += newTag;
-#else
-      newTag += audioRe.cap( 4 );
-      if( audioRe.cap( 4 ).indexOf( "<img " ) < 0 )
-        newTag += " <img src=\"qrcx://localhost/icons/playsound.png\" border=\"0\" alt=\"Play\">";
-      newTag += "</a></span>";
-
-      article.replace( pos, audioRe.cap( 0 ).length(), newTag );
-      pos += newTag.length();
-#endif
     }
   }
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
   if( pos )
   {
-    articleNewText += article.midRef( pos );
+    articleNewText += article.mid( pos );
     article = articleNewText;
     articleNewText.clear();
   }
-#endif
 
   return article;
 }
@@ -1079,7 +1002,7 @@ void GlsHeadwordsRequestRunnable::run()
 
 void GlsHeadwordsRequest::run()
 {
-  if ( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+  if ( isCancelled.loadAcquire() )
   {
     finish();
     return;
@@ -1093,7 +1016,7 @@ void GlsHeadwordsRequest::run()
 
     for( unsigned x = 0; x < chain.size(); ++x )
     {
-      if ( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+      if ( isCancelled.loadAcquire() )
       {
         finish();
         return;
@@ -1202,7 +1125,7 @@ void GlsArticleRequestRunnable::run()
 
 void GlsArticleRequest::run()
 {
-  if ( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+  if ( isCancelled.loadAcquire() )
   {
     finish();
     return;
@@ -1232,7 +1155,7 @@ void GlsArticleRequest::run()
 
     for( unsigned x = 0; x < chain.size(); ++x )
     {
-      if ( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+      if ( isCancelled.loadAcquire() )
       {
         finish();
         return;
@@ -1382,7 +1305,7 @@ void GlsResourceRequestRunnable::run()
 void GlsResourceRequest::run()
 {
   // Some runnables linger enough that they are cancelled before they start
-  if ( Qt4x5::AtomicInt::loadAcquire( isCancelled ) )
+  if ( isCancelled.loadAcquire() )
   {
     finish();
     return;
@@ -1477,8 +1400,7 @@ void GlsResourceRequest::run()
       QString id = QString::fromUtf8( dict.getId().c_str() );
       int pos = 0;
 
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 0, 0 )
-      QRegularExpression links( "url\\(\\s*(['\"]?)([^'\"]*)(['\"]?)\\s*\\)",
+      QRegularExpression links = Regex::validated( "url\\(\\s*(['\"]?)([^'\"]*)(['\"]?)\\s*\\)",
                                 QRegularExpression::CaseInsensitiveOption );
 
       QString newCSS;
@@ -1486,7 +1408,7 @@ void GlsResourceRequest::run()
       while( it.hasNext() )
       {
         QRegularExpressionMatch match = it.next();
-        newCSS += css.midRef( pos, match.capturedStart() - pos );
+        newCSS += css.mid( pos, match.capturedStart() - pos );
         pos = match.capturedEnd();
 
         QString url = match.captured( 2 );
@@ -1504,32 +1426,10 @@ void GlsResourceRequest::run()
       }
       if( pos )
       {
-        newCSS += css.midRef( pos );
+        newCSS += css.mid( pos );
         css = newCSS;
         newCSS.clear();
       }
-#else
-      QRegExp links( "url\\(\\s*(['\"]?)([^'\"]*)(['\"]?)\\s*\\)", Qt::CaseInsensitive, QRegExp::RegExp );
-      for( ; ; )
-      {
-        pos = links.indexIn( css, pos );
-        if( pos < 0 )
-          break;
-        QString url = links.cap( 2 );
-
-        if( url.indexOf( ":/" ) >= 0 || url.indexOf( "data:" ) >= 0)
-        {
-          // External link
-          pos += links.cap().size();
-          continue;
-        }
-
-        QString newUrl = QString( "url(" ) + links.cap( 1 ) + "bres://"
-                                           + id + "/" + url + links.cap( 3 ) + ")";
-        css.replace( pos, links.cap().size(), newUrl );
-        pos += newUrl.size();
-      }
-#endif
 
       dict.isolateCSS( css );
       QByteArray bytes = css.toUtf8();

@@ -6,7 +6,6 @@
 #include <QProcess>
 #include "gddebug.hh"
 #include "fsencoding.hh"
-#include "qt4x5.hh"
 #include <QDebug>
 
 using std::vector;
@@ -212,7 +211,15 @@ void DictionaryBar::showContextMenu( QContextMenuEvent * event, bool extended )
   {
     QString command( editDictionaryCommand );
     command.replace( "%GDDICT%", "\"" + dictFilename + "\"" );
-    if( !Qt4x5::Process::startDetached( command ) )
+    QStringList const commandWords = QProcess::splitCommand( command );
+    if( !commandWords.isEmpty() )
+    {
+      QString const program = commandWords.constFirst();
+      QStringList const arguments = commandWords.mid( 1 );
+      if( !QProcess::startDetached( program, arguments ) )
+        QApplication::beep();
+    }
+    else
       QApplication::beep();
   }
 

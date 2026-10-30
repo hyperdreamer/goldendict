@@ -8,16 +8,26 @@
 #include "wstring_qt.hh"
 #include "parsecmdline.hh"
 #include "iconv.hh"
-#include "qt4x5.hh"
 
 #include <QDir>
 #include <QFileInfo>
+#include <QUrl>
 
 namespace Programs {
 
 using namespace Dictionary;
 
 namespace {
+
+/// The one structural leading slash of a resource URL.
+///
+/// Qt 6's QUrl::setPath() takes the path literally instead of making it
+/// absolute, so a URL with a host has to spell that slash out. A name which
+/// already starts with it is left unchanged, so the emitter never doubles it.
+QString resourceUrlPath( QString const & name )
+{
+  return name.startsWith( QLatin1Char( '/' ) ) ? name : QLatin1Char( '/' ) + name;
+}
 
 class ProgramsDictionary: public Dictionary::Class
 {
@@ -90,7 +100,7 @@ sptr< Dictionary::DataRequest > ProgramsDictionary::getArticle(
       QUrl url;
       url.setScheme( "gdprg" );
       url.setHost( QString::fromUtf8( getId().c_str() ) );
-      url.setPath( Qt4x5::Url::ensureLeadingSlash( QString::fromUtf8( wordUtf8.c_str() ) ) );
+      url.setPath( resourceUrlPath( QString::fromUtf8( wordUtf8.c_str() ) ) );
 
       string ref = string( "\"" ) + url.toEncoded().data() + "\"";
 
@@ -140,8 +150,14 @@ RunInstance::RunInstance(): process( this )
 {
   connect( this, SIGNAL(processFinished()), this,
            SLOT(handleProcessFinished()), Qt::QueuedConnection );
-  connect( &process, SIGNAL(finished(int)), this, SIGNAL(processFinished()));
-  connect( &process, SIGNAL(error(QProcess::ProcessError)), this,
+  // Qt 6 declares one QProcess::finished() carrying the exit code and the exit
+  // status, and reports a failure through errorOccurred(). error() is no longer
+  // a signal, so its connection silently failed to resolve and a program
+  // dictionary never learned that its child had crashed. Both connections now
+  // name the signals Qt 6 actually declares.
+  connect( &process, SIGNAL(finished(int,QProcess::ExitStatus)), this,
+           SIGNAL(processFinished()) );
+  connect( &process, SIGNAL(errorOccurred(QProcess::ProcessError)), this,
            SIGNAL(processFinished()) );
 }
 
@@ -353,7 +369,7 @@ void ProgramWordSearchRequest::instanceFinished( QByteArray output, QString erro
     // Handle any Windows artifacts
     output.replace( "\r\n", "\n" );
     QStringList result =
-      QString::fromUtf8( output ).split( "\n", Qt4x5::skipEmptyParts() );
+      QString::fromUtf8( output ).split( "\n", Qt::SkipEmptyParts );
 
     for( int x = 0; x < result.size(); ++x )
       matches.push_back( Dictionary::WordMatch( gd::toWString( result[ x ] ) ) );

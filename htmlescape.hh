@@ -22,6 +22,12 @@ string preformat( string const &, bool baseRightToLeft = false );
 // Escapes the given string to be included in JavaScript.
 string escapeForJavaScript( string const & );
 
+// Appends the closing tags an article is missing. The legacy QRegExp patterns
+// classified characters with Qt's own tables (\s is QChar::isSpace(); \b breaks
+// on anything that is not a letter, number, mark or underscore), which PCRE does
+// not reproduce, so the counts use those classes directly.
+void balanceSpanDivTags( QString & );
+
 // Replace html entities
 QString unescape( QString const & str, bool saveFormat = false );
 string unescapeUtf8( string const & str, bool saveFormat = false );

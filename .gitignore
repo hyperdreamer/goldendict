@@ -41,5 +41,40 @@ GoldenDict.xcodeproj/
 *.suo
 *.vcxproj.user
 
+# Test build outputs (the suites compile in place). Only the BUILT binaries are
+# ignored: `tests/tst_*/tst_[a-z_]*` also matched tracked sources such as
+# tst_hotkeys.cc and tst_platformwindow.pro, which silently kept new suites out
+# of commits unless they were force-added.
+tests/**/.qmake.stash
+tests/**/target_wrapper.sh
+tests/tst_*/tst_article_schemes
+tests/tst_*/tst_article_stream
+tests/tst_*/tst_portal_hotkeys
+tests/tst_*/tst_save_article
+tests/tst_*/tst_print_pipeline
+tests/tst_*/tst_article_history
+tests/tst_*/tst_external_content
+tests/tst_*/tst_website_frames
+tests/tst_*/tst_hotkeys_noffmpeg
+tests/tst_*/Makefile.noffmpeg
+tests/tst_*/tst_article_bridge
+tests/tst_*/tst_article_load
+tests/tst_*/tst_encoding
+tests/tst_*/tst_htmlescape
+tests/tst_*/tst_hotkeys
+tests/tst_*/tst_langcoder
+tests/tst_*/tst_linkrewrite
+tests/tst_*/tst_platformwindow
+tests/tst_*/tst_regex
+tests/tst_*/tst_utf8_wstring
+tests/Makefile*
+tests/libgdtestclosure.a
+tests/build/
+# Artifacts of the root `make check` gate: it runs the suite subprojects in the
+# source root, so each becomes a build directory `tst_<name>/` here.
+/.qmake.stash
+/Makefile.tests
+/tst_*/
+
 # CodeGraph index
 .codegraph/
