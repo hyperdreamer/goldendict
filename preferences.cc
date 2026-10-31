@@ -653,14 +653,20 @@ void Preferences::setHotkeyStatus( QString const & platform, HotkeyBackend::Stat
     }
     if( active )
       for( auto const & binding : bindings )
-        if( binding.id == id ) { label->setText( binding.triggerDescription ); return; }
+        if( binding.id == id && !binding.triggerDescription.isEmpty() )
+        { label->setText( binding.triggerDescription ); return; }
+    if( wayland && configureAvailable )
+    {
+      label->setText( tr( "Not assigned by the portal — use Configure shortcuts" ) );
+      return;
+    }
     label->setText( state == HotkeyBackend::State::Bound && !wayland ? tr( "Active" ) :
                    ( explanation.isEmpty() ? status : explanation ) );
   };
   display( "main-window", ui.mainWindowHotkey, ui.enableMainWindowHotkey, ui.mainWindowHotkeyStatus );
   display( "clipboard-lookup", ui.clipboardHotkey, ui.enableClipboardHotkey, ui.clipboardHotkeyStatus );
   ui.configureShortcuts->setVisible( wayland );
-  ui.configureShortcuts->setEnabled( wayland && active && configureAvailable );
+  ui.configureShortcuts->setEnabled( wayland && configureAvailable );
   ui.clipboardCapabilityNote->setText( wayland
     ? tr( "Hover lookup and focus restoration are unavailable on Wayland. Clipboard-change scanning and explicit clipboard lookup remain available; global shortcuts use the portal." )
     : tr( "Clipboard-change scanning and explicit clipboard lookup remain available independently of global shortcuts." ) );

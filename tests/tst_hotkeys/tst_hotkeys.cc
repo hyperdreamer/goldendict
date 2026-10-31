@@ -422,6 +422,9 @@ private slots:
   void bindingSettleAndInFlightClassification();
   void installGateRemembersOnlyIssuedBinds();
   void mainWindowUsesTheSharedInstallGate();
+  void bindingExplanationNamesTheConfirmationDialog();
+  void unassignedBindingLabelAndConfigureEnablement();
+  void configureAvailabilityFollowsBindCompletion();
   void lateCreateSessionSuccessClosesItsSessionAfterCancellation();
   void unsupportedBackendStillReportsState();
   void unsupportedFactory();
@@ -1211,6 +1214,295 @@ void TstHotkeys::backendPublishesBindingActivationAndStateContract()
   QCOMPARE( backend.unbindCalls, 1 );
   QCOMPARE( backend.state(), HotkeyBackend::State::Closed );
   QCOMPARE( stateChanged.count(), 3 );
+}
+
+void TstHotkeys::bindingExplanationNamesTheConfirmationDialog()
+{
+  TestSupport::PrivateSessionBus privateBus;
+  QString reason;
+  QVERIFY2( privateBus.start( &reason ), qPrintable( reason ) );
+  TestSupport::FakePortal portal;
+  QVERIFY2( portal.start( privateBus.fixtureConnection(), 2 ), qPrintable( portal.errorString() ) );
+  portal.holdResponse( QStringLiteral( "BindShortcuts" ) );
+  QString bindingExplanation;
+  PortalBackend backend( privateBus.connection() );
+  connect( &backend, &HotkeyBackend::stateChanged, this,
+           [ & ]( HotkeyBackend::State state, QString const & explanation ) {
+    if( state == HotkeyBackend::State::Binding )
+      bindingExplanation = explanation;
+  } );
+  backend.bind( { { QStringLiteral( "main-window" ), QStringLiteral( "Main window" ),
+                    QStringLiteral( "CTRL+ALT+g" ) } } );
+  QVERIFY( QTest::qWaitFor( [ & ] {
+    return !bindingExplanation.isEmpty() && portal.count( QStringLiteral( "BindShortcuts" ) ) == 1;
+  }, 1500 ) );
+  QCOMPARE( backend.state(), HotkeyBackend::State::Binding );
+  QCOMPARE( bindingExplanation,
+            QStringLiteral( "Binding portal shortcuts: waiting for the portal confirmation dialog" ) );
+
+  Config::Class cfg;
+  cfg.preferences.enableMainWindowHotkey = true;
+  cfg.preferences.mainWindowHotkey = Config::HotKey( QKeySequence( "Ctrl+Alt+G" ) );
+  Preferences dialog( nullptr, cfg );
+  auto capability = dialog.findChild< QLabel * >( "hotkeyCapability" );
+  auto main = dialog.findChild< QLabel * >( "mainWindowHotkeyStatus" );
+  QVERIFY( capability && main );
+  dialog.setHotkeyStatus( "wayland", backend.state(), bindingExplanation, {},
+                         backend.isConfigureAvailable() );
+  QVERIFY( capability->text().contains( bindingExplanation ) );
+  QCOMPARE( main->text(), bindingExplanation );
+}
+
+void TstHotkeys::unassignedBindingLabelAndConfigureEnablement()
+{
+  using State = HotkeyBackend::State;
+  Config::Class cfg;
+  cfg.preferences.enableMainWindowHotkey = true;
+  cfg.preferences.enableClipboardHotkey = true;
+  cfg.preferences.mainWindowHotkey = Config::HotKey( QKeySequence( "Ctrl+Alt+G" ) );
+  cfg.preferences.clipboardHotkey = Config::HotKey( QKeySequence( "Ctrl+Alt+H" ) );
+  Preferences dialog( nullptr, cfg );
+  auto main = dialog.findChild< QLabel * >( "mainWindowHotkeyStatus" );
+  auto clipboard = dialog.findChild< QLabel * >( "clipboardHotkeyStatus" );
+  auto configure = dialog.findChild< QPushButton * >( "configureShortcuts" );
+  QVERIFY( main && clipboard && configure );
+  QString const unassigned = QStringLiteral( "Not assigned by the portal — use Configure shortcuts" );
+
+  TestSupport::PrivateSessionBus privateBus;
+  QString reason;
+  QVERIFY2( privateBus.start( &reason ), qPrintable( reason ) );
+  TestSupport::FakePortal portal;
+  QVERIFY2( portal.start( privateBus.fixtureConnection(), 2 ), qPrintable( portal.errorString() ) );
+  portal.setBoundShortcuts( {
+    { QStringLiteral( "main-window" ), { { QStringLiteral( "trigger_description" ), QStringLiteral( "Portal main trigger" ) } } },
+    { QStringLiteral( "clipboard-lookup" ), { { QStringLiteral( "trigger_description" ), QStringLiteral( "Portal clipboard trigger" ) } } }
+  } );
+  QString explanation;
+  QVector< PortalBindingDisplay > reported;
+  PortalBackend backend( privateBus.connection() );
+  connect( &backend, &HotkeyBackend::stateChanged, this,
+           [ & ]( State, QString const & value ) { explanation = value; } );
+  connect( &backend, &HotkeyBackend::bindingsChanged, this,
+           [ & ]( QVector< PortalBindingDisplay > const & values ) { reported = values; } );
+  auto render = [ & ] {
+    dialog.setHotkeyStatus( "wayland", backend.state(), explanation, reported,
+                           backend.isConfigureAvailable() );
+  };
+  QVector< HotkeyBinding > const desired{
+    { QStringLiteral( "main-window" ), QStringLiteral( "Main window" ), QStringLiteral( "CTRL+ALT+g" ) },
+    { QStringLiteral( "clipboard-lookup" ), QStringLiteral( "Clipboard" ), QStringLiteral( "CTRL+ALT+h" ) }
+  };
+
+  // These false values come from production, so a predicate that always returns
+  // true cannot hide behind a table of hand-supplied UI capability booleans.
+  QCOMPARE( backend.state(), State::Creating );
+  QVERIFY( !backend.isConfigureAvailable() );
+  render();
+  QVERIFY( !configure->isEnabled() );
+  QVERIFY( QTest::qWaitFor( [ & ] { return backend.state() == State::Ready; }, 1500 ) );
+  render();
+  QVERIFY( !configure->isEnabled() );
+  portal.holdResponse( QStringLiteral( "BindShortcuts" ) );
+  backend.bind( desired );
+  QVERIFY( QTest::qWaitFor( [ & ] {
+    return backend.state() == State::Binding && portal.count( QStringLiteral( "BindShortcuts" ) ) == 1;
+  }, 1500 ) );
+  render();
+  QVERIFY( !configure->isEnabled() );
+  portal.releaseHeldResponse( QStringLiteral( "BindShortcuts" ) );
+  QVERIFY( QTest::qWaitFor( [ & ] { return backend.state() == State::Bound; }, 1500 ) );
+  render();
+  QVERIFY( configure->isEnabled() );
+  QCOMPARE( main->text(), QStringLiteral( "Portal main trigger" ) );
+  QCOMPARE( clipboard->text(), QStringLiteral( "Portal clipboard trigger" ) );
+
+  portal.setBoundShortcuts( {
+    { QStringLiteral( "main-window" ), { { QStringLiteral( "trigger_description" ), QStringLiteral( "Portal main trigger" ) } } },
+    { QStringLiteral( "clipboard-lookup" ), { { QStringLiteral( "trigger_description" ), QString() } } }
+  } );
+  backend.bind( desired );
+  QVERIFY( QTest::qWaitFor( [ & ] { return backend.state() == State::Partial; }, 1500 ) );
+  render();
+  QVERIFY( configure->isEnabled() );
+  QCOMPARE( main->text(), QStringLiteral( "Portal main trigger" ) );
+  QCOMPARE( clipboard->text(), unassigned );
+
+  portal.setScenario( QStringLiteral( "bind-denied" ) );
+  backend.bind( desired );
+  QVERIFY( QTest::qWaitFor( [ & ] { return backend.state() == State::Denied; }, 1500 ) );
+  render();
+  QVERIFY( configure->isEnabled() );
+  QCOMPARE( main->text(), unassigned );
+  QCOMPARE( clipboard->text(), unassigned );
+
+  portal.setScenario( QStringLiteral( "denied" ) );
+  backend.bind( desired );
+  QVERIFY( QTest::qWaitFor( [ & ] { return backend.state() == State::Denied; }, 1500 ) );
+  QVERIFY( !backend.isConfigureAvailable() );
+  render();
+  QVERIFY( !configure->isEnabled() );
+  QCOMPARE( main->text(), explanation );
+
+  portal.setScenario( QStringLiteral( "fast" ) );
+  backend.bind( desired );
+  QVERIFY( QTest::qWaitFor( [ & ] { return backend.state() == State::Partial; }, 1500 ) );
+  portal.emitSessionClosed( portal.sessionPath(), QStringLiteral( "fixture closed" ) );
+  QVERIFY( QTest::qWaitFor( [ & ] { return backend.state() == State::Unavailable; }, 1500 ) );
+  render();
+  QVERIFY( !configure->isEnabled() );
+  QCOMPARE( main->text(), explanation );
+  backend.unbind();
+  QCOMPARE( backend.state(), State::Closed );
+  render();
+  QVERIFY( !configure->isEnabled() );
+  QCOMPARE( main->text(), explanation );
+
+  RecordingHotkeyBackend unsupported( false );
+  dialog.setHotkeyStatus( "wayland", State::Unsupported, QStringLiteral( "platform unsupported" ), {},
+                         unsupported.isConfigureAvailable() );
+  QVERIFY( !configure->isEnabled() );
+  // Even a stale Bound/Partial display cannot override a false live capability.
+  for( State state : { State::Bound, State::Partial } )
+  {
+    dialog.setHotkeyStatus( "wayland", state, {}, {}, backend.isConfigureAvailable() );
+    QVERIFY( !configure->isEnabled() );
+  }
+  dialog.setHotkeyStatus( "xcb", State::Bound, {}, {}, true );
+  QVERIFY( !configure->isEnabled() );
+}
+
+void TstHotkeys::configureAvailabilityFollowsBindCompletion()
+{
+  using State = HotkeyBackend::State;
+  TestSupport::PrivateSessionBus privateBus;
+  QString reason;
+  QVERIFY2( privateBus.start( &reason ), qPrintable( reason ) );
+  auto portal = std::make_unique< TestSupport::FakePortal >();
+  QVERIFY2( portal->start( privateBus.fixtureConnection(), 2 ), qPrintable( portal->errorString() ) );
+  QDBusConnection client = privateBus.connection();
+  QVERIFY( client.connect( QString(), QStringLiteral( "/gd_test" ),
+                           QStringLiteral( "org.goldendict.Test" ), QStringLiteral( "Barrier" ),
+                           this, SLOT( wireBarrier( uint ) ) ) );
+  auto flushWire = [ this ]( QDBusConnection const & sender ) {
+    const uint marker = ++nextMarker;
+    QDBusMessage message = QDBusMessage::createSignal(
+        QStringLiteral( "/gd_test" ), QStringLiteral( "org.goldendict.Test" ),
+        QStringLiteral( "Barrier" ) );
+    message << marker;
+    return sender.send( message )
+           && QTest::qWaitFor( [ this, marker ] { return seenMarker == marker; }, 1000 );
+  };
+  QVector< HotkeyBinding > const desired{
+    { QStringLiteral( "main-window" ), QStringLiteral( "Main window" ), QStringLiteral( "CTRL+ALT+g" ) }
+  };
+  QVector< bool > published;
+  PortalBackend backend( client );
+  QSignalSpy availability( &backend, &HotkeyBackend::configureAvailabilityChanged );
+  QSignalSpy states( &backend, &HotkeyBackend::stateChanged );
+  connect( &backend, &HotkeyBackend::configureAvailabilityChanged, this,
+           [ & ] { published.append( backend.isConfigureAvailable() ); } );
+
+  QVERIFY( !backend.isConfigureAvailable() );
+  QVERIFY( QTest::qWaitFor( [ & ] { return backend.state() == State::Ready; }, 1500 ) );
+  QVERIFY( backend.isSupported() );
+  QVERIFY( !backend.isConfigureAvailable() );
+  QCOMPARE( availability.count(), 0 );
+
+  portal->holdResponse( QStringLiteral( "BindShortcuts" ) );
+  backend.bind( desired );
+  QVERIFY( !backend.isConfigureAvailable() );
+  QVERIFY( QTest::qWaitFor( [ & ] {
+    return backend.state() == State::Binding && portal->count( QStringLiteral( "BindShortcuts" ) ) == 1;
+  }, 1500 ) );
+  QVERIFY( !backend.isConfigureAvailable() );
+  QCOMPARE( availability.count(), 0 );
+  backend.configure( {} );
+  QVERIFY( flushWire( client ) );
+  QCOMPARE( portal->count( QStringLiteral( "ConfigureShortcuts" ) ), 0 );
+  QCOMPARE( states.last().at( 1 ).toString(),
+            QStringLiteral( "ConfigureShortcuts requires an available session" ) );
+
+  portal->releaseHeldResponse( QStringLiteral( "BindShortcuts" ) );
+  QVERIFY( QTest::qWaitFor( [ & ] { return backend.state() == State::Bound; }, 1500 ) );
+  QVERIFY( backend.isConfigureAvailable() );
+  QCOMPARE( availability.count(), 1 );
+  QCOMPARE( published, QVector< bool >{ true } );
+  // Queries and unrelated display/state notifications do not publish a transition.
+  for( int i = 0; i != 3; ++i )
+    QVERIFY( backend.isConfigureAvailable() );
+  backend.setDisplayPolicy( { QStringLiteral( "main-window" ) } );
+  QVERIFY( flushWire( privateBus.fixtureConnection() ) );
+  QCOMPARE( availability.count(), 1 );
+
+  backend.unbind();
+  QVERIFY( !backend.isConfigureAvailable() );
+  QCOMPARE( availability.count(), 2 );
+  backend.unbind();
+  QCOMPARE( availability.count(), 2 );
+
+  portal->setScenario( QStringLiteral( "bind-denied" ) );
+  backend.bind( desired );
+  QVERIFY( QTest::qWaitFor( [ & ] { return backend.state() == State::Denied; }, 1500 ) );
+  QVERIFY( backend.isConfigureAvailable() );
+  QCOMPARE( availability.count(), 3 );
+  backend.configure( {} );
+  QVERIFY( QTest::qWaitFor( [ & ] {
+    return portal->count( QStringLiteral( "ConfigureShortcuts" ) ) == 1;
+  }, 1500 ) );
+  QCOMPARE( portal->bindCountForSession( portal->sessionPath() ), 1 );
+  QCOMPARE( availability.count(), 3 );
+
+  portal->setScenario( QStringLiteral( "denied" ) );
+  backend.bind( desired );
+  QVERIFY( !backend.isConfigureAvailable() );
+  QCOMPARE( availability.count(), 4 );
+  QVERIFY( QTest::qWaitFor( [ & ] { return backend.state() == State::Denied; }, 1500 ) );
+  QVERIFY( !backend.isConfigureAvailable() );
+  QCOMPARE( availability.count(), 4 );
+
+  portal->setScenario( QStringLiteral( "fast" ) );
+  backend.bind( desired );
+  QVERIFY( QTest::qWaitFor( [ & ] { return backend.state() == State::Bound; }, 1500 ) );
+  QCOMPARE( availability.count(), 5 );
+  portal->emitSessionClosed( portal->sessionPath(), QStringLiteral( "fixture closed" ) );
+  QVERIFY( QTest::qWaitFor( [ & ] { return backend.state() == State::Unavailable; }, 1500 ) );
+  QVERIFY( !backend.isConfigureAvailable() );
+  QCOMPARE( availability.count(), 6 );
+
+  backend.bind( desired );
+  QVERIFY( QTest::qWaitFor( [ & ] { return backend.state() == State::Bound; }, 1500 ) );
+  QCOMPARE( availability.count(), 7 );
+  portal->loseService();
+  QVERIFY( QTest::qWaitFor( [ & ] { return backend.state() == State::Unavailable; }, 1500 ) );
+  QVERIFY( !backend.isSupported() );
+  QVERIFY( !backend.isConfigureAvailable() );
+  QCOMPARE( availability.count(), 8 );
+
+  portal.reset( new TestSupport::FakePortal );
+  QVERIFY2( portal->start( privateBus.fixtureConnection(), 2 ), qPrintable( portal->errorString() ) );
+  backend.bind( desired );
+  QVERIFY( QTest::qWaitFor( [ & ] { return backend.state() == State::Bound; }, 1500 ) );
+  QVERIFY( backend.isSupported() );
+  QVERIFY( backend.isConfigureAvailable() );
+  QCOMPARE( availability.count(), 9 );
+  QVERIFY( flushWire( privateBus.fixtureConnection() ) );
+  const int configureCalls = portal->count( QStringLiteral( "ConfigureShortcuts" ) );
+
+  // stop() terminates the owned daemon, breaking the backend's retained transport.
+  // Merely disconnecting a named Qt connection leaves retained handles connected.
+  privateBus.stop();
+  QVERIFY( !privateBus.isRunning() );
+  QVERIFY( QTest::qWaitFor( [ & ] { return !client.isConnected(); }, 1500 ) );
+  QVERIFY( !backend.isSupported() );
+  QCOMPARE( backend.state(), State::Bound );
+  QVERIFY( !backend.isConfigureAvailable() );
+  QVERIFY( QTest::qWaitFor( [ & ] { return availability.count() == 10; }, 1500 ) );
+  QCOMPARE( published, ( QVector< bool >{ true, false, true, false, true, false, true, false, true, false } ) );
+  backend.configure( {} );
+  QCOMPARE( states.last().at( 1 ).toString(),
+            QStringLiteral( "ConfigureShortcuts requires an available session" ) );
+  QCOMPARE( portal->count( QStringLiteral( "ConfigureShortcuts" ) ), configureCalls );
+  QCOMPARE( portal->protocolViolations(), QStringList() );
 }
 
 void TstHotkeys::lateCreateSessionSuccessClosesItsSessionAfterCancellation()

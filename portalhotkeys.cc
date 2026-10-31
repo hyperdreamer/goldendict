@@ -610,6 +610,7 @@ struct PortalBackend::Private
     bool supported = false;
     bool bindAttempted = false;
     bool bindCompleted = false;
+    bool publishedConfigureAvailability = false;
     bool destroying = false;
 };
 
@@ -636,6 +637,10 @@ PortalBackend::PortalBackend( QDBusConnection const & bus, QObject * parent ):
                     SLOT( receivePortalSignal( QDBusMessage ) ) );
     d->bus.connect( Service, QString(), SessionInterface, QStringLiteral( "Closed" ), this,
                     SLOT( receivePortalSignal( QDBusMessage ) ) );
+
+    d->bus.connect( QString(), QStringLiteral( "/org/freedesktop/DBus/Local" ),
+                    QStringLiteral( "org.freedesktop.DBus.Local" ), QStringLiteral( "Disconnected" ),
+                    this, SLOT( transportDisconnected() ) );
 
     // Probe capability even before the first edit. A bind before this queued
     // probe runs supersedes it, rather than issuing duplicate version lookups.
@@ -674,6 +679,10 @@ PortalBackend::~PortalBackend()
     d->bus.disconnect( Service, QString(), SessionInterface, QStringLiteral( "Closed" ), this,
                        SLOT( receivePortalSignal( QDBusMessage ) ) );
 
+    d->bus.disconnect( QString(), QStringLiteral( "/org/freedesktop/DBus/Local" ),
+                       QStringLiteral( "org.freedesktop.DBus.Local" ), QStringLiteral( "Disconnected" ),
+                       this, SLOT( transportDisconnected() ) );
+
     // QtDBus can still be delivering this watcher's owner-change metacall when
     // a stateChanged receiver destroys us. Retire it now, delete after dispatch.
     serviceWatcher->disconnect( this );
@@ -687,6 +696,23 @@ PortalBackend::~PortalBackend()
 bool PortalBackend::isSupported() const noexcept
 {
     return d && d->versionKnown && d->supported && d->bus.isConnected();
+}
+
+bool PortalBackend::isConfigureAvailable() const noexcept
+{
+    return isSupported() && !d->owner.isEmpty() && !d->sessionPath.isEmpty()
+           && d->version >= 2 && d->bindCompleted;
+}
+
+void PortalBackend::publishConfigureAvailability()
+{
+    if ( !d )
+        return;
+    const bool available = isConfigureAvailable();
+    if ( available == d->publishedConfigureAvailability )
+        return;
+    d->publishedConfigureAvailability = available;
+    emit configureAvailabilityChanged();
 }
 
 HotkeyBackend::State PortalBackend::state() const noexcept
@@ -705,8 +731,11 @@ void PortalBackend::unbind()
         return;
 
     const quint64 generation = ++d->generation;
+    QPointer< PortalBackend > alive( this );
     cancelRequests();
     closeSession();
+    if ( !alive || generation != d->generation )
+        return;
     // The probe belongs to a generation: once a new one starts, no version is known
     // until a fresh probe answers. `supported` records what the platform was found
     // to be, so it survives; `isSupported()` requires both.
@@ -719,7 +748,9 @@ void PortalBackend::unbind()
     d->bindAttempted = false;
     d->bindCompleted = false;
     ++d->displayRevision;
-    QPointer< PortalBackend > alive( this );
+    publishConfigureAvailability();
+    if ( !alive || generation != d->generation )
+        return;
     setState( HotkeyBackend::State::Closed, QStringLiteral( "Portal session closed" ) );
     if ( alive && generation == d->generation )
         emit bindingsChanged( {} );
@@ -730,12 +761,7 @@ void PortalBackend::configure( QString const & activationToken )
     if ( !d || d->destroying )
         return;
 
-    if ( d->version < 2 )
-    {
-        setState( d->state, QStringLiteral( "ConfigureShortcuts requires portal version 2" ) );
-        return;
-    }
-    if ( d->sessionPath.isEmpty() || d->owner.isEmpty() || !isSupported() )
+    if ( !isConfigureAvailable() )
     {
         setState( d->state, QStringLiteral( "ConfigureShortcuts requires an available session" ) );
         return;
@@ -763,6 +789,11 @@ void PortalBackend::configure( QString const & activationToken )
                  else if ( reply.type() != QDBusMessage::ReplyMessage )
                      setState( d->state, QStringLiteral( "ConfigureShortcuts returned no reply" ) );
              } );
+}
+
+void PortalBackend::transportDisconnected()
+{
+    publishConfigureAvailability();
 }
 
 void PortalBackend::setState( HotkeyBackend::State state, QString const & explanation )
@@ -794,8 +825,11 @@ void PortalBackend::beginGeneration( QVector< HotkeyBinding > const & bindings )
         return;
 
     const quint64 generation = ++d->generation;
+    QPointer< PortalBackend > alive( this );
     cancelRequests();
     closeSession();
+    if ( !alive || d->destroying || generation != d->generation )
+        return;
     d->desired.clear();
     // The display policy belongs to the config/UI layer and survives a bind edit;
     // only the requested set is rebuilt below.
@@ -807,6 +841,9 @@ void PortalBackend::beginGeneration( QVector< HotkeyBinding > const & bindings )
     d->version = 0;
     d->supported = false;
     ++d->displayRevision;
+    publishConfigureAvailability();
+    if ( !alive || d->destroying || generation != d->generation )
+        return;
 
     QSet< QString > ids;
     bool valid = true;
@@ -849,7 +886,6 @@ void PortalBackend::beginGeneration( QVector< HotkeyBinding > const & bindings )
     // attempt is therefore captured before the notification is emitted; the
     // resumed work then fails the guard instead of issuing a second lookup tagged
     // with the newer generation.
-    QPointer< PortalBackend > alive( this );
     setState( HotkeyBackend::State::Creating, QStringLiteral( "Creating portal session" ) );
     if ( !alive || d->destroying || generation != d->generation )
         return;
@@ -931,6 +967,10 @@ void PortalBackend::readVersionForOwner( quint64 generation, QString const & own
                      return;
                  }
                  d->supported = true;
+                 QPointer< PortalBackend > alive( this );
+                 publishConfigureAvailability();
+                 if ( !alive || d->destroying || generation != d->generation )
+                     return;
                  if ( d->desired.isEmpty() )
                      setState( HotkeyBackend::State::Ready, QStringLiteral( "Portal is available" ) );
                  else
@@ -1102,6 +1142,9 @@ void PortalBackend::handleCreateResponse( quint64 generation, uint code,
     d->addressedIds.clear();
     d->activeIds.clear();
     QPointer< PortalBackend > alive( this );
+    publishConfigureAvailability();
+    if ( !alive || generation != d->generation )
+        return;
     setState( HotkeyBackend::State::Ready, QStringLiteral( "Portal session is ready" ) );
     if ( !alive || generation != d->generation )
         return;
@@ -1153,6 +1196,8 @@ void PortalBackend::handleBindResponse( quint64 generation, uint code, QVariantM
         d->activeIds.clear();
         setState( HotkeyBackend::State::Denied, QStringLiteral( "Portal shortcut binding was denied" ) );
         if ( alive && generation == d->generation )
+            publishConfigureAvailability();
+        if ( alive && generation == d->generation )
             emit bindingsChanged( {} );
         return;
     }
@@ -1197,6 +1242,8 @@ void PortalBackend::handleBindResponse( quint64 generation, uint code, QVariantM
     const BindingActivity activity = bindingActivityFromReply( entries, d->requestedIds );
     d->activeIds = activity.activeIds;
     setState( activity.state, activity.explanation );
+    if ( alive && generation == d->generation )
+        publishConfigureAvailability();
     if ( alive && generation == d->generation )
         emit bindingsChanged( displayEntries( entries, d->displayPolicy ) );
 }
@@ -1300,8 +1347,13 @@ void PortalBackend::receivePortalSignal( QDBusMessage const & message )
         if ( !extractOptions( message.arguments().first(), &details ) )
             return;
         Q_UNUSED( details )
+        d->bindCompleted = false;
         d->sessionPath.clear();
-        failGeneration( QStringLiteral( "Portal session was closed" ) );
+        const quint64 generation = d->generation;
+        QPointer< PortalBackend > alive( this );
+        publishConfigureAvailability();
+        if ( alive && generation == d->generation )
+            failGeneration( QStringLiteral( "Portal session was closed" ) );
     }
 }
 
@@ -1311,6 +1363,7 @@ void PortalBackend::failGeneration( QString const & explanation, bool supported 
         return;
 
     const quint64 generation = ++d->generation;
+    QPointer< PortalBackend > alive( this );
     // A request's own service watcher may notify before the backend watcher.
     // Publish loss atomically with Unavailable, and never Close a vanished owner.
     if ( explanation.endsWith( QStringLiteral( "Portal service owner changed" ) ) )
@@ -1328,7 +1381,11 @@ void PortalBackend::failGeneration( QString const & explanation, bool supported 
     ++d->displayRevision;
     cancelRequests();
     closeSession();
-    QPointer< PortalBackend > alive( this );
+    if ( !alive || generation != d->generation )
+        return;
+    publishConfigureAvailability();
+    if ( !alive || generation != d->generation )
+        return;
     setState( HotkeyBackend::State::Unavailable, explanation );
     if ( alive && generation == d->generation )
         emit bindingsChanged( {} );
@@ -1369,13 +1426,19 @@ void PortalBackend::forgetRequest( PortalRequest * request ) noexcept
 
 void PortalBackend::closeSession() noexcept
 {
-    if ( !d || d->sessionPath.isEmpty() )
+    if ( !d )
         return;
 
     const QString path = d->sessionPath;
     const QString service = d->owner.isEmpty() ? Service : d->owner;
+    const quint64 generation = d->generation;
+    QPointer< PortalBackend > alive( this );
+    d->bindCompleted = false;
+    publishConfigureAvailability();
+    if ( !alive || generation != d->generation || path != d->sessionPath )
+        return;
     d->sessionPath.clear();
-    if ( d->bus.isConnected() )
+    if ( !path.isEmpty() && d->bus.isConnected() )
     {
         QDBusMessage message = QDBusMessage::createMethodCall(
             service, path, SessionInterface, QStringLiteral( "Close" ) );
@@ -1392,11 +1455,19 @@ void PortalBackend::ownerChanged( QString const &, QString const & newOwner )
         || ( !d->owner.isEmpty() && d->owner != newOwner );
     // A vanished owner needs no Close and must never route one to its successor.
     if ( lost )
+    {
+        d->bindCompleted = false;
         d->sessionPath.clear();
+    }
     d->owner = newOwner;
     if ( lost )
     {
         d->supported = false;
+        const quint64 generation = d->generation;
+        QPointer< PortalBackend > alive( this );
+        publishConfigureAvailability();
+        if ( !alive || generation != d->generation )
+            return;
         if ( d->state != HotkeyBackend::State::Unsupported
              && d->state != HotkeyBackend::State::Closed )
             failGeneration( QStringLiteral( "Portal service owner changed" ), false );
