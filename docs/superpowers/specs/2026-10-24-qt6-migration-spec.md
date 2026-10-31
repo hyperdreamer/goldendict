@@ -935,11 +935,10 @@ Generation is incremented before cancelling an old session or applying an edit.
 | Unsupported/initial | Portal owner/version available and first bind | Create generation; CreateSession; Creating |
 | Creating | Response 0 with valid session_handle string | Associate session/generation; ListShortcuts for display; Ready |
 | Ready | Valid desired combinations | Set bindAttempted **before** invocation; BindShortcuts once; Binding |
-| Binding | Response 0, all valid IDs reported | Replace display subset; Bound |
-| Binding | Response 0, proper nonempty subset | Replace subset; Partial; missing IDs visibly unavailable |
+Response 0 where every requested ID is reported with a non-empty trigger_description -> Bound; at least one but not all -> Partial, the rest visibly unassigned; none -> Denied with explanation. Every activity decision uses the same rule for ShortcutsChanged responses.
 | Binding | Empty subset or response code 1/2 | Clear active bindings; Denied with explanation |
 | Bound/Partial/Denied | Application changes IDs, enable flags or sequence text | Close requests/session, clear active subset, increment; new Creating |
-| Bound/Partial | Configure action, version >= 2 | ConfigureShortcuts existing session; no BindShortcuts call; keep current state until ShortcutsChanged |
+| Bound, Partial, and a concluded BindShortcuts denial | Configure action, version >= 2, live session | not available while a bind is pending, and not after a session-creation denial, which has no session. |
 | Any live state | Timeout, Session.Closed, service disappearance, malformed reply, method error | Close requests/session if reachable; Unavailable, clear active subset; no retry |
 | Any live state | Explicit unbind/shutdown | Cancel requests, Session.Close, Closed |
 | Any state | Stale response containing a newly created old session | Close that returned session immediately; do not bind/activate it |
@@ -957,14 +956,14 @@ and is ignored for the current display; it is not compared with the current gene
 bind input and does not make that response a protocol error. Pre-bind historical entries may populate
 labels/triggers for display only. They never activate an ID, never become part of the
 active subset, and never tear down a session merely because an old ID is absent from
-this generation's bind input. Only a successful BindShortcuts response can replace the
-active subset, and only bound current-session IDs can activate. Ignore timestamp for
+this generation's bind input. The active subset may be replaced by a successful BindShortcuts response and by a validated current-session ShortcutsChanged update received after the bind-completion gate; each applies the same activity rule - an ID is active only when the portal reports a non-empty trigger_description for it. Pre-bind historical ListShortcuts entries still never replace the subset and never activate.
+Ignore timestamp for
 focus timing; forward `activation_token` unchanged. Deactivated never triggers another
 lookup.
 
 PortalRequest states: Subscribed → Calling → AwaitingResponse → Completed or
-Cancelled/TimedOut/Failed. Its 5 s deadline begins before invocation and covers both
-method reply and Response. Cancel issues Request.Close once when the path is known;
+Cancelled/TimedOut/Failed. Its deadline begins before invocation and covers establishment - owner lookup, method reply and request-path resolution - for every request. A MachineAnswered request keeps that same 5 s budget for its whole lifetime. A UserConsent request (BindShortcuts) is exempt from any wall-clock bound once established and ends only on Response, Session.Closed, portal owner change, generation retirement, or destruction.
+Cancel issues Request.Close once when the path is known;
 Close generates no completion expectation. Details of early replies are in §4.12.
 
 ### 3.5 Print, save, encoding and config lifecycles
@@ -1704,7 +1703,7 @@ Examples: `Ctrl+Alt+G`→`CTRL+ALT+g`; `Meta+Shift+F5`→`SHIFT+LOGO+F5`;
 `Ctrl++`→`CTRL+plus`; `Ctrl+C,C`→unavailable sequence. Do not send NUM for
 Qt KeypadModifier. `trigger_description` is localized display-only output; never parse
 it, compare it to preferred_trigger, or claim a requested binding is active without
-portal reporting it. An empty trigger_description displays “Assigned by portal”.
+portal reporting it. An empty trigger_description means the portal reports no active trigger for that ID: it is displayed as not assigned and never as active. The string is tested only for emptiness, never parsed and never compared with preferred_trigger.
 
 UI states: X11 active; portal bound/partial with per-ID descriptions; portal
 unsupported/absent/denied/unavailable with reason; preserved multi-key sequence
@@ -1730,8 +1729,7 @@ Response before method return, the request listens to Response with an empty-pat
 match, records the message path, and buffers candidate early envelopes until the
 method result identifies the handle. Only envelopes matching this request's predicted
 or returned path and current service owner can complete it. Ignore unrelated requests.
-The early-envelope buffer is bounded to this request's 5 s lifetime and cleared on
-completion; no broad handler can deliver an unrelated request's result.
+The active establishment buffer is bounded by the phase budget and MaxCandidates and is cleared after delivery. A retired request retains that same bounded buffer only for CleanupMs so a late CreateSession success can still expose its session_handle for Session.Close (org.freedesktop.portal.Session.Close; Request.Close remains the interface for the predicted and returned request paths and is unchanged by this amendment). The buffer is dropped at disposal or on service owner change; cancellation does not unconditionally clear it.
 
 On method response set the actual path, process its buffered Response at most once,
 and discard other paths. On cancelled request whose actual path arrives late, issue
@@ -1750,10 +1748,18 @@ Wire calls:
   never activate or invalidate the session. Apply only if its display revision is
   current.
 - BindShortcuts(session, [(id,{description,preferred_trigger}),...], "",
-  {handle_token}) → request; only handle_token goes in **Bind options**. Response
-  `shortcuts` must be a unique subset of the requested valid IDs; unknown/duplicate
-  IDs or wrong DBus types are protocol error → Unavailable. Partial/empty is legal,
-  not protocol error.
+  {handle_token}) -> request; only handle_token goes in **Bind options**. The 4.9 s
+  budget covers establishment only. After establishment the request ends on
+  Response, Session.Closed, portal owner change, generation retirement, or
+  destruction. CreateSession and ListShortcuts keep the whole-lifetime bound.
+  Activity is determined only by a non-empty trigger_description for a requested ID.
+  A retry of an unchanged set happens only for an explicit user action - an accepted
+  preferences dialog - and only when the previous outcome was neither Bound nor
+  Partial; it uses a fresh session and exactly one BindShortcuts. A backend the
+  platform declared Unsupported is never retried. Response `shortcuts` must be a
+  unique subset of the requested valid IDs; unknown/duplicate IDs or wrong DBus
+  types are protocol error -> Unavailable. Partial/empty is legal, not protocol
+  error.
 - ConfigureShortcuts(session, "", {activation_token: token when supplied}) is v2-only,
   an asynchronous method with **no** Request.Response lifecycle. Observe method error
   and later ShortcutsChanged; never attempt a second Bind in this session.
