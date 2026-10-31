@@ -9,14 +9,14 @@
 # at configure time and the binary looks for its data in /usr/share/goldendict.
 
 pkgname=goldendict
-pkgver=1.5.1.r2828.g862b1a98
+pkgver=1.5.1.r2875.g87190e14
 pkgrel=1
 epoch=2
 pkgdesc='Feature-rich dictionary lookup program (Qt 6 and QtWebEngine)'
 arch=('x86_64' 'aarch64')
 url='https://github.com/hyperdreamer/goldendict'
 license=('GPL-3.0-or-later')
-_commit='278bb0c49414ab4d7e6e68a3aff93f8710d3bf5a'
+_commit='87190e142835e8806c9b0fd8c91b32cced2fd512'
 source=("${pkgname}::git+https://github.com/hyperdreamer/goldendict.git#commit=${_commit}")
 sha256sums=('SKIP')
 
