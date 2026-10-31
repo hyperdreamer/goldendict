@@ -182,7 +182,7 @@ private:
 
   std::unique_ptr<ArticleProfileController> articleProfile;
   std::unique_ptr<HotkeyBackend> hotkeyBackend;
-  QVector<HotkeyBinding> requestedHotkeys;
+  HotkeyInstallGate installGate;
   QVector<PortalBindingDisplay> reportedHotkeys;
   HotkeyBackend::State hotkeyState = HotkeyBackend::State::Unavailable;
   QString hotkeyExplanation;
@@ -263,8 +263,8 @@ private:
   void toggleMainWindow( bool onlyShow = false );
 #endif
 
-  /// Binds the active backend only when the requested settings change.
-  void installHotKeys();
+  /// Binds changed settings or an explicit retry when the backend state permits.
+  void installHotKeys( HotkeyInstallIntent intent = HotkeyInstallIntent::Refresh );
 
   void applyZoomFactor();
   void adjustCurrentZoomFactor();

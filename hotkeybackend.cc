@@ -23,6 +23,62 @@ public:
 };
 }
 
+bool hotkeyBindingSettles( HotkeyBackend::State state ) noexcept
+{
+    using State = HotkeyBackend::State;
+    return state == State::Bound || state == State::Partial || state == State::Unsupported;
+}
+
+bool hotkeyBindingInFlight( HotkeyBackend::State state ) noexcept
+{
+    using State = HotkeyBackend::State;
+    return state == State::Creating || state == State::Binding;
+}
+
+bool hotkeyInstallShouldBind( bool backendPresent, bool unchangedSet,
+                              HotkeyBackend::State state,
+                              HotkeyInstallIntent intent ) noexcept
+{
+    // Ordered, first-match-wins: Unsupported is final, while an actual edit
+    // preempts an in-flight bind and replaces a settled supported binding.
+    if ( !backendPresent )
+        return true;
+    if ( state == HotkeyBackend::State::Unsupported )
+        return false;
+    if ( hotkeyBindingInFlight( state ) && unchangedSet )
+        return false;
+    if ( hotkeyBindingInFlight( state ) && !unchangedSet )
+        return true;
+    if ( !unchangedSet )
+        return true;
+    if ( hotkeyBindingSettles( state ) )
+        return false;
+    if ( intent == HotkeyInstallIntent::UserAction )
+        return true;
+    return false;
+}
+
+bool HotkeyInstallGate::shouldBind( bool backendPresent, QVector< HotkeyBinding > const & desired,
+                                    HotkeyBackend::State state, HotkeyInstallIntent intent )
+{
+    bool unchangedSet = primed && lastDesired.size() == desired.size();
+    for ( int i = 0; unchangedSet && i < desired.size(); ++i )
+        unchangedSet = desired[i].id == lastDesired[i].id && desired[i].sequence == lastDesired[i].sequence;
+
+    if ( !hotkeyInstallShouldBind( backendPresent, unchangedSet, state, intent ) )
+        return false;
+
+    lastDesired = desired;
+    primed = true;
+    return true;
+}
+
+void HotkeyInstallGate::reset()
+{
+    lastDesired.clear();
+    primed = false;
+}
+
 std::unique_ptr< HotkeyBackend > createHotkeyBackend( QObject * parent )
 {
     const QString platform = QGuiApplication::platformName().toLower();

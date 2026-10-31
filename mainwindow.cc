@@ -1029,6 +1029,7 @@ void MainWindow::mousePressEvent( QMouseEvent *event)
 MainWindow::~MainWindow()
 {
   hotkeyBackend.reset();
+  installGate.reset();
   startupDeadline.stop();
   scanPopup.reset();
 #ifdef Q_OS_WIN
@@ -1268,6 +1269,7 @@ void MainWindow::quitApp()
   newReleaseCheckTimer.stop();
   wordFinder.cancel();
   hotkeyBackend.reset();
+  installGate.reset();
   scanPopup.reset();
   closeHeadwordsDialog();
   closeFullTextSearchDialog();
@@ -1312,6 +1314,7 @@ void MainWindow::failStartup( QString const & reason )
   connect( dialog, &QDialog::finished, this, [this] {
     shuttingDown = true;
     hotkeyBackend.reset();
+    installGate.reset();
     scanPopup.reset();
     destroyArticleViews();
     QCoreApplication::exit( 1 );
@@ -2124,6 +2127,7 @@ void MainWindow::editDictionaries( unsigned editDictionaryGroup )
 {
   if( shuttingDown ) return;
   hotkeyBackend.reset(); // Retire shortcuts while dictionaries are being changed.
+  installGate.reset();
   scanPopup.reset(); // No scan popup either. No one should use dictionaries.
   closeHeadwordsDialog();
   closeFullTextSearchDialog();
@@ -2335,7 +2339,7 @@ void MainWindow::editPreferences()
   }
 
   makeScanPopup();
-  installHotKeys();
+  installHotKeys( result == QDialog::Accepted ? HotkeyInstallIntent::UserAction : HotkeyInstallIntent::Refresh );
 
   ftsIndexing.setDictionaries( dictionaries );
   ftsIndexing.doIndexing();
@@ -3192,7 +3196,7 @@ void MainWindow::forceX11Focus()
 }
 #endif
 
-void MainWindow::installHotKeys()
+void MainWindow::installHotKeys( HotkeyInstallIntent intent )
 {
   if( shuttingDown ) return;
   auto const platform = QGuiApplication::platformName();
@@ -3212,14 +3216,11 @@ void MainWindow::installHotKeys()
   };
   add( cfg.preferences.enableMainWindowHotkey, "main-window", tr( "Show or hide the main window" ), cfg.preferences.mainWindowHotkey );
   add( cfg.preferences.enableClipboardHotkey, "clipboard-lookup", tr( "Translate clipboard text" ), cfg.preferences.clipboardHotkey );
-  if( hotkeyBackend && requestedHotkeys.size() == desired.size() )
+  if( !installGate.shouldBind( hotkeyBackend != nullptr, desired, hotkeyState, intent ) )
   {
-    bool equal = true;
-    for( int i = 0; i < desired.size(); ++i )
-      equal = equal && desired[i].id == requestedHotkeys[i].id && desired[i].sequence == requestedHotkeys[i].sequence;
-    if( equal ) { refreshHotkeyStatus(); return; }
+    refreshHotkeyStatus();
+    return;
   }
-  requestedHotkeys = desired;
   if( !hotkeyBackend )
   {
     hotkeyBackend = createHotkeyBackend( this );
@@ -3711,6 +3712,7 @@ void MainWindow::on_rescanFiles_triggered()
 {
   if( shuttingDown ) return;
   hotkeyBackend.reset(); // Retire shortcuts while dictionaries are being changed.
+  installGate.reset();
   scanPopup.reset(); // No scan popup either. No one should use dictionaries.
   closeHeadwordsDialog();
   closeFullTextSearchDialog();
