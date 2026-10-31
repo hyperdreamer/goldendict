@@ -43,6 +43,7 @@
 #include <QStandardPaths>
 #include <QDBusConnection>
 #include <QDBusConnectionInterface>
+#include <QDBusMessage>
 #include <QScopedPointer>
 #include <QSet>
 #include <QSignalSpy>
@@ -417,6 +418,7 @@ private slots:
   // Backend capability contract.
   void backendContractSignatures();
   void backendPublishesBindingActivationAndStateContract();
+  void lateCreateSessionSuccessClosesItsSessionAfterCancellation();
   void unsupportedBackendStillReportsState();
   void unsupportedFactory();
   void factorySelection_data();
@@ -461,6 +463,9 @@ private slots:
   void preferencesExplainRendererParity();
   void preferencesKeepAudioVariant();
 
+private slots:
+  void wireBarrier( uint marker ) { seenMarker = marker; }
+
 private:
   /// Copies one fixture to the isolated configuration location Config::load()
   /// reads and returns its absolute path. Returns an empty string on failure.
@@ -477,6 +482,8 @@ private:
   QByteArray originalConfigHome;
   QByteArray originalDataHome;
   QByteArray originalCacheHome;
+  uint nextMarker = 0;
+  uint seenMarker = 0;
 };
 
 void TstHotkeys::initTestCase()
@@ -1082,6 +1089,49 @@ void TstHotkeys::backendPublishesBindingActivationAndStateContract()
   QCOMPARE( stateChanged.count(), 3 );
 }
 
+void TstHotkeys::lateCreateSessionSuccessClosesItsSessionAfterCancellation()
+{
+  TestSupport::PrivateSessionBus privateBus;
+  QString reason;
+  QVERIFY2( privateBus.start( &reason ), qPrintable( reason ) );
+  TestSupport::FakePortal portal;
+  QVERIFY2( portal.start( privateBus.fixtureConnection(), 2 ), qPrintable( portal.errorString() ) );
+  portal.setScenario( QStringLiteral( "early-response" ) );
+  portal.holdMethodReply( QStringLiteral( "CreateSession" ) );
+
+  QVERIFY( privateBus.connection().connect( QString(), QStringLiteral( "/gd_test" ),
+                                             QStringLiteral( "org.goldendict.Test" ),
+                                             QStringLiteral( "Barrier" ), this,
+                                             SLOT( wireBarrier( uint ) ) ) );
+
+  PortalBackend backend( privateBus.connection() );
+  backend.bind( { HotkeyBinding{ QStringLiteral( "main-window" ), QString(), QStringLiteral( "F11" ) } } );
+  QVERIFY( QTest::qWaitFor( [ &portal ]() {
+    return portal.count( QStringLiteral( "CreateSession" ) ) == 1;
+  }, 1000 ) );
+
+  const uint marker = ++nextMarker;
+  QDBusMessage barrier = QDBusMessage::createSignal(
+      QStringLiteral( "/gd_test" ), QStringLiteral( "org.goldendict.Test" ),
+      QStringLiteral( "Barrier" ) );
+  barrier << marker;
+  QVERIFY( privateBus.fixtureConnection().send( barrier ) );
+  QVERIFY( QTest::qWaitFor( [ this, marker ]() { return seenMarker == marker; }, 1000 ) );
+
+  backend.unbind();
+  QCOMPARE( backend.state(), HotkeyBackend::State::Closed );
+  portal.releaseHeldMethodReply( QStringLiteral( "CreateSession" ) );
+  QVERIFY( QTest::qWaitFor( [ &portal ]() {
+    return portal.count( QStringLiteral( "Session.Close" ) ) == 1;
+  }, 1000 ) );
+  QCOMPARE( backend.state(), HotkeyBackend::State::Closed );
+  QCOMPARE( portal.count( QStringLiteral( "Session.Close" ) ), 1 );
+  QVERIFY( portal.protocolViolations().isEmpty() );
+  QVERIFY( privateBus.connection().disconnect( QString(), QStringLiteral( "/gd_test" ),
+                                                QStringLiteral( "org.goldendict.Test" ),
+                                                QStringLiteral( "Barrier" ), this,
+                                                SLOT( wireBarrier( uint ) ) ) );
+}
 void TstHotkeys::unsupportedBackendStillReportsState()
 {
   // An unsupported platform returns a concrete disabled backend, never null and

@@ -165,6 +165,13 @@ public:
     void emitShortcutsChanged( QString const & session, QVector< Shortcut > const & entries );
     void emitSessionClosed( QString const & session, QString const & reason );
 
+    /// Holds a named method's Response after its method reply has arrived.
+    void holdResponse( QString const & member );
+    void releaseHeldResponse( QString const & member );
+    /// Holds a named method's reply while still allowing its early Response.
+    void holdMethodReply( QString const & member );
+    void releaseHeldMethodReply( QString const & member );
+
     /// Flushes every reply/signal a "delayed"/"late"/"slow" scenario is holding.
     void releasePending();
 

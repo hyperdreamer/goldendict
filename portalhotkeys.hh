@@ -36,12 +36,20 @@ Q_DECLARE_METATYPE( PortalWire::Shortcuts )
 class PortalRequestState;
 class QDBusServiceWatcher;
 
+/// Response timing policy for a portal request.
+enum class PortalResponsePolicy
+{
+    MachineAnswered,
+    UserConsent
+};
+
 /// One asynchronous portal exchange, including responses sent before its reply.
 class PortalRequest : public QObject
 {
     Q_OBJECT
 public:
-    PortalRequest( QDBusConnection const & bus, quint64 generation, QObject * parent = nullptr );
+    PortalRequest( QDBusConnection const & bus, quint64 generation, QObject * parent = nullptr,
+                   PortalResponsePolicy policy = PortalResponsePolicy::MachineAnswered );
     ~PortalRequest() override;
     void start( QDBusMessage message, QString const & handleToken );
     void cancel() noexcept;

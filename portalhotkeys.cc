@@ -173,9 +173,10 @@ class PortalRequestState final : public QObject
 {
     Q_OBJECT
 public:
-    PortalRequestState( QDBusConnection const & connection, quint64 generation_, PortalRequest * target_ ):
-        QObject( target_ ), bus( connection ), generation( generation_ ),
-        target( target_ ), serviceWatcher( Service, bus, QDBusServiceWatcher::WatchForOwnerChange, this )
+    PortalRequestState( QDBusConnection const & connection, quint64 generation_, PortalRequest * target_,
+                        PortalResponsePolicy policy_ ):
+        QObject( target_ ), bus( connection ), generation( generation_ ), target( target_ ), policy( policy_ ),
+        serviceWatcher( Service, bus, QDBusServiceWatcher::WatchForOwnerChange, this )
     {
         timer.setSingleShot( true );
         timer.setTimerType( Qt::PreciseTimer );
@@ -311,7 +312,11 @@ private:
 
     bool expired()
     {
-        if ( !retired && elapsed.elapsed() >= DeadlineMs )
+        if ( retired )
+            return false;
+        if ( policy == PortalResponsePolicy::UserConsent && established )
+            return false;
+        if ( elapsed.elapsed() >= DeadlineMs )
         {
             fail( QStringLiteral( "Portal request deadline exceeded" ) );
             return true;
@@ -401,6 +406,9 @@ private:
             dispose();
             return;
         }
+        established = true;
+        if ( !retired && policy == PortalResponsePolicy::UserConsent )
+            timer.stop();
         if ( retired )
             closeRequests();
         const auto buffered = candidates;
@@ -481,6 +489,7 @@ private:
     QDBusConnection bus;
     const quint64 generation;
     QPointer< PortalRequest > target;
+    PortalResponsePolicy policy = PortalResponsePolicy::MachineAnswered;
     QDBusServiceWatcher serviceWatcher;
     QTimer timer;
     QElapsedTimer elapsed;
@@ -491,12 +500,14 @@ private:
     bool invoked = false;
     bool subscribed = false;
     bool createSession = false;
+    bool established = false;
     bool retired = false;
     bool disposed = false;
 };
 
-PortalRequest::PortalRequest( QDBusConnection const & bus, quint64 generation, QObject * parent ):
-    QObject( parent ), d( new PortalRequestState( bus, generation, this ) )
+PortalRequest::PortalRequest( QDBusConnection const & bus, quint64 generation, QObject * parent,
+                              PortalResponsePolicy policy ):
+    QObject( parent ), d( new PortalRequestState( bus, generation, this, policy ) )
 {
 }
 
@@ -969,7 +980,8 @@ void PortalBackend::startBind( quint64 generation )
     // Set before notifying callers: even reentrant work cannot bind this session twice.
     d->bindAttempted = true;
     QPointer< PortalBackend > alive( this );
-    setState( HotkeyBackend::State::Binding, QStringLiteral( "Binding portal shortcuts" ) );
+    setState( HotkeyBackend::State::Binding,
+              QStringLiteral( "Binding portal shortcuts: waiting for the portal confirmation dialog" ) );
     if ( !alive || generation != d->generation || d->sessionPath.isEmpty() )
         return;
 
@@ -990,9 +1002,8 @@ void PortalBackend::startBind( quint64 generation )
             << QVariant::fromValue( shortcuts ) << QString()
             << QVariantMap{ { QStringLiteral( "handle_token" ), token } };
 
-    auto request = new PortalRequest( d->bus, generation, this );
-    d->requests.append( request );
-    d->bindRequest = request;
+    auto request = new PortalRequest( d->bus, generation, this,
+                                      PortalResponsePolicy::UserConsent );
     connect( request, &PortalRequest::response, this,
              [ this, request ]( quint64 requestGeneration, QString const &, uint code,
                                 QVariantMap const & results ) {
@@ -1012,6 +1023,8 @@ void PortalBackend::startBind( quint64 generation )
                  if ( d && !d->destroying && requestGeneration == d->generation )
                      failGeneration( explanation );
              } );
+    d->requests.append( request );
+    d->bindRequest = request;
     request->start( message, token );
 }
 
