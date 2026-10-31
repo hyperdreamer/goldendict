@@ -1,0 +1,13 @@
+digraph execution_graph {
+  rankdir=LR;
+  node [shape=box, style=rounded];
+  T1 [label="Task 1: Implement bounded establishment and consent-wait request lifecycle\nlane: portal-request | tier: advanced"];
+  T2 [label="Task 2: Centralize portal activity and truthful binding display\nlane: portal-activity | tier: advanced"];
+  T3 [label="Task 3: Add ordered retry decisions and install memory\nlane: install-gate | tier: capable"];
+  T4 [label="Task 4: Expose live Configure capability and consent UI state\nlane: configure-ui | tier: capable"];
+  T5 [label="Task 5: Amend the migration specification and perform final acceptance\nlane: spec-amendments | tier: fast"];
+  T1 -> T2;
+  T2 -> T3;
+  T3 -> T4;
+  T4 -> T5;
+}
