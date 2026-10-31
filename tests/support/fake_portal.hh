@@ -66,6 +66,7 @@
  *   list-property-wrong-type List response carries `description` as a uint.
  *   bind-partial             Bind reports a proper nonempty subset.
  *   bind-empty               Bind reports an empty bound set.
+ *   bind-returning-empty-trigger Bind reports requested IDs with empty triggers.
  *   bind-unknown-id          Bind reports an id that was never requested.
  *   bind-duplicate-id        Bind repeats one requested id.
  *   bind-wrong-type          Bind response payload is `as`.
@@ -154,8 +155,9 @@ public:
     /// assert the set it depends on exists.
     static QStringList scenarios();
 
-    /// List/Bind payload configuration. Binding reports the requested entries by
-    /// default (all of them, with the requested properties).
+    /// List/Bind payload configuration. Normal Bind payloads report a non-empty
+    /// trigger_description matching preferred_trigger unless a scenario or
+    /// setBoundShortcuts() explicitly supplies the returned entries.
     void setListShortcuts( QVector< Shortcut > const & entries );
     void setBoundShortcuts( QVector< Shortcut > const & entries );
     void setBoundIds( QStringList const & ids );

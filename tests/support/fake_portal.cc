@@ -326,8 +326,34 @@ QVector< Shortcut > FakePortalPrivate::requestedShortcuts( QDBusMessage const & 
 
 QVector< Shortcut > FakePortalPrivate::bindPayload( QVector< Shortcut > const & requested ) const
 {
+    const auto fillRequestedTriggers = []( QVector< Shortcut > payload ) {
+        const QString triggerName = QStringLiteral( "trigger_description" );
+        for ( Shortcut & entry : payload )
+        {
+            const QVariant reported = entry.properties.value( triggerName );
+            if ( reported.metaType() == QMetaType::fromType< QString >()
+                 && !reported.toString().isEmpty() )
+                continue;
+            if ( entry.properties.contains( triggerName )
+                 && reported.metaType() != QMetaType::fromType< QString >() )
+                continue;
+            const QVariant preferred = entry.properties.value( QStringLiteral( "preferred_trigger" ) );
+            if ( preferred.metaType() == QMetaType::fromType< QString >() && !preferred.toString().isEmpty() )
+                entry.properties.insert( triggerName, preferred );
+        }
+        return payload;
+    };
+
     if ( scenario == QLatin1String( "bind-empty" ) )
         return QVector< Shortcut >();
+
+    if ( scenario == QLatin1String( "bind-returning-empty-trigger" ) )
+    {
+        QVector< Shortcut > payload = requested;
+        for ( Shortcut & entry : payload )
+            entry.properties.insert( QStringLiteral( "trigger_description" ), QString() );
+        return payload;
+    }
 
     if ( scenario == QLatin1String( "bind-unknown-id" ) )
     {
@@ -336,7 +362,7 @@ QVector< Shortcut > FakePortalPrivate::bindPayload( QVector< Shortcut > const & 
         unknown.id = QStringLiteral( "unknown-shortcut-id");
         unknown.properties.insert( QStringLiteral( "description" ), QStringLiteral( "unknown" ) );
         payload.append( unknown );
-        return payload;
+        return fillRequestedTriggers( payload );
     }
 
     if ( scenario == QLatin1String( "bind-duplicate-id" ) )
@@ -344,7 +370,7 @@ QVector< Shortcut > FakePortalPrivate::bindPayload( QVector< Shortcut > const & 
         QVector< Shortcut > payload = requested;
         if ( !payload.isEmpty() )
             payload.append( payload.first() );
-        return payload;
+        return fillRequestedTriggers( payload );
     }
 
     if ( !boundIds.isEmpty() )
@@ -363,16 +389,16 @@ QVector< Shortcut > FakePortalPrivate::bindPayload( QVector< Shortcut > const & 
             }
         }
 
-        return payload;
+        return fillRequestedTriggers( payload );
     }
 
     if ( !boundEntries.isEmpty() )
         return boundEntries;
 
-    if ( scenario == QLatin1String( "bind-partial" ) )
-        return requested.size() > 1 ? QVector< Shortcut >{ requested.first() } : requested;
-
-    return requested;
+    QVector< Shortcut > payload = scenario == QLatin1String( "bind-partial" ) && requested.size() > 1
+        ? QVector< Shortcut >{ requested.first() }
+        : requested;
+    return fillRequestedTriggers( payload );
 }
 
 QVariant FakePortalPrivate::listPayload() const
@@ -1203,6 +1229,7 @@ QStringList FakePortal::scenarios()
              QStringLiteral( "list-property-wrong-type" ),
              QStringLiteral( "bind-partial" ),
              QStringLiteral( "bind-empty" ),
+             QStringLiteral( "bind-returning-empty-trigger" ),
              QStringLiteral( "bind-unknown-id" ),
              QStringLiteral( "bind-duplicate-id" ),
              QStringLiteral( "bind-wrong-type" ),
