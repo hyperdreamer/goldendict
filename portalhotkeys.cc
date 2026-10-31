@@ -128,6 +128,51 @@ bool parseShortcuts( QVariant const & value, PortalWire::Shortcuts * result, QSt
     return true;
 }
 
+QSet< QString > activeIdsFromReply( PortalWire::Shortcuts const & entries,
+                                    QSet< QString > const & requested )
+{
+    QSet< QString > active;
+    for ( PortalWire::Shortcut const & entry : entries )
+    {
+        if ( !requested.contains( entry.id ) )
+            continue;
+        const QVariant value = entry.properties.value( QStringLiteral( "trigger_description" ) );
+        if ( value.metaType() == QMetaType::fromType< QString >() && !value.toString().isEmpty() )
+            active.insert( entry.id );
+    }
+    return active;
+}
+
+struct BindingActivity
+{
+    QSet< QString > activeIds;
+    HotkeyBackend::State state = HotkeyBackend::State::Denied;
+    QString explanation;
+};
+
+BindingActivity bindingActivityFromReply( PortalWire::Shortcuts const & entries,
+                                           QSet< QString > const & requested )
+{
+    BindingActivity activity;
+    activity.activeIds = activeIdsFromReply( entries, requested );
+    if ( activity.activeIds.isEmpty() )
+    {
+        activity.state = HotkeyBackend::State::Denied;
+        activity.explanation = QStringLiteral( "Portal bound no shortcuts" );
+    }
+    else if ( activity.activeIds.size() == requested.size() )
+    {
+        activity.state = HotkeyBackend::State::Bound;
+        activity.explanation = QStringLiteral( "Portal shortcuts are bound" );
+    }
+    else
+    {
+        activity.state = HotkeyBackend::State::Partial;
+        activity.explanation = QStringLiteral( "Portal bound only some shortcuts" );
+    }
+    return activity;
+}
+
 QVector< PortalBindingDisplay > displayEntries( PortalWire::Shortcuts const & entries,
                                                 QSet< QString > const & policy )
 {
@@ -141,9 +186,6 @@ QVector< PortalBindingDisplay > displayEntries( PortalWire::Shortcuts const & en
         const QVariant value = entry.properties.value( QStringLiteral( "trigger_description" ) );
         if ( value.metaType() == QMetaType::fromType< QString >() )
             trigger = value.toString();
-        if ( trigger.isEmpty() )
-            trigger = QStringLiteral( "Assigned by portal" );
-
         displayed.append( PortalBindingDisplay{ entry.id, trigger } );
     }
     return displayed;
@@ -553,6 +595,9 @@ struct PortalBackend::Private
     /// The most recent records the portal reported, kept so a display-policy change
     /// can refresh what is shown without touching the session.
     QVector< PortalWire::Shortcut > records;
+    /// IDs named in the latest BindShortcuts or ShortcutsChanged reply.
+    QSet< QString > addressedIds;
+    /// The subset of requested IDs with a reported non-empty trigger.
     QSet< QString > activeIds;
     QVector< QPointer< PortalRequest > > requests;
     QPointer< PortalRequest > createRequest;
@@ -669,6 +714,7 @@ void PortalBackend::unbind()
     d->version = 0;
     d->desired.clear();
     d->requestedIds.clear();
+    d->addressedIds.clear();
     d->activeIds.clear();
     d->bindAttempted = false;
     d->bindCompleted = false;
@@ -753,6 +799,7 @@ void PortalBackend::beginGeneration( QVector< HotkeyBinding > const & bindings )
     d->desired.clear();
     // The display policy belongs to the config/UI layer and survives a bind edit;
     // only the requested set is rebuilt below.
+    d->addressedIds.clear();
     d->activeIds.clear();
     d->bindAttempted = false;
     d->bindCompleted = false;
@@ -1052,6 +1099,7 @@ void PortalBackend::handleCreateResponse( quint64 generation, uint code,
     }
 
     d->sessionPath = value.toString();
+    d->addressedIds.clear();
     d->activeIds.clear();
     QPointer< PortalBackend > alive( this );
     setState( HotkeyBackend::State::Ready, QStringLiteral( "Portal session is ready" ) );
@@ -1101,6 +1149,7 @@ void PortalBackend::handleBindResponse( quint64 generation, uint code, QVariantM
     QPointer< PortalBackend > alive( this );
     if ( code == 1 || code == 2 )
     {
+        d->addressedIds.clear();
         d->activeIds.clear();
         setState( HotkeyBackend::State::Denied, QStringLiteral( "Portal shortcut binding was denied" ) );
         if ( alive && generation == d->generation )
@@ -1121,7 +1170,16 @@ void PortalBackend::handleBindResponse( quint64 generation, uint code, QVariantM
         return;
     }
 
-    QSet< QString > returned;
+    QSet< QString > addressed;
+    for ( PortalWire::Shortcut const & entry : entries )
+    {
+        if ( !d->requestedIds.contains( entry.id ) )
+        {
+            failGeneration( QStringLiteral( "BindShortcuts returned an unknown shortcut id" ) );
+            return;
+        }
+        addressed.insert( entry.id );
+    }
     {
         // Replace the records for the IDs this reply carries and keep the rest of
         // the history: a bind attempt reports only what it bound.
@@ -1134,23 +1192,11 @@ void PortalBackend::handleBindResponse( quint64 generation, uint code, QVariantM
         for( auto const & entry : merged )
             d->records.append( entry );
     }
-    for ( PortalWire::Shortcut const & entry : entries )
-    {
-        if ( !d->requestedIds.contains( entry.id ) )
-        {
-            failGeneration( QStringLiteral( "BindShortcuts returned an unknown shortcut id" ) );
-            return;
-        }
-        returned.insert( entry.id );
-    }
 
-    d->activeIds = returned;
-    if ( returned.isEmpty() )
-        setState( HotkeyBackend::State::Denied, QStringLiteral( "Portal bound no shortcuts" ) );
-    else if ( returned.size() == d->requestedIds.size() )
-        setState( HotkeyBackend::State::Bound, QStringLiteral( "Portal shortcuts are bound" ) );
-    else
-        setState( HotkeyBackend::State::Partial, QStringLiteral( "Portal bound only some shortcuts" ) );
+    d->addressedIds = addressed;
+    const BindingActivity activity = bindingActivityFromReply( entries, d->requestedIds );
+    d->activeIds = activity.activeIds;
+    setState( activity.state, activity.explanation );
     if ( alive && generation == d->generation )
         emit bindingsChanged( displayEntries( entries, d->displayPolicy ) );
 }
@@ -1209,6 +1255,7 @@ void PortalBackend::receivePortalSignal( QDBusMessage const & message )
             failGeneration( QStringLiteral( "ShortcutsChanged returned invalid data: " ) + error );
             return;
         }
+        QSet< QString > addressed;
         for ( PortalWire::Shortcut const & entry : entries )
         {
             if ( !d->requestedIds.contains( entry.id ) )
@@ -1216,6 +1263,7 @@ void PortalBackend::receivePortalSignal( QDBusMessage const & message )
                 failGeneration( QStringLiteral( "ShortcutsChanged returned an unknown shortcut id" ) );
                 return;
             }
+            addressed.insert( entry.id );
         }
 
         {
@@ -1229,17 +1277,12 @@ void PortalBackend::receivePortalSignal( QDBusMessage const & message )
                 d->records.append( entry );
         }
         ++d->displayRevision;
-        d->activeIds.clear();
-        for ( PortalWire::Shortcut const & entry : entries )
-            d->activeIds.insert( entry.id );
+        d->addressedIds = addressed;
+        const BindingActivity activity = bindingActivityFromReply( entries, d->requestedIds );
+        d->activeIds = activity.activeIds;
         const quint64 generation = d->generation;
         QPointer< PortalBackend > alive( this );
-        if ( d->activeIds.isEmpty() )
-            setState( HotkeyBackend::State::Denied, QStringLiteral( "Portal bound no shortcuts" ) );
-        else if ( d->activeIds.size() == d->requestedIds.size() )
-            setState( HotkeyBackend::State::Bound, QStringLiteral( "Portal shortcuts are bound" ) );
-        else
-            setState( HotkeyBackend::State::Partial, QStringLiteral( "Portal bound only some shortcuts" ) );
+        setState( activity.state, activity.explanation );
         if ( alive && generation == d->generation )
             emit bindingsChanged( displayEntries( entries, d->displayPolicy ) );
         return;
@@ -1279,6 +1322,7 @@ void PortalBackend::failGeneration( QString const & explanation, bool supported 
     // A session-level failure leaves the portal itself usable, so the probed
     // capability survives: only an owner loss (below) makes it unsupported.
     d->supported = supported;
+    d->addressedIds.clear();
     d->activeIds.clear();
     d->bindCompleted = false;
     ++d->displayRevision;

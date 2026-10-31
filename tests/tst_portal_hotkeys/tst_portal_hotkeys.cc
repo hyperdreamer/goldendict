@@ -238,6 +238,8 @@ private slots:
     void configureIsV2OnlyAndHasNoRequestLifecycle();
     void configurePendingReplyIsRetired();
     void deniedSessionCanBeConfiguredWithoutRebinding();
+    void declinedSavedIdReportsUnassignedNotBound();
+    void shortcutsChangedWithEmptyTriggerReportsUnassigned();
     void reportedTriggersAreDisplayOnly();
     void duplicateBindAttemptIsRefused();
     void portalSignalsMayDestroyBackend_data();
@@ -1769,6 +1771,53 @@ void TstPortalHotkeys::configureIsV2OnlyAndHasNoRequestLifecycle()
     QCOMPARE( int( versionOne.state() ), int( HotkeyBackend::State::Bound ) );
 }
 
+void TstPortalHotkeys::declinedSavedIdReportsUnassignedNotBound()
+{
+    portal->setScenario( QStringLiteral( "bind-returning-empty-trigger" ) );
+    PortalBackend backend( bus->connection() );
+    QSignalSpy activated( &backend, &HotkeyBackend::activated );
+    QVector< QVector< PortalBindingDisplay > > displays;
+    connect( &backend, &HotkeyBackend::bindingsChanged, this,
+             [ &displays ]( QVector< PortalBindingDisplay > const & entries ) {
+                 displays.append( entries );
+             } );
+
+    backend.bind( mainBindingOnly() );
+    QVERIFY( waitForState( backend, HotkeyBackend::State::Denied ) );
+    QVERIFY( !displays.isEmpty() );
+    QVERIFY( containsDisplayId( displays.constLast(), QStringLiteral( "main-window" ) ) );
+    QCOMPARE( displays.constLast().constFirst().triggerDescription, QString() );
+    QVERIFY( !displays.constLast().constFirst().triggerDescription.contains(
+        QStringLiteral( "Assigned by portal" ) ) );
+
+    portal->emitActivation( portal->sessionPath(), QStringLiteral( "main-window" ), {} );
+    QVERIFY( flushWire( bus->fixtureConnection() ) );
+    QCOMPARE( activated.count(), 0 );
+}
+
+void TstPortalHotkeys::shortcutsChangedWithEmptyTriggerReportsUnassigned()
+{
+    PortalBackend backend( bus->connection() );
+    QSignalSpy activated( &backend, &HotkeyBackend::activated );
+    QVector< QVector< PortalBindingDisplay > > displays;
+    connect( &backend, &HotkeyBackend::bindingsChanged, this,
+             [ &displays ]( QVector< PortalBindingDisplay > const & entries ) {
+                 displays.append( entries );
+             } );
+
+    backend.bind( mainBindingOnly() );
+    QVERIFY( waitForState( backend, HotkeyBackend::State::Bound ) );
+    portal->emitShortcutsChanged( portal->sessionPath(),
+        { fakeShortcut( QStringLiteral( "main-window" ), {}, {} ) } );
+    QVERIFY( waitForState( backend, HotkeyBackend::State::Denied ) );
+    QVERIFY( !displays.isEmpty() );
+    QCOMPARE( displays.constLast().constFirst().triggerDescription, QString() );
+
+    portal->emitActivation( portal->sessionPath(), QStringLiteral( "main-window" ), {} );
+    QVERIFY( flushWire( bus->fixtureConnection() ) );
+    QCOMPARE( activated.count(), 0 );
+}
+
 void TstPortalHotkeys::reportedTriggersAreDisplayOnly()
 {
     portal->setBoundShortcuts( { fakeShortcut( QStringLiteral( "main-window" ), {},
@@ -1779,10 +1828,10 @@ void TstPortalHotkeys::reportedTriggersAreDisplayOnly()
     connect( &backend, &HotkeyBackend::bindingsChanged, this,
              [ & ]( QVector< PortalBindingDisplay > const & entries ) { displayed = entries; } );
     backend.bind( twoBindings() );
-    QVERIFY( waitForState( backend, HotkeyBackend::State::Bound ) );
+    QVERIFY( waitForState( backend, HotkeyBackend::State::Partial ) );
     QCOMPARE( displayed.size(), 2 );
     QCOMPARE( displayed.at( 0 ).triggerDescription, QStringLiteral( "Portal's chosen trigger" ) );
-    QCOMPARE( displayed.at( 1 ).triggerDescription, QStringLiteral( "Assigned by portal" ) );
+    QCOMPARE( displayed.at( 1 ).triggerDescription, QString() );
     const auto calls = portal->calls();
     const auto binding = std::find_if( calls.cbegin(), calls.cend(), []( auto const & call ) {
         return call.member == QLatin1String( "BindShortcuts" );
@@ -1827,7 +1876,8 @@ void TstPortalHotkeys::duplicateBindAttemptIsRefused()
     QVERIFY( sendResponse( bus->fixtureConnection(), create->requestPath, uint( 0 ),
                           QVariantMap{ { QStringLiteral( "session_handle" ), session } } ) );
     backend.configure( {} );
-    portal->emitShortcutsChanged( session, { fakeShortcut( QStringLiteral( "main-window" ), {}, {} ) } );
+    portal->emitShortcutsChanged( session,
+        { fakeShortcut( QStringLiteral( "main-window" ), {}, QStringLiteral( "Ctrl+F11" ) ) } );
     QVERIFY( QTest::qWaitFor( [ & ]() {
         return portal->count( QStringLiteral( "ConfigureShortcuts" ) ) == 1;
     }, 1000 ) );
