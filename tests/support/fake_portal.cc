@@ -16,6 +16,7 @@
 #include <QDBusVirtualObject>
 #include <QHash>
 #include <QMetaType>
+#include <QSet>
 #include <QVariant>
 
 #include <functional>
@@ -128,7 +129,23 @@ struct FakePortalPrivate
     QHash< QString, int > acceptedBinds;
     QString sessionPath;
 
-    QVector< std::function< void() > > deferred;
+    enum class DeferredKind
+    {
+        Scenario,
+        HeldResponse,
+        HeldMethodReply
+    };
+
+    struct DeferredItem
+    {
+        QString member;
+        DeferredKind kind;
+        std::function< void() > action;
+    };
+
+    QVector< DeferredItem > deferred;
+    QSet< QString > heldResponses;
+    QSet< QString > heldMethodReplies;
     int generatedTokens = 0;
 
     QDBusVirtualObject * root = nullptr;
@@ -157,15 +174,32 @@ struct FakePortalPrivate
     bool handleMessage( QDBusMessage const & message, QDBusConnection const & sender,
                         bool * handled );
 
-    /// Sends (or defers) one Response according to the scenario. Returns false
-    /// when the scenario holds the response until releasePending().
-    bool emitResponse( QString const & path, uint code, QVariantMap const & results );
+    /// Sends (or defers) one Response according to the scenario and the named
+    /// response barrier. Returns false when the response is held.
+    bool emitResponse( QString const & path, uint code, QVariantMap const & results,
+                       QString const & member, bool afterMethodReply = true );
+
+    void sendMethodReply( QDBusMessage const & message, QString const & path )
+    {
+        sendReply( message, path );
+    }
+
+    void enqueue( QString const & member, DeferredKind kind, std::function< void() > action )
+    {
+        deferred.append( DeferredItem{ member, kind, std::move( action ) } );
+    }
 
     /// Holds the method reply (and the Response that follows it) until
     /// releasePending(), which is how a test reaches "the method result arrived
     /// after the request gave up".
     void deferMethodReply( QDBusMessage const & message, QString const & replyPath,
-                          QString const & responsePath, uint code, QVariantMap const & results );
+                           QString const & responsePath, uint code, QVariantMap const & results );
+
+    /// Holds the method reply while allowing a response to arrive first.
+    bool methodReplyHeld( QString const & member ) const
+    {
+        return heldMethodReplies.contains( member );
+    }
 };
 
 void FakePortalPrivate::sendReply( QDBusMessage const & message, QString const & path )
@@ -232,13 +266,17 @@ void FakePortalPrivate::sendActivation( QString const & session, QString const &
 }
 
 bool FakePortalPrivate::emitResponse( QString const & path, uint code,
-                                        QVariantMap const & results )
+                                        QVariantMap const & results, QString const & member,
+                                        bool afterMethodReply )
 {
-    if ( scenario == QLatin1String( "delayed-response" )
-         || scenario == QLatin1String( "late-create-response" )
-         || scenario == QLatin1String( "list-slow" ) )
+    const bool scenarioDeferred = scenario == QLatin1String( "delayed-response" )
+        || scenario == QLatin1String( "late-create-response" )
+        || scenario == QLatin1String( "list-slow" );
+    if ( scenarioDeferred || ( heldResponses.contains( member ) && afterMethodReply ) )
     {
-        deferred.append( [ this, path, code, results ]() { sendResponse( path, code, results ); } );
+        const DeferredKind kind = heldResponses.contains( member )
+            ? DeferredKind::HeldResponse : DeferredKind::Scenario;
+        enqueue( member, kind, [ this, path, code, results ]() { sendResponse( path, code, results ); } );
         return false;
     }
 
@@ -256,11 +294,11 @@ void FakePortalPrivate::deferMethodReply( QDBusMessage const & message,
                                             QVariantMap const & results )
 {
     QDBusMessage const call = message;
-
-    deferred.append( [ this, call, replyPath, responsePath, code, results ]() {
-        sendReply( call, replyPath );
-        sendResponse( responsePath, code, results );
-    } );
+    enqueue( message.member(), DeferredKind::Scenario,
+             [ this, call, replyPath, responsePath, code, results ]() {
+                 sendMethodReply( call, replyPath );
+                 sendResponse( responsePath, code, results );
+             } );
 }
 
 QVector< Shortcut > FakePortalPrivate::requestedShortcuts( QDBusMessage const & message ) const
@@ -448,8 +486,12 @@ void FakePortalPrivate::handleCreateSession( QDBusMessage const & message,
     {
         // The Response for the *eventual* request path arrives before the method
         // result names it: exactly the Task 30 race.
-        emitResponse( actualPath, code, results );
-        sendReply( message, actualPath );
+        emitResponse( actualPath, code, results, QStringLiteral( "CreateSession" ), false );
+        if ( methodReplyHeld( QStringLiteral( "CreateSession" ) ) )
+            enqueue( QStringLiteral( "CreateSession" ), DeferredKind::HeldMethodReply,
+                     [ this, message, actualPath ]() { sendMethodReply( message, actualPath ); } );
+        else
+            sendMethodReply( message, actualPath );
         return;
     }
 
@@ -486,18 +528,40 @@ void FakePortalPrivate::handleCreateSession( QDBusMessage const & message,
         // fixture remembers the path so the test can prove the late session was
         // closed instead of becoming current.
         QString const lateSession = session;
-        deferred.append( [ this, predictedPath, lateSession ]() {
+        if ( methodReplyHeld( QStringLiteral( "CreateSession" ) ) )
+        {
             sessionPath = lateSession;
             sendResponse( predictedPath, 0,
                           QVariantMap{ { QStringLiteral( "session_handle" ), lateSession } } );
-        } );
-        sendReply( message, predictedPath );
+            enqueue( QStringLiteral( "CreateSession" ), DeferredKind::HeldMethodReply,
+                     [ this, message, predictedPath ]() { sendMethodReply( message, predictedPath ); } );
+        }
+        else
+        {
+            enqueue( QStringLiteral( "CreateSession" ), DeferredKind::Scenario,
+                     [ this, predictedPath, lateSession ]() {
+                         sessionPath = lateSession;
+                         sendResponse( predictedPath, 0,
+                                       QVariantMap{ { QStringLiteral( "session_handle" ), lateSession } } );
+                     } );
+            sendMethodReply( message, predictedPath );
+        }
         return;
     }
 
     // Everything that is not deliberately "early" answers the method call first
     // and only then produces its Response, which is what the real portal does.
-    sendReply( message, actualPath );
+    if ( methodReplyHeld( QStringLiteral( "CreateSession" ) ) )
+    {
+        enqueue( QStringLiteral( "CreateSession" ), DeferredKind::HeldMethodReply,
+                 [ this, message, actualPath, code, results ]() {
+                     sendMethodReply( message, actualPath );
+                     emitResponse( actualPath, code, results, QStringLiteral( "CreateSession" ) );
+                 } );
+        return;
+    }
+
+    sendMethodReply( message, actualPath );
 
     if ( scenario == QLatin1String( "unrelated-response" ) )
     {
@@ -511,7 +575,7 @@ void FakePortalPrivate::handleCreateSession( QDBusMessage const & message,
     if ( scenario == QLatin1String( "no-response" ) )
         return;
 
-    emitResponse( actualPath, code, results );
+    emitResponse( actualPath, code, results, QStringLiteral( "CreateSession" ) );
 }
 
 void FakePortalPrivate::handleListShortcuts( QDBusMessage const & message,
@@ -547,17 +611,40 @@ void FakePortalPrivate::handleListShortcuts( QDBusMessage const & message,
     if ( scenario == QLatin1String( "denied" ) || scenario == QLatin1String( "failed" ) )
     {
         const uint code = scenario == QLatin1String( "denied" ) ? 1 : 2;
-        sendReply( message, path );
-        emitResponse( path, code, results );
+        if ( methodReplyHeld( QStringLiteral( "ListShortcuts" ) ) )
+        {
+            enqueue( QStringLiteral( "ListShortcuts" ), DeferredKind::HeldMethodReply,
+                     [ this, message, path, code, results ]() {
+                         sendMethodReply( message, path );
+                         emitResponse( path, code, results, QStringLiteral( "ListShortcuts" ) );
+                     } );
+        }
+        else
+        {
+            sendMethodReply( message, path );
+            emitResponse( path, code, results, QStringLiteral( "ListShortcuts" ) );
+        }
         return;
     }
 
     results.insert( QStringLiteral( "shortcuts" ), listPayload() );
 
-    sendReply( message, path );
-
-    if ( scenario != QLatin1String( "no-response" ) )
-        emitResponse( path, 0, results );
+    const bool shouldRespond = scenario != QLatin1String( "no-response" );
+    if ( methodReplyHeld( QStringLiteral( "ListShortcuts" ) ) )
+    {
+        enqueue( QStringLiteral( "ListShortcuts" ), DeferredKind::HeldMethodReply,
+                 [ this, message, path, results, shouldRespond ]() {
+                     sendMethodReply( message, path );
+                     if ( shouldRespond )
+                         emitResponse( path, 0, results, QStringLiteral( "ListShortcuts" ) );
+                 } );
+    }
+    else
+    {
+        sendMethodReply( message, path );
+        if ( shouldRespond )
+            emitResponse( path, 0, results, QStringLiteral( "ListShortcuts" ) );
+    }
 }
 
 void FakePortalPrivate::handleBindShortcuts( QDBusMessage const & message,
@@ -626,10 +713,22 @@ void FakePortalPrivate::handleBindShortcuts( QDBusMessage const & message,
         : scenario == QLatin1String( "bind-failed" )           ? 2
                                                                : 0;
 
-    sendReply( message, path );
-
-    if ( scenario != QLatin1String( "no-response" ) )
-        emitResponse( path, code, results );
+    const bool shouldRespond = scenario != QLatin1String( "no-response" );
+    if ( methodReplyHeld( QStringLiteral( "BindShortcuts" ) ) )
+    {
+        enqueue( QStringLiteral( "BindShortcuts" ), DeferredKind::HeldMethodReply,
+                 [ this, message, path, code, results, shouldRespond ]() {
+                     sendMethodReply( message, path );
+                     if ( shouldRespond )
+                         emitResponse( path, code, results, QStringLiteral( "BindShortcuts" ) );
+                 } );
+    }
+    else
+    {
+        sendMethodReply( message, path );
+        if ( shouldRespond )
+            emitResponse( path, code, results, QStringLiteral( "BindShortcuts" ) );
+    }
 }
 
 void FakePortalPrivate::handleConfigureShortcuts( QDBusMessage const & message,
@@ -1152,16 +1251,68 @@ void FakePortal::emitSessionClosed( QString const & session, QString const & rea
         d->sendSessionClosed( session, reason );
 }
 
+void FakePortal::holdResponse( QString const & member )
+{
+    if ( d )
+        d->heldResponses.insert( member );
+}
+
+void FakePortal::releaseHeldResponse( QString const & member )
+{
+    if ( !d )
+        return;
+    QVector< FakePortalPrivate::DeferredItem > remaining;
+    QVector< FakePortalPrivate::DeferredItem > released;
+    for ( auto const & item : std::as_const( d->deferred ) )
+    {
+        if ( item.kind == FakePortalPrivate::DeferredKind::HeldResponse && item.member == member )
+            released.append( item );
+        else
+            remaining.append( item );
+    }
+    d->deferred = remaining;
+    d->heldResponses.remove( member );
+    for ( auto const & item : released )
+        item.action();
+}
+
+void FakePortal::holdMethodReply( QString const & member )
+{
+    if ( d )
+        d->heldMethodReplies.insert( member );
+}
+
+void FakePortal::releaseHeldMethodReply( QString const & member )
+{
+    if ( !d )
+        return;
+    QVector< FakePortalPrivate::DeferredItem > remaining;
+    QVector< FakePortalPrivate::DeferredItem > released;
+    for ( auto const & item : std::as_const( d->deferred ) )
+    {
+        if ( item.kind == FakePortalPrivate::DeferredKind::HeldMethodReply && item.member == member )
+            released.append( item );
+        else
+            remaining.append( item );
+    }
+    d->deferred = remaining;
+    d->heldMethodReplies.remove( member );
+    for ( auto const & item : released )
+        item.action();
+}
+
+
+
 void FakePortal::releasePending()
 {
     if ( !d )
         return;
 
-    const QVector< std::function< void() > > pending = d->deferred;
+    const QVector< FakePortalPrivate::DeferredItem > pending = d->deferred;
     d->deferred.clear();
 
-    for ( auto const & action : pending )
-        action();
+    for ( auto const & item : pending )
+        item.action();
 }
 
 int FakePortal::receivedCallCount() const
