@@ -187,8 +187,6 @@ private:
   HotkeyBackend::State hotkeyState = HotkeyBackend::State::Unavailable;
   QString hotkeyExplanation;
   QString hotkeyBackendName;
-  bool configureHotkeysAvailable = false;
-  quint64 hotkeyStatusRevision = 0;
   QPointer<class Preferences> preferencesDialog;
   QPointer<ArticleView> startupView;
   QTimer startupDeadline;

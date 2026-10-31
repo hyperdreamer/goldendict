@@ -49,9 +49,6 @@
 #include <QScreen>
 #include <QRegularExpression>
 #include <QUrlQuery>
-#include <QDBusPendingCallWatcher>
-#include <QDBusPendingReply>
-#include <QDBusVariant>
 #include "platformwindow.hh"
 #include "portalhotkeys.hh"
 #include "hotkeysyntax.hh"
@@ -2221,7 +2218,7 @@ void MainWindow::editPreferences()
   refreshHotkeyStatus();
   connect( &preferences, &Preferences::closeMainHelpRequested, this, &MainWindow::closeGDHelp );
   connect( &preferences, &Preferences::configureShortcutsRequested, this, [this] {
-    if( hotkeyBackend && configureHotkeysAvailable ) hotkeyBackend->configure( {} );
+    if( hotkeyBackend && hotkeyBackend->isConfigureAvailable() ) hotkeyBackend->configure( {} );
   } );
 
   hideGDHelp();
@@ -3250,25 +3247,10 @@ void MainWindow::installHotKeys( HotkeyInstallIntent intent )
       [this]( HotkeyBackend::State state, QString const & reason ) {
         if( shuttingDown ) return;
         hotkeyState = state; hotkeyExplanation = reason;
-        configureHotkeysAvailable = false;
-        quint64 const revision = ++hotkeyStatusRevision;
         refreshHotkeyStatus();
-        if( QGuiApplication::platformName().startsWith( "wayland" ) &&
-            ( state == HotkeyBackend::State::Bound || state == HotkeyBackend::State::Partial ) )
-        {
-          auto call = QDBusMessage::createMethodCall( "org.freedesktop.portal.Desktop",
-            "/org/freedesktop/portal/desktop", "org.freedesktop.DBus.Properties", "Get" );
-          call << "org.freedesktop.portal.GlobalShortcuts" << "version";
-          auto watcher = new QDBusPendingCallWatcher( QDBusConnection::sessionBus().asyncCall( call, 5000 ), this );
-          connect( watcher, &QDBusPendingCallWatcher::finished, this, [this, revision]( QDBusPendingCallWatcher * done ) {
-            QDBusPendingReply<QDBusVariant> reply = *done;
-            done->deleteLater();
-            if( revision != hotkeyStatusRevision || shuttingDown || !hotkeyBackend ) return;
-            configureHotkeysAvailable = !reply.isError() && reply.value().variant().toUInt() >= 2;
-            refreshHotkeyStatus();
-          } );
-        }
       } );
+    connect( hotkeyBackend.get(), &HotkeyBackend::configureAvailabilityChanged,
+             this, &MainWindow::refreshHotkeyStatus );
   }
   if( auto backend = qobject_cast<PortalBackend *>( hotkeyBackend.get() ) )
   {
@@ -3285,7 +3267,7 @@ void MainWindow::refreshHotkeyStatus()
 {
   if( preferencesDialog )
     preferencesDialog->setHotkeyStatus( QGuiApplication::platformName(), hotkeyState,
-      hotkeyExplanation, reportedHotkeys, configureHotkeysAvailable );
+      hotkeyExplanation, reportedHotkeys, hotkeyBackend && hotkeyBackend->isConfigureAvailable() );
 }
 
 void MainWindow::hotKeyActivated( int hk )

@@ -63,6 +63,9 @@ public:
   /// (no portal service, no X11 display, unsupported platform).
   virtual bool isSupported() const noexcept = 0;
 
+  /// True when a Configure action can be served right now.
+  virtual bool isConfigureAvailable() const noexcept { return false; }
+
   /// Requests the given bindings. A backend that cannot support one of them says
   /// so through stateChanged()/bindingsChanged() instead of silently dropping or
   /// rewriting the stored sequence.
@@ -94,6 +97,9 @@ signals:
   /// loss, denial and unsupported capability are reported here once per
   /// transition, without a retry loop.
   void stateChanged( HotkeyBackend::State state, QString const & explanation );
+
+  /// The live Configure capability changed; consumers refresh from the accessor.
+  void configureAvailabilityChanged();
 };
 
 enum class HotkeyInstallIntent { Refresh, UserAction };

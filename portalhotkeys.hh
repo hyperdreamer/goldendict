@@ -71,6 +71,7 @@ public:
   ~PortalBackend() override;
 
   bool isSupported() const noexcept override;
+  bool isConfigureAvailable() const noexcept override;
   HotkeyBackend::State state() const noexcept override;
   void bind( QVector< HotkeyBinding > const & bindings ) override;
   void unbind() override;
@@ -86,6 +87,7 @@ public:
 
 private slots:
   void receivePortalSignal( QDBusMessage const & message );
+  void transportDisconnected();
 
 private:
   friend class TstPortalHotkeys;
@@ -98,6 +100,7 @@ private:
   struct Private;
 
   void setState( HotkeyBackend::State state, QString const & explanation );
+  void publishConfigureAvailability();
   void beginGeneration( QVector< HotkeyBinding > const & bindings );
   void readVersion( quint64 generation );
   void readVersionForOwner( quint64 generation, QString const & owner );
