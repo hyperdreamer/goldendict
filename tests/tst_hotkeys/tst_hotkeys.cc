@@ -418,6 +418,10 @@ private slots:
   // Backend capability contract.
   void backendContractSignatures();
   void backendPublishesBindingActivationAndStateContract();
+  void hotkeyInstallDecisionTable();
+  void bindingSettleAndInFlightClassification();
+  void installGateRemembersOnlyIssuedBinds();
+  void mainWindowUsesTheSharedInstallGate();
   void lateCreateSessionSuccessClosesItsSessionAfterCancellation();
   void unsupportedBackendStillReportsState();
   void unsupportedFactory();
@@ -1023,6 +1027,126 @@ void TstHotkeys::serializeWritesPortableText()
 // ---------------------------------------------------------------------------
 // Backend contract
 // ---------------------------------------------------------------------------
+
+void TstHotkeys::hotkeyInstallDecisionTable()
+{
+  using State = HotkeyBackend::State;
+  using Intent = HotkeyInstallIntent;
+  struct Row
+  {
+    State state;
+    char const * name;
+    bool expected[2][2]; // [unchangedSet][UserAction], with a backend present.
+  };
+  // Literal expectations, independent of the classifiers and decision helper.
+  Row const rows[] = {
+    { State::Unsupported, "Unsupported", { { false, false }, { false, false } } },
+    { State::Creating, "Creating", { { true, true }, { false, false } } },
+    { State::Ready, "Ready", { { true, true }, { false, true } } },
+    { State::Binding, "Binding", { { true, true }, { false, false } } },
+    { State::Bound, "Bound", { { true, true }, { false, false } } },
+    { State::Partial, "Partial", { { true, true }, { false, false } } },
+    { State::Denied, "Denied", { { true, true }, { false, true } } },
+    { State::Unavailable, "Unavailable", { { true, true }, { false, true } } },
+    { State::Closed, "Closed", { { true, true }, { false, true } } }
+  };
+  int combinations = 0;
+  for( Row const & row : rows )
+    for( bool backendPresent : { false, true } )
+      for( bool unchangedSet : { false, true } )
+        for( Intent intent : { Intent::Refresh, Intent::UserAction } )
+        {
+          bool const expected = !backendPresent || row.expected[unchangedSet][intent == Intent::UserAction];
+          bool const actual = hotkeyInstallShouldBind( backendPresent, unchangedSet, row.state, intent );
+          QString const context = QStringLiteral( "%1 backendPresent=%2 unchangedSet=%3 intent=%4 expected=%5 actual=%6" )
+            .arg( QLatin1String( row.name ) ).arg( backendPresent ).arg( unchangedSet )
+            .arg( intent == Intent::UserAction ? "UserAction" : "Refresh" ).arg( expected ).arg( actual );
+          QVERIFY2( actual == expected, qPrintable( context ) );
+          ++combinations;
+        }
+  QCOMPARE( combinations, 72 );
+
+  QVERIFY( hotkeyInstallShouldBind( true, false, State::Creating, Intent::Refresh ) );
+  QVERIFY( hotkeyInstallShouldBind( true, false, State::Binding, Intent::Refresh ) );
+  QVERIFY( !hotkeyInstallShouldBind( true, false, State::Unsupported, Intent::UserAction ) );
+  QVERIFY( hotkeyInstallShouldBind( true, false, State::Bound, Intent::Refresh ) );
+}
+
+void TstHotkeys::bindingSettleAndInFlightClassification()
+{
+  using State = HotkeyBackend::State;
+  struct Row { State state; bool settled; bool inFlight; };
+  Row const rows[] = {
+    { State::Unsupported, true, false },
+    { State::Creating, false, true },
+    { State::Ready, false, false },
+    { State::Binding, false, true },
+    { State::Bound, true, false },
+    { State::Partial, true, false },
+    { State::Denied, false, false },
+    { State::Unavailable, false, false },
+    { State::Closed, false, false }
+  };
+  for( Row const & row : rows )
+  {
+    QCOMPARE( hotkeyBindingSettles( row.state ), row.settled );
+    QCOMPARE( hotkeyBindingInFlight( row.state ), row.inFlight );
+    QVERIFY( !( hotkeyBindingSettles( row.state ) && hotkeyBindingInFlight( row.state ) ) );
+  }
+}
+
+void TstHotkeys::installGateRemembersOnlyIssuedBinds()
+{
+  using State = HotkeyBackend::State;
+  using Intent = HotkeyInstallIntent;
+  QVector< HotkeyBinding > const first{ { "main-window", "Main window", "CTRL+ALT+g" } };
+  QVector< HotkeyBinding > const edited{ { "main-window", "Main window", "CTRL+ALT+h" } };
+  HotkeyInstallGate gate;
+
+  // An unprimed empty list still issues a bind, and that true result is remembered.
+  QVERIFY( gate.shouldBind( true, {}, State::Bound, Intent::Refresh ) );
+  QVERIFY( !gate.shouldBind( true, {}, State::Bound, Intent::Refresh ) );
+  gate.reset();
+  QVERIFY( gate.shouldBind( true, {}, State::Bound, Intent::Refresh ) );
+
+  QVERIFY( gate.shouldBind( true, first, State::Bound, Intent::Refresh ) );
+  QVERIFY( !gate.shouldBind( true, first, State::Bound, Intent::Refresh ) );
+  QVERIFY( !gate.shouldBind( true, edited, State::Unsupported, Intent::UserAction ) );
+  // A refused edit must not replace the list of the last issued bind.
+  QVERIFY( gate.shouldBind( true, edited, State::Bound, Intent::Refresh ) );
+  QVERIFY( !gate.shouldBind( true, edited, State::Binding, Intent::UserAction ) );
+  QVERIFY( gate.shouldBind( true, first, State::Binding, Intent::Refresh ) );
+  QVERIFY( !gate.shouldBind( true, first, State::Denied, Intent::Refresh ) );
+  QVERIFY( gate.shouldBind( true, first, State::Denied, Intent::UserAction ) );
+
+  // The existing comparison uses stable IDs and sequences, not localized labels.
+  auto relabeled = first;
+  relabeled[0].description = "Localized main window";
+  QVERIFY( !gate.shouldBind( true, relabeled, State::Bound, Intent::Refresh ) );
+  auto otherId = first;
+  otherId[0].id = "clipboard-lookup";
+  QVERIFY( gate.shouldBind( true, otherId, State::Bound, Intent::Refresh ) );
+  auto both = first;
+  both.append( otherId[0] );
+  QVERIFY( gate.shouldBind( true, both, State::Bound, Intent::Refresh ) );
+
+  gate.reset();
+  QVERIFY( gate.shouldBind( true, both, State::Bound, Intent::Refresh ) );
+  gate.reset();
+  QVERIFY( !gate.shouldBind( true, first, State::Unsupported, Intent::Refresh ) );
+  // A false result on an unprimed gate must not prime it either.
+  QVERIFY( gate.shouldBind( true, first, State::Bound, Intent::Refresh ) );
+  QVERIFY( gate.shouldBind( false, first, State::Unsupported, Intent::Refresh ) );
+}
+
+void TstHotkeys::mainWindowUsesTheSharedInstallGate()
+{
+  QFile source( TestSupport::repositoryRoot() + "/mainwindow.cc" );
+  QVERIFY2( source.open( QIODevice::ReadOnly ), qPrintable( source.errorString() ) );
+  QByteArray const contents = source.readAll();
+  QCOMPARE( contents.count( "installGate.shouldBind(" ), 1 );
+  QVERIFY( !contents.contains( "requestedHotkeys" ) );
+}
 
 void TstHotkeys::backendContractSignatures()
 {

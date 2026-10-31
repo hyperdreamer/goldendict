@@ -96,6 +96,27 @@ signals:
   void stateChanged( HotkeyBackend::State state, QString const & explanation );
 };
 
+enum class HotkeyInstallIntent { Refresh, UserAction };
+
+bool hotkeyInstallShouldBind( bool backendPresent, bool unchangedSet,
+                              HotkeyBackend::State state,
+                              HotkeyInstallIntent intent ) noexcept;
+
+bool hotkeyBindingSettles( HotkeyBackend::State state ) noexcept;
+bool hotkeyBindingInFlight( HotkeyBackend::State state ) noexcept;
+
+class HotkeyInstallGate
+{
+public:
+  bool shouldBind( bool backendPresent, QVector< HotkeyBinding > const & desired,
+                   HotkeyBackend::State state, HotkeyInstallIntent intent );
+  void reset();
+
+private:
+  QVector< HotkeyBinding > lastDesired;
+  bool primed = false;
+};
+
 /// Select strictly from the active QPA; absence of a portal never selects X11.
 std::unique_ptr< HotkeyBackend > createHotkeyBackend( QObject * parent );
 
