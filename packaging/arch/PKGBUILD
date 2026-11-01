@@ -53,7 +53,7 @@ options=('!lto' '!debug')
 
 pkgver() {
   cd "${pkgname}"
-  printf '1.5.1.r%s.g%s' \
+  printf '1.5.2.r%s.g%s' \
     "$(git rev-list --count "${_commit}")" \
     "$(git rev-parse --short "${_commit}")"
 }
