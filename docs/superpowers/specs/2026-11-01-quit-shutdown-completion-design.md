@@ -123,13 +123,13 @@ article-view destruction all skipped, the deferred path still hangs.
 3. Every GoldenDict window honours a close request once shutdown has started — including
    the application-modal indexing dialog, so a session logout during a dictionary rescan
    cannot be vetoed.
-4. No new application work starts after shutdown has begun: the dictionary-reload
-   continuation is abandoned instead of restarting FTS indexing and recreating the scan
-   popup.
+4. No new application work starts after shutdown has begun: no error dialog, no index
+   cleanup, no deferred initialisation, no FTS restart and no scan-popup recreation, on
+   any of the three dictionary-reload paths.
 5. A close request that arrives after shutdown has started is accepted, never silently
    swallowed.
 6. The regression is pinned by a check that fails on the current code and passes on the
-   fixed code, for each supported initiation path.
+   fixed code, for every initiation path that can be driven without a session manager.
 7. A normal close keeps its current behaviour: hide to tray when `closeToTray=1`, quit
    when it is off.
 
@@ -139,10 +139,11 @@ article-view destruction all skipped, the deferred path still hangs.
 - No process-level watchdog or hard exit; Option C was considered and rejected.
 - No change to the shutdown UI (the window stays visible and disabled while the barrier
   runs), only to whether a close request is honoured.
-- No cancellation of an in-flight dictionary load: the loader is drained, never
-  terminated, because terminating it can corrupt index files.
+- No cancellation of an in-flight dictionary load: the loader is drained, never terminated,
+  because terminating a thread that is writing an index can corrupt it.
 - No change to WebEngine teardown, portal hotkey teardown, or article-view destruction.
 - No new QtTest suite in the closed 19-suite inventory.
+- No synthetic session-manager logout in the automated check (see coverage, D7).
 
 ## Architecture
 
@@ -157,8 +158,8 @@ article-view destruction all skipped, the deferred path still hangs.
 ///
 /// Qt's quit() closes top-level windows and cancels the quit while any visible
 /// window refuses to close. Once shutdown has begun every window must therefore
-/// accept a close request. Set exactly once, from MainWindow::quitApp(), before
-/// any code path can emit QEvent::Quit.
+/// accept a close request, and no reload work may restart. Set exactly once, from
+/// MainWindow::quitApp(), before any code path can emit QEvent::Quit.
 namespace ShutdownState {
 void request() noexcept;
 bool requested() noexcept;
@@ -175,11 +176,10 @@ local latch. `goldendict.pro` gains `shutdownstate.hh`/`shutdownstate.cc`.
 
 **Ordering requirement.** Every supported entry point (tray Quit, Ctrl+Q, window close,
 session logout) reaches `quitApp()` *before* any `QEvent::Quit` is generated, because
-`quit()` is only ever called from `finishShutdown()` after the flag is set. Session logout
-takes the `commitDataRequest` → `MainWindow::commitData(QSessionManager&)` → `quitApp()`
-route, which also sets the flag first. A bare application-level `Quit` that bypasses
-`quitApp()` is not a supported entry point; the application never emits one, and the
-regression check exercises the four real entry points.
+`quit()` is only ever called from `finishShutdown()`, after the flag is set. Session
+logout takes the `commitDataRequest` → `MainWindow::commitData(QSessionManager&)` →
+`quitApp()` route, which also sets the flag first. A bare application-level `Quit` that
+bypasses `quitApp()` is not a supported entry point: the application never emits one.
 
 ### D2 — While shutting down, a close request succeeds (main window)
 
@@ -219,49 +219,72 @@ dictionary (re)index, so it can be the active modal widget when a session-manage
 arrives. `closeAllWindows()` tries the active modal widget first, so without this change
 that dialog alone can still veto the quit and reproduce the hang.
 
-`Initializing::reject()` stays empty: Escape keeps working exactly as it does now, and
-the close rule is the only behavioural change.
+`Initializing::reject()` stays empty: Escape keeps working exactly as it does now, and the
+close rule is the only behavioural change.
 
-### D4 — A dictionary reload is abandoned once shutdown has begun
+### D4 — No reload work survives shutdown: one checkpoint plus caller guards
 
-`loadDictionaries()` runs a nested loop and then an unconditional `loadDicts.wait()`
-(`loaddictionaries.cc:271-273`). `QCoreApplication::exit()` unwinds that nested loop, so
-after a quit during indexing the continuation would otherwise run *during* shutdown:
+Three UI paths reload dictionaries, and all three continue working after the load:
+
+| Path | Reload call | Continuation |
+| --- | --- | --- |
+| `MainWindow::makeDictionaries()` | `loadDictionaries(...)` | FTS parameters, FTS indexing, group list, scan popup, hotkeys |
+| `MainWindow::on_rescanFiles_triggered()` | `loadDictionaries(...)` | same, plus suggestion list |
+| `EditDictionaries::acceptChangedSources()` | `loadDictionaries(...)` (`editdictionaries.cc:217`) | name updates, tab rebuild through `Instances::updateNames` |
+| `MainWindow::editDictionaries()` | via the dialog's accept | after `dicts.exec()` (`mainwindow.cc:2154`): config save, group list, scan popup, hotkeys, FTS |
+
+Inside `loadDictionaries()` the worker is joined and then more work happens
+(`loaddictionaries.cc:271-282`, `:418`): an error `QMessageBox`, index-directory cleanup,
+and `doDeferredInit()`. A caller-side guard alone would leave those running.
+
+**Checkpoint (inside `loadDictionaries()`, immediately after the join):**
 
 ```cpp
-// mainwindow.cc, on_rescanFiles_triggered() / makeDictionaries()
-loadDictionaries( this, ... );
-// ... continue only when shutdown has NOT begun:
-for( auto &d : dictionaries ) { d->setFTSParameters(...); ... }
-ftsIndexing.setDictionaries( dictionaries );
-ftsIndexing.doIndexing();
-updateGroupList();
-makeScanPopup();          // <-- would recreate the destroyed scan popup
-installHotKeys();
+  localLoop.exec();
+  loadDicts.wait();
+
+  // Shutdown drains the loader but starts no further work: no error dialog, no
+  // index cleanup, no deferred initialisation, no dictionaries handed back.
+  if( ShutdownState::requested() )
+    return;
+
+  if( loadDicts.getExceptionText().size() ) { ... }
 ```
 
-Both continuation sites return immediately after `loadDictionaries()` when
-`ShutdownState::requested()` is true:
+**Caller guards (one line each, immediately after the call returns):**
 
 ```cpp
+// MainWindow::makeDictionaries()
 loadDictionaries( this, isVisible(), cfg, dictionaries, dictNetMgr );
-if( ShutdownState::requested() ) return;   // never restart FTS or recreate the popup
+if( ShutdownState::requested() ) return;
+
+// MainWindow::on_rescanFiles_triggered()
+loadDictionaries( this, true, cfg, dictionaries, dictNetMgr );
+if( ShutdownState::requested() ) return;
+
+// EditDictionaries::acceptChangedSources()
+loadDictionaries( this, true, cfg, dictionaries, dictNetMgr );
+if( ShutdownState::requested() ) return;
+
+// MainWindow::editDictionaries(), immediately after the modal dialog returns
+dicts.exec();
+if( ShutdownState::requested() ) return;
 ```
 
-`on_rescanFiles_triggered()` already refuses to *start* a rescan while `shuttingDown`, so
-this closes the window between start and finish.
+`on_rescanFiles_triggered()` already refuses to *start* while `shuttingDown`; the guards
+close the window between start and finish, and cover the two paths that had none.
 
-**Policy for the in-flight load.** Shutdown drains the loader: `loadDicts.wait()` is left
-in place and the worker is never terminated, because terminating a thread that is writing
-an index can corrupt the file. A quit during indexing therefore exits after the in-flight
-load finishes rather than immediately, and the reload continuation is discarded. The
-5 s cache barrier is unaffected; this is the only path where shutdown waits on work.
+**Policy for the in-flight load.** Shutdown drains the loader: `loadDicts.wait()` stays,
+and the worker is never terminated, because terminating a thread that is writing an index
+can corrupt the file. A quit during indexing therefore exits after the in-flight load
+finishes rather than immediately, and every continuation is discarded. The 5 s cache
+barrier is unaffected; this is the only path where shutdown waits on work.
 
 ### D5 — Second quit request, and which teardown path runs
 
 **Policy.** If a Quit arrives while the cache wait is in flight (for example the
-session-manager `Die` callback), the window now closes, `app.exec()` returns, and
-`main()` tears the application down without waiting for `clearHttpCacheCompleted`. This is
+session-manager `Die` callback), the window now closes, `app.exec()` returns, and `main()`
+tears the application down without waiting for `clearHttpCacheCompleted`. This is
 deliberate: the barrier is best-effort, and refusing the close is exactly the behaviour
 that hangs the application.
 
@@ -272,64 +295,84 @@ never runs and the same work happens in `MainWindow::~MainWindow()`, which calls
 destroy the article views before the profile; neither leaves a page attached to a dead
 profile.
 
-### D6 — The regression is pinned outside the QtTest inventory
+### D6 — The regression check
 
 `tests/tests.pro` is a closed inventory of 19 suites, and `tests/article-test.pri`
 guarantees that the suites never link `main.cc` or `MainWindow`. This defect lives in the
 interaction between GoldenDict's close handlers and Qt's `quit()`, so a unit test of an
 extracted helper would neither have caught it nor catch a regression.
 
-The guard is a headless end-to-end check driving the real binary:
-
 ```
 tests/shutdown/run-quit-check.sh <goldendict-binary> <variant>
 ```
 
-`<variant>` is one of `barrier`, `no-barrier`, `close-to-tray`, and each variant names its
-own preferences, its initiation path and its expected pre-fix/post-fix outcome:
+`<variant>` is one of `barrier`, `no-barrier`, `close-to-tray`, `modal-close`. Each
+variant names its own preferences, initiation, and expected pre-fix/post-fix outcome:
 
 | Variant | Preferences | Initiation | Pre-fix | Post-fix |
 | --- | --- | --- | --- | --- |
-| `barrier` | `closeToTray=0`, `clearNetworkCacheOnExit=1` | window close | hangs | exit 0 |
-| `no-barrier` | `closeToTray=0`, `clearNetworkCacheOnExit=0` | focused Ctrl+Q | hangs | exit 0 |
-| `close-to-tray` | `closeToTray=1`, `clearNetworkCacheOnExit=1` | window close, then quit | hides, then hangs | hides, then exit 0 |
+| `barrier` | `closeToTray=0`, `clearNetworkCacheOnExit=1` | graceful window close (`wmctrl -c`) | hangs | exit 0 |
+| `no-barrier` | `closeToTray=0`, `clearNetworkCacheOnExit=0` | focused `Ctrl+Q` | hangs | exit 0 |
+| `close-to-tray` | `closeToTray=1`, `clearNetworkCacheOnExit=1` | graceful window close, then quit | hides, then hangs | hides, then exit 0 |
+| `modal-close` | `closeToTray=0`, `clearNetworkCacheOnExit=1` | `Ctrl+F5` rescan, then graceful close on the `Initializing` dialog | dialog stays mapped | dialog unmapped, then exit 0 |
 
-`no-barrier` deliberately uses Ctrl+Q: a *window close* with the barrier off already
-succeeds pre-fix and would not pin anything. `close-to-tray` asserts its two stages
-separately, because the hide stage passes on both versions and only the quit stage is the
-regression.
+`no-barrier` deliberately uses Ctrl+Q: a window close with the barrier off already succeeds
+pre-fix and would pin nothing. `close-to-tray` asserts its two stages separately, because
+the hide stage passes on both versions and only the quit stage is the regression.
 
-The script:
+**`close-to-tray` final quit.** After the window hides, the check launches a **second
+instance of the same binary in the same isolated environment**; the existing single-
+instance IPC delivers `bringToFront` (`main.cc:355`), the original window becomes visible
+and is focused, and the check then sends `Ctrl+Q`. The second instance exits by itself
+(`main.cc:357`); the check keeps tracking and waiting for the **original** child PID.
 
-1. Creates a throwaway root with a **short** `TMPDIR` (the single-instance socket name is
+**`modal-close`.** The "Rescan Files" action has the shortcut `Ctrl+F5`
+(`mainwindow.ui:503-515`), so the modal path is drivable without a menu: send `Ctrl+F5`,
+wait for a second top-level window belonging to the same PID to appear, send it a graceful
+close, then assert it becomes unmapped within 10 s (fixed) or stays mapped (pre-fix);
+finally wait up to 120 s for the rescan to drain and send `Ctrl+Q`, requiring exit 0. This
+pins D3 and the D4 checkpoint without needing a session manager.
+
+**Common procedure.**
+
+1. Throwaway root with a **short** `TMPDIR` (single-instance socket is
    `qtsingleapp-…-<uid>` inside `QDir::tempPath()`, `qtlocalpeer.cpp:85-108`) plus private
    `HOME`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_DATA_HOME`.
-2. **Rejects a portable binary**: `Config::isPortableVersion()` is exactly "a `portable`
-   directory next to the executable" (`config.cc:2464-2470`), and portable mode would
-   ignore `HOME`/XDG and write inside the build tree. The script fails with an explicit
-   "portable build not supported by this check" diagnostic when
-   `$(dirname "$binary")/portable` exists.
-3. Starts a window manager inside the Xvfb display (`openbox --sm-disable`, verified with
-   `wmctrl -m`). A WM is required for a genuine close request: `xdotool windowquit` sends
-   EWMH `_NET_CLOSE_WINDOW` (verified in `libxdo`, which contains no
-   `WM_DELETE_WINDOW` path), and `xdotool windowclose` destroys the window instead of
-   asking it to close. The check fails with a clear diagnostic if no WM is running;
-   `openbox` is a documented dependency of this check only.
-4. Launches the binary under `xvfb-run -a` with `QT_QPA_PLATFORM=xcb`, capturing stderr,
-   and waits a bounded time (30 s) for the `startup-ready platform=… backend=…` record
-   (`mainwindow.cc:1946`). Any exit before that record fails the run. The child's PID is
-   recorded directly (not the `xvfb-run` wrapper's), and the window is matched with
-   `xdotool search --pid <child-pid>` rather than by title.
-5. Delivers the initiation for the variant (`wmctrl -c` / focused `xdotool key ctrl+q`).
-6. Asserts: process exits within 10 s with status **exactly 0** for `barrier` and
-   `no-barrier`; for `close-to-tray`, the window becomes unmapped within 5 s while the
-   process stays alive, then a quit is requested and the child exits with status exactly
-   0.
-7. Never kills the process as part of a passing run, removes its temporary root, and
-   prints the captured log on failure.
+2. **Portable rejection:** resolve the binary with `readlink -f`, fail with
+   "portable build not supported by this check" when `$(dirname <resolved>)/portable`
+   exists (`Config::isPortableVersion()` is exactly that directory test,
+   `config.cc:2464-2470`), and launch the resolved path so the check and Qt agree on
+   `applicationDirPath()`.
+3. Start a window manager inside the display (`openbox --sm-disable`, verified with
+   `wmctrl -m`), because `xdotool windowquit` sends EWMH `_NET_CLOSE_WINDOW` (verified:
+   `libxdo` contains no `WM_DELETE_WINDOW` path) and `xdotool windowclose` destroys the
+   window instead of asking it to close. Missing WM is a hard, explained failure;
+   `openbox` is a dependency of this check only.
+4. Launch under `xvfb-run -a` with `QT_QPA_PLATFORM=xcb`, capture stderr, wait up to 30 s
+   for the `startup-ready platform=… backend=…` record (`mainwindow.cc:1946`); any exit
+   before it fails the run. Record the child PID directly (never the `xvfb-run` wrapper)
+   and match windows with `xdotool search --pid <child-pid>`.
+5. Apply the initiation above, then assert: exit within 10 s with status **exactly 0**
+   (crash and non-zero exit both fail), except the documented stages of `close-to-tray`
+   and `modal-close`.
+6. Never kill the process as part of a passing run; remove the temporary root; print the
+   captured log on failure.
 
 The script is documented in its own header, is not part of `make check`, and takes the
-binary path as an argument so it works for a build tree or a package build.
+binary path as an argument.
+
+### D7 — Coverage: what is automated and what is manual
+
+| Entry point | Coverage | Note |
+| --- | --- | --- |
+| Window close (tray off) | automated: `barrier`, `close-to-tray` | needs the WM |
+| Ctrl+Q / File → Quit | automated: `no-barrier`, and the final stage of `close-to-tray` | |
+| Quit during a dictionary rescan | automated: `modal-close` | dialog close + post-rescan quit |
+| Tray → Quit | **manual** | requires a StatusNotifier host; none runs under Xvfb |
+| Session logout during a rescan | **manual** | requires a real session host; a synthetic `Die` cannot be isolated safely, and the route (`commitDataRequest` → `quitApp()`) is the same one the automated variants exercise |
+
+Manual steps are recorded in the run report with the observed process state and elapsed
+time.
 
 ## Error handling matrix
 
@@ -339,56 +382,53 @@ binary path as an argument so it works for a build tree or a package build.
 | Window close, `closeToTray=0`, barrier on | Config saved, window disabled, then hidden by Qt's quit; process exits |
 | Window close, `closeToTray=1` (normal operation) | Unchanged: `ev->ignore()`, window hides, app keeps running |
 | Second close while shutting down | Accepted: window hides; shutdown continues |
-| Quit during dictionary (re)index | Dialog accepts, main window accepts; the in-flight load is drained; the reload continuation is skipped; process exits |
+| Quit during dictionary (re)index | Dialog accepts, main window accepts; loader drained; checkpoint and caller guards discard all continuation work; process exits |
+| Load finishes with an error during shutdown | No error dialog is shown; the reload is abandoned |
 | Quit request during the cache wait (e.g. session `Die`) | Window closes, `exec()` returns, teardown runs from `~MainWindow` |
 | Barrier times out after 5 s | Unchanged: `finishExit(true)` logs and completes shutdown |
 | Cache completion never arrives, timer alive | Unchanged: the timeout path drives the same `quit()` |
 | Fail-startup dialog | Unchanged: `QCoreApplication::exit(1)`; `shuttingDown` alone accepts closes |
-| A future top-level window that ignores the flag | Explicitly out of contract: any new window must consult `ShutdownState::requested()` |
+| A future top-level window that ignores the flag | Out of contract: any new window must consult `ShutdownState::requested()` |
 
 ## Compatibility
 
 - Qt 6.12 `quit()` semantics are as quoted; earlier 6.x releases also refuse to quit while
   a visible window vetoes the close, so the change is a compatibility improvement rather
   than a version-specific workaround.
-- No platform-specific code: the change is in widget event handlers and applies to xcb,
-  Wayland, offscreen and Windows/macOS builds alike.
+- No platform-specific code: the change is in widget event handlers, plus one pure flag
+  module, and applies to xcb, Wayland, offscreen and Windows/macOS builds alike.
 - No configuration, file-format, or interface change; no persisted state changes.
 - `goldendict.pro` gains `shutdownstate.hh`/`shutdownstate.cc`. The test closure build
-  keeps its existing inputs because neither `MainWindow` nor `Initializing` is part of any
-  suite.
-- Existing suites are unaffected: no `MainWindow`, `Initializing` or `ShutdownState`
-  symbol is linked by any of the 19 suites.
+  keeps its existing inputs because none of `MainWindow`, `Initializing`,
+  `EditDictionaries` or `ShutdownState` is linked by any suite.
+- Existing suites are unaffected.
 
 ## Test strategy
 
-1. **Regression matrix**: `run-quit-check.sh <binary> <variant>` for all three variants.
-   Pre-fix expectations: `barrier` hangs, `no-barrier` hangs, `close-to-tray` hides then
-   hangs. Post-fix: every variant exits with status 0. The pre-fix failure of each variant
-   is recorded once as evidence.
-2. **Modal indexing path**: force a dictionary rescan, trigger quit while the
-   `Initializing` dialog is up, and assert that the process exits within a bounded time
-   after the loader drains. Driven headlessly by launching with a rescan request where the
-   CLI allows it; otherwise performed manually with the observation recorded (dialog
-   present, quit requested, process gone, elapsed time).
-3. **Existing gate**: `make -C tests check` (19 suites) stays green.
-4. **Manual confirmation**: quit from the tray in a real Wayland session; the process
-   disappears and no disabled window is left behind.
+1. **Regression matrix**: `run-quit-check.sh <binary> <variant>` for all four variants.
+   Pre-fix: `barrier` hangs, `no-barrier` hangs, `close-to-tray` hides then hangs,
+   `modal-close` leaves the dialog mapped. Post-fix: every variant completes with exit
+   status 0. The pre-fix failure of each variant is recorded once as evidence.
+2. **Existing gate**: `make -C tests check` (19 suites) stays green.
+3. **Manual**: tray Quit on Wayland, and a session logout during a rescan; both recorded
+   with process state before and after.
 
 ## Verification plan
 
 1. Build the tree without EPWing support when `libeb` is unavailable
    (`CONFIG+=no_epwing_support`).
-2. Run all three variants of `tests/shutdown/run-quit-check.sh` against the pre-fix and
+2. Run all four variants of `tests/shutdown/run-quit-check.sh` against the pre-fix and
    fixed binaries; record exit codes and elapsed times.
-3. Run the modal-indexing check from the test strategy and record the observation.
-4. Run the closed inventory: `qmake6 tests/tests.pro -o tests/Makefile`,
+3. Run the closed inventory: `qmake6 tests/tests.pro -o tests/Makefile`,
    `make -C tests -j$(nproc)`, `QT_QPA_PLATFORM=xcb xvfb-run -a timeout 900 make -C tests check`.
-5. Run the manual Wayland quit once and record the process state before and after.
-6. Archive the outputs, exit codes, and the pre-fix failures in the run report.
+4. Run the two manual steps and record the observations.
+5. Archive outputs, exit codes, and the pre-fix failures in the run report.
 
 ## Rollout
 
-Two close handlers, one continuation guard, one tiny new module, and one new check under
-`tests/shutdown/`; no migration and no feature flag. Shipping it restores the documented
-behaviour of the Quit action, the tray menu, the window close button and session logout.
+Changed files: `mainwindow.cc` (close rule, three caller guards), `initializing.cc` (close
+rule), `loaddictionaries.cc` (checkpoint), `editdictionaries.cc` (caller guard), new
+`shutdownstate.hh`/`shutdownstate.cc`, `goldendict.pro`, and the new
+`tests/shutdown/run-quit-check.sh`. No migration and no feature flag. Shipping it restores
+the documented behaviour of the Quit action, the tray menu, the window close button and
+session logout.
