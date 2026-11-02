@@ -122,7 +122,8 @@ article-view destruction all skipped, the deferred path still hangs.
    swallowed — except while a startup failure is what is ending the process, where the
    veto is kept so the failure's exit status survives.
 4. The regression is pinned by a check that fails on the current code and passes on the
-   fixed code, for every initiation path that can be driven without a session manager.
+   fixed code, for the three automated variants named in D3. Tray → Quit stays manual for
+   the reason given there.
 5. A normal close keeps its current behaviour: hide to tray when `closeToTray=1`, quit
    when it is off.
 
@@ -175,9 +176,16 @@ changes.
 
 Rationale: once `shuttingDown` is set the window has no remaining function — it exists
 only to show progress while the barrier runs, and `destroyArticleViews()` does not depend
-on its visibility. Refusing the close was also wrong for a second close, for a
-window-manager close, and for the session-manager quit path, all of which Qt implements
-through the same close-all-windows step.
+on its visibility. Refusing the close was also wrong for a second close and for any route
+that reaches Qt's close-all-windows step.
+
+Three different routes reach this handler, and they are not interchangeable:
+
+| Route | How it arrives |
+| --- | --- |
+| Targeted window close (window manager, `wmctrl -c`) | `QGuiApplicationPrivate::processCloseEvent()` dispatches a close to that window; the handler runs directly and, with `closeToTray=0`, calls `quitApp()`. Qt's close-all step is not involved. |
+| Application-level `QEvent::Quit` (e.g. `QCoreApplication::quit()` from `finishShutdown()`) | `QApplication::event()` calls `closeAllWindows()`, which is why a refusing window cancels the quit. This is the route D1 unblocks. |
+| XSMP session request (xcb) | `commitDataRequest` → `MainWindow::commitData(QSessionManager&)` → `quitApp()`. |
 
 `shuttingDown` is already the correct predicate: it is set at the top of `quitApp()`,
 before the barrier and before any `quit()` is requested. It is *also* set by the
@@ -186,7 +194,14 @@ it calls `exit(1)` from the failure dialog's `finished` callback, and an
 application-level `QEvent::Quit` arriving while that dialog is open would otherwise close
 the dialog (running `exit(1)`), then close the main window, then reach
 `QCoreApplication::event()`, whose `exit(0)` overwrites the return code. Keeping the veto
-while `startupFailed` preserves the documented non-zero exit status.
+while `startupFailed` preserves the documented non-zero exit status **while the main
+window is visible** — that is, whenever this handler is consulted at all.
+
+Hidden-window exception (pre-existing, not changed by D1): with `startToTray=1` the main
+window can still be hidden when a startup failure dialog is open
+(`mainwindow.cc:869` calls `hide()`), so Qt's close-all step skips it and reaches
+`exit(0)` without ever consulting this handler. That ordering is identical before and
+after D1, and this change neither fixes nor worsens it.
 
 ### D2 — Nothing else is needed for an ordinary shutdown
 
@@ -196,10 +211,12 @@ visible to the class that owns the window that vetoes the quit.
 Scope of this claim: **an ordinary, fully initialized shutdown that is not started from
 one of the reload or cleanup paths listed in D4.** In that case the scan popup, headwords
 dialog, full-text-search dialog and help window are already retired earlier in
-`quitApp()` (`mainwindow.cc:1257-1278`), so the main window is the only visible
-non-popup top-level window when `quit()` runs. The `Initializing` dialog and the event
-pumping inside FTS cleanup are the documented exceptions, and this change does not
-address them.
+`quitApp()` (`mainwindow.cc:1257-1278`), so the main window is the remaining relevant
+veto when `quit()` runs. Two other kinds of window can still be on screen and are
+accounted for: plain modal dialogs such as `Preferences` (`mainwindow.cc:2228`) accept
+their close through inherited `QDialog` handling, and their continuations check
+`shuttingDown`, so they do not veto the quit; the application-modal `Initializing`
+dialog is the documented exception this change does not address.
 
 ### D3 — The regression check
 
@@ -292,13 +309,13 @@ binary path as an argument.
    applies. This is pre-existing behaviour, unchanged by D1, and it is recorded here
    rather than fixed because it cannot be verified without a real session host.
 
-   Related distinction: a *window close* is dispatched by
-   `QGuiApplicationPrivate::processCloseEvent()` to the targeted window and can be refused
-   before dispatch is attempted when a modal window blocks it; an *application-level*
-   `QEvent::Quit` goes through Qt's close-all-windows step; an *XSMP* request arrives
-   through `commitDataRequest`. Only the second and third put the main window's
-   `closeEvent` on the quit path, and only the second is delivered without a session
-   manager.
+   Related distinction: a *targeted window close* is dispatched by
+   `QGuiApplicationPrivate::processCloseEvent()` to that window (and can be refused before
+   dispatch when another modal window blocks it), so the main window's `closeEvent` runs
+   directly; an *application-level* `QEvent::Quit` goes through Qt's close-all-windows
+   step, which is the step a refusing window cancels; an *XSMP* request arrives through
+   `commitDataRequest` → `commitData()` → `quitApp()`. The three are described separately
+   in D1.
 2. *Dictionary-reload continuations.* `loadDictionaries()` and its callers keep running
    after a shutdown begins. Unchanged by D1.
 3. *Event pumping inside FTS cleanup.* `closeFullTextSearchDialog()` →
@@ -339,10 +356,12 @@ binary path as an argument.
 2. **Existing gate**: `make -C tests check` (19 suites) stays green.
 3. **Manual**: tray Quit on Wayland once, recording the process state before and after.
 4. **Not automated, verified by inspection**: the fail-startup branch. Forcing a startup
-   failure (`failStartup`, `mainwindow.cc:1302-1319`) *and* delivering an
-   application-level `QEvent::Quit` while its dialog is open needs a session manager, so
-   the guarantee there is the `startupFailed` veto in D1, reviewed against the dialog's
-   `finished` handler.
+   failure (`failStartup`, `mainwindow.cc:1302-1319`) is straightforward, but the shell
+   driver has no hook to inject an application-level `QEvent::Quit` while its dialog is
+   open — a session manager is not intrinsically required for that event, the harness just
+   cannot raise it. The guarantee there is the `startupFailed` veto in D1, reviewed
+   against the dialog's `finished` handler, with the hidden-window exception documented
+   in D1.
 
 ## Verification plan
 
