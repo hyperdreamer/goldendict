@@ -368,11 +368,13 @@ MAP_STATES = ("IsUnMapped", "IsUnviewable", "IsViewable")
 INTERRUPT_SIGNALS = {signal.SIGINT, signal.SIGHUP, signal.SIGTERM}
 
 POLL = 0.1
-# A poll that cannot start with at least this much of its stage left is not
-# started at all: the loop sleeps up to the deadline and reports its timeout
-# at the deadline instead of feeding a starved tool call a bogus budget.
-MIN_OBSERVE = 0.5
 TOOL_LIMIT = 2.0
+# Every windowed stage has an observation window (the specification's 5 s /
+# 10 s / 30 s) plus this allowance for the final observation that starts at the
+# end of the window.  The window is therefore never curtailed, while every tool
+# call is still bounded by the time that actually remains before a real
+# deadline.
+FINAL_OBSERVE_ALLOWANCE = 1.0
 STARTUP_TIMEOUT = 30.0
 HIDE_TIMEOUT = 5.0
 HIDE_STABLE = 1.0
@@ -561,25 +563,12 @@ def tool_budget(deadline):
     return min(TOOL_LIMIT, left)
 
 
-def poll_gap(deadline):
-    """Sleep for the next <=POLL-spaced poll; False when the stage is over.
-
-    A stage is never expired before its deadline: when less than
-    MIN_OBSERVE remains, the loop sleeps exactly the remaining time and the
-    caller then reports its stage timeout at (not before) the deadline.  Every
-    observation starts with a positive, real remaining budget.
-    """
-    remaining = deadline - now()
-    if remaining <= 0.0:
-        return False
-    if remaining < MIN_OBSERVE:
-        time.sleep(remaining)
-        return False
-    gap = POLL - (now() - st.iteration)
-    delay = min(POLL, remaining, gap)
+def poll_sleep(window_end):
+    """Sleep until the next <=POLL-spaced poll, but never past the window end."""
+    target = min(st.iteration + POLL, window_end)
+    delay = target - now()
     if delay > 0.0:
         time.sleep(delay)
-    return True
 
 
 def run_tool(argv, timeout, what, check_original=True):
@@ -974,7 +963,7 @@ def wm_output():
     return "stdout=%r stderr=%r" % (read_text(st.wm_out), read_text(st.wm_err))
 
 
-def wm_probe(deadline):
+def wm_probe(window_end):
     """Wait (<=5 s) until Openbox owns the WM selection and names itself.
 
     This is the 5 s readiness window of spec section 2 step 1.  It is probed
@@ -984,12 +973,13 @@ def wm_probe(deadline):
     state.
     """
     last = "<no poll>"
+    hard_deadline = window_end + FINAL_OBSERVE_ALLOWANCE
     while True:
         st.iteration = now()
         wm_alive("wm")
         rc, out, err = run_tool(
             ["xprop", "-root", "_NET_SUPPORTING_WM_CHECK"],
-            tool_budget(deadline),
+            tool_budget(hard_deadline),
             "xprop -root _NET_SUPPORTING_WM_CHECK",
         )
         last = "status=%d stdout=%r stderr=%r" % (rc, out, err)
@@ -1012,7 +1002,7 @@ def wm_probe(deadline):
             owner = match.group(1)
             rc2, out2, err2 = run_tool(
                 ["xprop", "-id", owner, "_NET_WM_NAME"],
-                tool_budget(deadline),
+                tool_budget(hard_deadline),
                 "xprop -id <wm-supporting-window> _NET_WM_NAME",
             )
             last += " supporting_window=%s name_status=%d name_stdout=%r name_stderr=%r" % (
@@ -1037,7 +1027,7 @@ def wm_probe(deadline):
                 )
             if rc2 == 0 and "Openbox" in out2:
                 return
-        if not poll_gap(deadline):
+        if st.iteration >= window_end:
             raise DriverError(
                 "wm",
                 "openbox --sm-disable did not publish the WM selection and its "
@@ -1045,15 +1035,17 @@ def wm_probe(deadline):
                 % (last, wm_output()),
                 "wm",
             )
+        poll_sleep(window_end)
 
 
-def wm_ready(deadline):
+def wm_ready(window_end):
     stage("wm")
-    wm_probe(deadline)
+    hard_deadline = window_end + FINAL_OBSERVE_ALLOWANCE
+    wm_probe(window_end)
     # Spec section 2 status table, applied literally: status 1 from wmctrl -m is
     # a driver error, status 0 with 'Name: Openbox' is readiness, and every
     # other status is a driver error too.
-    rc, out, err = run_tool(["wmctrl", "-m"], tool_budget(deadline), "wmctrl -m")
+    rc, out, err = run_tool(["wmctrl", "-m"], tool_budget(hard_deadline), "wmctrl -m")
     if rc == 1:
         raise DriverError(
             "wm",
@@ -1176,16 +1168,17 @@ def discover_once(app, deadline, stage_name):
     return None, observation
 
 
-def discover(app, deadline, stage_name):
+def discover(app, window_end, stage_name):
     last = "<no poll>"
+    hard_deadline = window_end + FINAL_OBSERVE_ALLOWANCE
     while True:
         st.iteration = now()
         assert_alive(app, stage_name)
         wm_alive(stage_name)
-        window, last = discover_once(app, deadline, stage_name)
+        window, last = discover_once(app, hard_deadline, stage_name)
         if window is not None:
             return window
-        if not poll_gap(deadline):
+        if st.iteration >= window_end:
             if "candidates=[]" in last:
                 kind = "zero candidate windows"
             else:
@@ -1196,10 +1189,12 @@ def discover(app, deadline, stage_name):
                 % (app.proc.pid, kind, last),
                 stage_name,
             )
+        poll_sleep(window_end)
 
 
-def wait_ready(app, deadline):
+def wait_ready(app, window_end):
     stage("startup")
+    hard_deadline = window_end + FINAL_OBSERVE_ALLOWANCE
     seen = None
     while True:
         st.iteration = now()
@@ -1232,7 +1227,7 @@ def wait_ready(app, deadline):
             )
         if seen is not None:
             return seen
-        if not poll_gap(deadline):
+        if st.iteration >= window_end:
             raise DriverError(
                 "startup-timeout",
                 "30 s deadline expired; original pid %d still running; the "
@@ -1240,6 +1235,7 @@ def wait_ready(app, deadline):
                 % (app.proc.pid, app.text()[-2000:]),
                 "startup",
             )
+        poll_sleep(window_end)
 
 
 def xwininfo_map_state(window, deadline, stage_name):
@@ -1352,8 +1348,9 @@ def send_close(window, deadline, stage_name, check_after=True):
     )
 
 
-def focus_window(window, deadline):
+def focus_window(window, window_end):
     stage("focus")
+    hard_deadline = window_end + FINAL_OBSERVE_ALLOWANCE
     last = "<no poll>"
     while True:
         st.iteration = now()
@@ -1361,7 +1358,7 @@ def focus_window(window, deadline):
         wm_alive("focus")
         rc, _out, err = run_tool(
             ["xdotool", "windowactivate", "--sync", str(window)],
-            tool_budget(deadline),
+            tool_budget(hard_deadline),
             "xdotool windowactivate",
         )
         if rc not in (0, 1):
@@ -1374,7 +1371,7 @@ def focus_window(window, deadline):
         activate_ok = rc == 0
         rc2, _out2, err2 = run_tool(
             ["xdotool", "windowfocus", "--sync", str(window)],
-            tool_budget(deadline),
+            tool_budget(hard_deadline),
             "xdotool windowfocus",
         )
         if rc2 not in (0, 1):
@@ -1387,7 +1384,7 @@ def focus_window(window, deadline):
         focus_ok = rc2 == 0
         rc3, out3, err3 = run_tool(
             ["xdotool", "getactivewindow"],
-            tool_budget(deadline),
+            tool_budget(hard_deadline),
             "xdotool getactivewindow",
         )
         if rc3 not in (0, 1):
@@ -1399,7 +1396,7 @@ def focus_window(window, deadline):
             )
         rc4, out4, err4 = run_tool(
             ["xdotool", "getwindowfocus"],
-            tool_budget(deadline),
+            tool_budget(hard_deadline),
             "xdotool getwindowfocus",
         )
         if rc4 not in (0, 1):
@@ -1436,13 +1433,14 @@ def focus_window(window, deadline):
             and focused == str(window)
         ):
             return
-        if not poll_gap(deadline):
+        if st.iteration >= window_end:
             raise DriverError(
                 "focus",
                 "5 s focus deadline expired; requested window %d (%s); last "
                 "observation %s" % (window, hex_id(window), last),
                 "focus",
             )
+        poll_sleep(window_end)
 
 
 def await_quit(app, window, deadline):
@@ -1512,7 +1510,8 @@ def hide_then_restore(app):
     assert_alive(app, "hide")
     assert_seed("hide")
     send_close(app.window, now() + TOOL_LIMIT, "hide")
-    hide_deadline = now() + HIDE_TIMEOUT
+    hide_window_end = now() + HIDE_TIMEOUT
+    hide_deadline = hide_window_end + FINAL_OBSERVE_ALLOWANCE
     last = "<no poll>"
     while True:
         st.iteration = now()
@@ -1566,13 +1565,14 @@ def hide_then_restore(app):
                         "hide",
                     )
                 break
-        if not poll_gap(hide_deadline):
+        if st.iteration >= hide_window_end:
             raise VariantFailure(
                 "hide-timeout",
                 "5 s; window %d did not reach the exact xwininfo 'Map State: "
                 "IsUnMapped'; last observation %s" % (app.window, last),
                 "hide",
             )
+        poll_sleep(hide_window_end)
 
     # Observe window, process and seed through the whole interval: every
     # iteration checks all three, and the loop ends only after an observation
@@ -1678,7 +1678,8 @@ def relaunch(app):
     assert_alive(app, "relaunch")
     assert_seed("relaunch")
     st.second = App("second")
-    deadline = now() + RELAUNCH_TIMEOUT
+    window_end = now() + RELAUNCH_TIMEOUT
+    deadline = window_end + FINAL_OBSERVE_ALLOWANCE
     last = "<no poll>"
     window = None
     while True:
@@ -1696,11 +1697,11 @@ def relaunch(app):
                 % (st.second.proc.pid, status, signal_note(status)),
                 "relaunch",
             )
-        if status == 0 and deadline - now() >= MIN_OBSERVE:
+        if status == 0:
             window, last = discover_once(app, deadline, "relaunch")
             if window is not None:
                 break
-        if not poll_gap(deadline):
+        if st.iteration >= window_end:
             raise VariantFailure(
                 "relaunch-timeout",
                 "5 s; second pid %d status %s; original pid %d alive; the "
@@ -1716,6 +1717,7 @@ def relaunch(app):
                 ),
                 "relaunch",
             )
+        poll_sleep(window_end)
 
     if st.second.proc.poll() is None:
         # A window reappeared but the second instance is still running; it must
@@ -1725,7 +1727,7 @@ def relaunch(app):
             status = st.second.proc.poll()
             if status is not None:
                 break
-            if now() >= deadline:
+            if now() >= window_end:
                 raise VariantFailure(
                     "relaunch-timeout",
                     "5 s; second pid %d still running after the window "
@@ -1733,7 +1735,7 @@ def relaunch(app):
                     % (st.second.proc.pid, app.proc.pid),
                     "relaunch",
                 )
-            time.sleep(max(0.0, min(POLL, deadline - now())))
+            time.sleep(max(0.0, min(POLL, window_end - now())))
         if status != 0:
             st.second.proc.wait()
             st.second.finish()
