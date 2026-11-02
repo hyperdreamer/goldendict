@@ -197,11 +197,11 @@ the dialog (running `exit(1)`), then close the main window, then reach
 while `startupFailed` preserves the documented non-zero exit status **while the main
 window is visible** — that is, whenever this handler is consulted at all.
 
-Hidden-window exception (pre-existing, not changed by D1): with `startToTray=1` the main
-window can still be hidden when a startup failure dialog is open
-(`mainwindow.cc:869` calls `hide()`), so Qt's close-all step skips it and reaches
-`exit(0)` without ever consulting this handler. That ordering is identical before and
-after D1, and this change neither fixes nor worsens it.
+Hidden-window exception (pre-existing, not changed by D1): the window is only shown when
+`!enableTrayIcon || !startToTray` (`mainwindow.cc:868-873`). With `enableTrayIcon=1` and
+`startToTray=1` that block is skipped and the window stays hidden, so Qt's close-all step
+skips it and reaches `exit(0)` without ever consulting this handler. That ordering is
+identical before and after D1, and this change neither fixes nor worsens it.
 
 ### D2 — Nothing else is needed for an ordinary shutdown
 
@@ -268,15 +268,18 @@ focused, and the check then sends `Ctrl+Q`. The second instance exits by itself
    exists (`Config::isPortableVersion()` is exactly that directory test,
    `config.cc:2464-2470`), and launch the resolved path so the check and Qt agree on
    `applicationDirPath()`.
-3. Start a window manager inside the display (`openbox --sm-disable`, verified with
-   `wmctrl -m`), because `xdotool windowquit` sends EWMH `_NET_CLOSE_WINDOW` (verified:
-   `libxdo` contains no `WM_DELETE_WINDOW` path) and `xdotool windowclose` destroys the
-   window instead of asking it to close. A missing WM is a hard, explained failure;
-   `openbox` is a dependency of this check only.
-4. Launch under `xvfb-run -a` with `QT_QPA_PLATFORM=xcb`, capture stderr, wait up to 30 s
-   for the `startup-ready platform=… backend=…` record (`mainwindow.cc:1946`); any exit
-   before it fails the run. Record the child PID directly (never the `xvfb-run` wrapper)
-   and match windows with `xdotool search --pid <child-pid>`.
+3. Start, inside that same wrapper, a window manager (`openbox --sm-disable`, verified
+   with `wmctrl -m`), because `xdotool windowquit` sends EWMH `_NET_CLOSE_WINDOW`
+   (verified: `libxdo` contains no `WM_DELETE_WINDOW` path) and `xdotool windowclose`
+   destroys the window instead of asking it to close. A missing WM is a hard, explained
+   failure; `openbox` is a dependency of this check only.
+4. Launch the application under that same wrapper with `QT_QPA_PLATFORM=xcb`, capture
+   stderr, wait up to 30 s for the `startup-ready platform=… backend=…` record
+   (`mainwindow.cc:1946`); any exit before it fails the run. Record the child PID
+   directly (never the `xvfb-run` wrapper) and match windows with
+   `xdotool search --pid <child-pid>`. The inner driver is one process running under both
+   `xvfb-run -a` and `dbus-run-session`, so the window manager, both application
+   instances and every driving tool share the same `DISPLAY` and the same private bus.
 5. Apply the initiation above, then assert: exit within 10 s with status **exactly 0**
    (a crash or any non-zero status fails), except for the documented two-stage
    `close-to-tray` variant, whose first stage asserts the window is unmapped while the
@@ -291,7 +294,7 @@ binary path as an argument.
 
 | Entry point | Coverage |
 | --- | --- |
-| Window close (tray off) | automated: `barrier` |
+| Window close (`closeToTray=0`) | automated: `barrier` |
 | Ctrl+Q / File → Quit | automated: `no-barrier`, and the final stage of `close-to-tray` |
 | Hide-to-tray on close | automated: first stage of `close-to-tray` |
 | Tray → Quit | manual: the check runs under a private session bus, so no StatusNotifier host is reachable from it |
@@ -330,11 +333,11 @@ binary path as an argument.
 | Tray Quit / Ctrl+Q, barrier on or off | Window closes when Qt's quit runs; process exits |
 | Window close, `closeToTray=0`, barrier on | Config saved, window disabled, then hidden by Qt's quit; process exits |
 | Window close, `closeToTray=1` (normal operation) | Unchanged: `ev->ignore()`, window hides, app keeps running |
-| Second close while shutting down | Accepted: window hides; shutdown continues |
+| Second close while shutting down | Accepted and hides the window — **except** while `startupFailed` is set, where the veto is kept |
 | Another `quitApp()` call during shutdown | Returns at the `shuttingDown` latch; teardown continues |
 | Application-level `QEvent::Quit` during the cache wait | Window closes, `exec()` returns, teardown runs from `~MainWindow`; the barrier is best-effort |
 | Barrier times out after 5 s | Unchanged: `finishExit(true)` logs and completes shutdown |
-| Fail-startup dialog | Unchanged: `startupFailed` keeps the veto, so the failure path's `exit(1)` is not superseded by a quit-driven `exit(0)` |
+| Fail-startup dialog | `startupFailed` keeps the veto, so the failure path's `exit(1)` is not superseded by a quit-driven `exit(0)` **while the main window is visible**. With `enableTrayIcon=1` and `startToTray=1` the window was never shown, so Qt skips it and `exit(0)` can still overwrite the status — unchanged from `master` |
 | Quit during a dictionary rescan | **Unchanged / documented limitation:** the modal dialog can still veto the quit |
 
 ## Compatibility
