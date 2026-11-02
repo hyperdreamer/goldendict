@@ -1238,7 +1238,22 @@ void MainWindow::wheelEvent( QWheelEvent *ev )
 
 void MainWindow::closeEvent( QCloseEvent * ev )
 {
-  if( shuttingDown ) { ev->ignore(); return; }
+  if( shuttingDown )
+  {
+    // The fail-startup path calls exit(1) from its dialog handler. Qt's quit path
+    // would close the window and then call exit(0), overwriting that status, so
+    // keep vetoing while a startup failure is what is ending the process.
+    if( startupFailed ) { ev->ignore(); return; }
+
+    // Qt's quit() closes every top-level window and cancels the quit while any
+    // visible window refuses to close. Once shutdown has started a close request
+    // must therefore succeed: the deferred cache barrier reaches quit() from a
+    // later event-loop turn, where this window is no longer marked is_closing.
+    // Accepting hides the window (no WA_DeleteOnClose); the object lives on and
+    // finishShutdown() still destroys the article views.
+    ev->accept();
+    return;
+  }
   if ( cfg.preferences.enableTrayIcon && cfg.preferences.closeToTray )
   {
     if( !cfg.preferences.searchInDock )
