@@ -116,9 +116,9 @@ article-view destruction all skipped, the deferred path still hangs.
 
 1. A quit through any supported in-application entry point terminates the process in an
    **ordinary, fully initialized shutdown**; `app.exec()` returns normally with `main()`
-   reaching its cleanup. The documented exceptions in D4 — a quit that arrives while the
-   application-modal `Initializing` dialog owns input, and the two reentrant cleanup paths
-   — remain out of scope and are not claimed by this goal.
+   reaching its cleanup. The D4 exceptions are not claimed by this goal: a quit that
+   arrives while the application-modal `Initializing` dialog owns input, the
+   dictionary-reload continuations, and the two reentrant cleanup paths.
 2. Default preferences are covered: the asynchronous cache barrier, the disabled window,
    and both `closeToTray` settings.
 3. A close request that arrives after shutdown has started is accepted, never silently
@@ -217,9 +217,11 @@ dialog, full-text-search dialog and help window are already retired earlier in
 `quitApp()` (`mainwindow.cc:1257-1278`), so the main window is the remaining relevant
 veto when `quit()` runs. Two other kinds of window can still be on screen and are
 accounted for: plain modal dialogs such as `Preferences` (`mainwindow.cc:2228`) accept
-their close through inherited `QDialog` handling, and their continuations check
-`shuttingDown`, so they do not veto the quit; the application-modal `Initializing`
-dialog is the documented exception this change does not address.
+their close through inherited `QDialog` handling, and `editPreferences()` re-checks
+`shuttingDown` after `preferences.exec()` (`mainwindow.cc:2230`), so they do not veto the
+quit. Two exclusions: the application-modal `Initializing` dialog, and
+`editDictionaries()`, whose continuation after `dicts.exec()` (`mainwindow.cc:2155`) does
+**not** re-check `shuttingDown` and is listed as a reload limitation in D4.
 
 ### D3 — The regression check
 
@@ -291,7 +293,9 @@ focused, and the check then sends `Ctrl+Q`. The second instance exits by itself
    captured log on failure.
 
 The script is documented in its own header, is not part of `make check`, and takes the
-binary path as an argument.
+binary path as an argument. It does not exist yet: writing it and recording the pre-fix
+failures are part of the implementation, and no regression claim in this document is
+satisfied until it has been run against both binaries.
 
 ### D4 — Coverage and known limitations
 
@@ -333,8 +337,8 @@ binary path as an argument.
 
 | Situation | Behaviour |
 | --- | --- |
-| Tray Quit / Ctrl+Q, barrier on or off | Window closes when Qt's quit runs; process exits |
-| Window close, `closeToTray=0`, barrier on | Config saved, window disabled, then hidden by Qt's quit; process exits |
+| Tray Quit / Ctrl+Q, barrier on or off (ordinary shutdown) | Window closes when Qt's quit runs; process exits |
+| Window close, `closeToTray=0`, barrier on (ordinary shutdown) | Config saved, window disabled, then hidden by Qt's quit; process exits |
 | Window close, `closeToTray=1` (normal operation) | Unchanged: `ev->ignore()`, window hides, app keeps running |
 | Second close while shutting down | Accepted and hides the window — **except** while `startupFailed` is set, where the veto is kept |
 | Another `quitApp()` call during shutdown | Returns at the `shuttingDown` latch; teardown continues |
@@ -385,4 +389,5 @@ binary path as an argument.
 Changed files: `mainwindow.cc` (one branch of `closeEvent`) and the new
 `tests/shutdown/run-quit-check.sh`. No migration, no feature flag, no new module. Shipping
 it restores the documented behaviour of the Quit action, the tray menu and the window
-close button.
+close button **for an ordinary, fully initialized shutdown**; the D4 limitations are
+unchanged by this work.
