@@ -208,7 +208,7 @@ identical before and after D1, and this change neither fixes nor worsens it.
 
 ### D2 — Nothing else is needed for an ordinary shutdown
 
-No new flag, no new file, no build-system change. The `shuttingDown` latch is already
+No new flag, no new production file, no build-system change. The `shuttingDown` latch is already
 visible to the class that owns the window that vetoes the quit.
 
 Scope of this claim: **an ordinary, fully initialized shutdown that is not started from
