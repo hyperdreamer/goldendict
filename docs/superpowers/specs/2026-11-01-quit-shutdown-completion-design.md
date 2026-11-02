@@ -114,8 +114,11 @@ article-view destruction all skipped, the deferred path still hangs.
 
 ## Goals
 
-1. A quit through any supported in-application entry point terminates the process;
-   `app.exec()` returns normally with `main()` reaching its cleanup.
+1. A quit through any supported in-application entry point terminates the process in an
+   **ordinary, fully initialized shutdown**; `app.exec()` returns normally with `main()`
+   reaching its cleanup. The documented exceptions in D4 — a quit that arrives while the
+   application-modal `Initializing` dialog owns input, and the two reentrant cleanup paths
+   — remain out of scope and are not claimed by this goal.
 2. Default preferences are covered: the asynchronous cache barrier, the disabled window,
    and both `closeToTray` settings.
 3. A close request that arrives after shutdown has started is accepted, never silently
@@ -183,7 +186,7 @@ Three different routes reach this handler, and they are not interchangeable:
 
 | Route | How it arrives |
 | --- | --- |
-| Targeted window close (window manager, `wmctrl -c`) | `QGuiApplicationPrivate::processCloseEvent()` dispatches a close to that window; the handler runs directly and, with `closeToTray=0`, calls `quitApp()`. Qt's close-all step is not involved. |
+| Targeted window close (window manager, `wmctrl -i -c "$window_id"`) | `QGuiApplicationPrivate::processCloseEvent()` dispatches a close to that window; the handler runs directly and, with `closeToTray=0`, calls `quitApp()`. Qt's close-all step is not involved. |
 | Application-level `QEvent::Quit` (e.g. `QCoreApplication::quit()` from `finishShutdown()`) | `QApplication::event()` calls `closeAllWindows()`, which is why a refusing window cancels the quit. This is the route D1 unblocks. |
 | XSMP session request (xcb) | `commitDataRequest` → `MainWindow::commitData(QSessionManager&)` → `quitApp()`. |
 
@@ -233,7 +236,7 @@ tests/shutdown/run-quit-check.sh <goldendict-binary> <variant>
 
 | Variant | Seeded preferences | Initiation | Pre-fix | Post-fix |
 | --- | --- | --- | --- | --- |
-| `barrier` | `enableTrayIcon=1`, `startToTray=0`, `closeToTray=0`, `clearNetworkCacheOnExit=1` | graceful window close (`wmctrl -c`) | hangs | exit 0 |
+| `barrier` | `enableTrayIcon=1`, `startToTray=0`, `closeToTray=0`, `clearNetworkCacheOnExit=1` | graceful window close (`wmctrl -i -c "$window_id"`) | hangs | exit 0 |
 | `no-barrier` | `enableTrayIcon=1`, `startToTray=0`, `closeToTray=0`, `clearNetworkCacheOnExit=0` | focused `Ctrl+Q` | hangs | exit 0 |
 | `close-to-tray` | `enableTrayIcon=1`, `startToTray=0`, `closeToTray=1`, `clearNetworkCacheOnExit=1` | graceful window close, then quit | hides, then hangs | hides, then exit 0 |
 
