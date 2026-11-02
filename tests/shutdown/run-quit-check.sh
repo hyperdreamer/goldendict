@@ -15,13 +15,13 @@
 #                  Ctrl+Q is sent, then the process must still exit 0.
 #   close-to-tray  closeToTray=1 clearNetworkCacheOnExit=1
 #                  The first close must hide the main window and keep the
-#                  process alive (xwininfo Map State: IsUnMapped, stable for
-#                  1 s, seed config unchanged).  A second instance of the same
-#                  binary must bring the window back; a focused Ctrl+Q must
-#                  then exit 0.
+#                  process alive (xwininfo Map State: IsUnMapped, observed
+#                  through the whole 1 s interval, seed config unchanged).  A
+#                  second instance of the same binary must bring the window
+#                  back; a focused Ctrl+Q must then exit 0.
 #
-# Dependencies, all required on PATH:
-#   bash python3 env mktemp mkdir dirname readlink chmod rm
+# Dependencies, all required on PATH (checked before any of them is used):
+#   bash python3 env mktemp mkdir dirname readlink chmod rm sleep
 #   xvfb-run Xvfb xauth dbus-run-session dbus-daemon
 #   openbox wmctrl xdotool xprop xwininfo   (xwininfo ships in xorg-xwininfo)
 #
@@ -29,7 +29,8 @@
 #   0  the variant passed
 #   1  a variant assertion failed after a valid startup (FAIL line)
 #   2  usage, setup, environment, driver, interruption or cleanup error
-#      (ERROR line)
+#      (ERROR line).  A cleanup error always wins, even over a passing or
+#      failing driver verdict.
 #
 # structure:
 #   run-quit-check.sh (supervisor)
@@ -40,11 +41,21 @@
 #           original GoldenDict; optional second GoldenDict
 #           wmctrl, xdotool, xprop, xwininfo
 #
-# The supervisor owns argument validation, the isolated root and the clean
-# environment, and it trusts only the token-bound result file written by the
-# driver.  The driver owns the window manager, both application instances and
-# every driving tool, so everything shares one private X display and one
-# private D-Bus session.
+# The supervisor owns argument validation, the dependency gate, the isolated
+# root and the clean environment, and it trusts only the token-bound result
+# file written by the driver.  The driver owns the window manager, both
+# application instances and every driving tool, so everything shares one
+# private X display and one private D-Bus session.  Each app and the WM run in
+# their own process session; the driver records every such group in
+# $ROOT/owned.pids so the supervisor can still clean up an owned group whose
+# driver was killed before its own cleanup ran.
+#
+# On HUP/INT/TERM the supervisor signals only the process group it created for
+# the xvfb-run/dbus-run-session/driver tree, waits for that tree to finish
+# (escalating within the same group only), reaps any owned app/WM group that
+# outlived its driver, and only then removes the root.  Escalation is always
+# bounded to processes this invocation created: never `kill 0`, never a name
+# based kill, never the caller's process group.
 #
 # This is a standalone check.  It is deliberately NOT registered in
 # `make check` and it adds no QtTest suite: the existing aggregate is a closed
@@ -54,7 +65,7 @@
 set -u -o pipefail
 # Run background jobs in their own process group so an interrupt can stop the
 # private xvfb-run/dbus-run-session/driver tree without touching any other
-# process (never `kill 0`, never the caller's process group).
+# process.
 set -m
 umask 077
 
@@ -64,30 +75,145 @@ VARIANT=unset
 ROOT=''
 LOG=''
 TOKEN=''
-WRAPPER_PID=''
+DRIVER_PID=''
+DRIVER_GROUP=''
 INTERRUPT_SIGNAL=''
+GROUP_NOTE=''
+TREE_ESCALATED=0
+TREE_SURVIVORS=0
+OWNED_DETAIL=''
 
 supervisor_error() { # <code> <detail>
   printf 'ERROR variant=%s code=%s %s\n' "$VARIANT" "$1" "$2" >&2
 }
 
+now_us() { # monotonic enough for bounds; sub-second resolution, locale proof
+  if [ -n "${EPOCHREALTIME-}" ]; then
+    printf '%s\n' "${EPOCHREALTIME//[!0-9]/}"
+  else
+    printf '%s\n' "$(( SECONDS * 1000000 ))"
+  fi
+}
+
+group_members() { # <pgid>; live (non-zombie) pids in that process group
+  local pgid=$1 entry pid stat state pgrp
+  for entry in /proc/[0-9]*; do
+    pid=${entry#/proc/}
+    stat=''
+    { IFS= read -r stat <"$entry/stat"; } 2>/dev/null || continue
+    [ -n "$stat" ] || continue
+    # Field 2 (comm) may contain spaces and parentheses; everything after the
+    # last ") " is: state ppid pgrp session ...
+    stat=${stat##*') '}
+    # shellcheck disable=SC2086
+    set -- $stat
+    [ "$#" -ge 3 ] || continue
+    state=$1
+    pgrp=$3
+    [ "$state" = 'Z' ] && continue
+    [ "$pgrp" = "$pgid" ] && printf '%s\n' "$pid"
+  done
+  return 0
+}
+
+group_list() { # <pgid> -> space separated live pids
+  local members
+  members=$(group_members "$1")
+  members=${members//$'\n'/ }
+  printf '%s\n' "${members% }"
+}
+
+stop_owned_group() { # <pgid>; TERM then KILL one owned group, bounded
+  local pgid=$1 deadline members
+  GROUP_NOTE=''
+  members=$(group_members "$pgid")
+  [ -n "$members" ] || return 0
+  kill -TERM -- "-$pgid" 2>/dev/null || true
+  deadline=$(( $(now_us) + 2000000 ))
+  while [ -n "$(group_members "$pgid")" ] && [ "$(now_us)" -lt "$deadline" ]; do
+    sleep 0.05
+  done
+  members=$(group_members "$pgid")
+  if [ -n "$members" ]; then
+    kill -KILL -- "-$pgid" 2>/dev/null || true
+    deadline=$(( $(now_us) + 2000000 ))
+    while [ -n "$(group_members "$pgid")" ] && [ "$(now_us)" -lt "$deadline" ]; do
+      sleep 0.05
+    done
+    members=$(group_members "$pgid")
+  fi
+  if [ -n "$members" ]; then
+    GROUP_NOTE="owned process group $pgid still has live pids=$(group_list "$pgid") after SIGTERM and SIGKILL"
+    return 1
+  fi
+  return 0
+}
+
 on_signal() { # <NAME>
+  if [ -n "$INTERRUPT_SIGNAL" ]; then
+    return 0
+  fi
   INTERRUPT_SIGNAL=$1
-  if [ -n "$WRAPPER_PID" ]; then
+  if [ -n "$DRIVER_PID" ]; then
     # Only the process group this supervisor created for the wrapper tree.
-    kill -TERM -- "-$WRAPPER_PID" 2>/dev/null || true
+    kill -TERM -- "-$DRIVER_PID" 2>/dev/null || true
   fi
 }
 trap 'on_signal INT' INT
 trap 'on_signal HUP' HUP
 trap 'on_signal TERM' TERM
 
+wait_driver_exit() { # <pid>; reap the direct child even across trapped signals
+  local pid=$1 again
+  WAIT_STATUS=0
+  while :; do
+    WAIT_STATUS=0
+    wait "$pid" || WAIT_STATUS=$?
+    # A trapped signal can make wait(1) return early while the child still
+    # runs; only trust a status once the child no longer exists.
+    if kill -0 "$pid" 2>/dev/null; then
+      sleep 0.02
+      continue
+    fi
+    if [ "$WAIT_STATUS" -gt 128 ]; then
+      # The wait may have been interrupted as the child exited; the real
+      # status is still available once, so collect it.
+      again=0
+      wait "$pid" 2>/dev/null || again=$?
+      if [ "$again" -ne 127 ]; then
+        WAIT_STATUS=$again
+      fi
+    fi
+    return 0
+  done
+}
+
+cleanup_owned_pids() { # reap any owned app/WM group that outlived its driver
+  local pgid rc=0
+  OWNED_DETAIL=''
+  [ -f "$ROOT/owned.pids" ] || return 0
+  while IFS= read -r pgid; do
+    case $pgid in
+      ''|*[!0-9]*) continue ;;
+    esac
+    [ -n "$(group_members "$pgid")" ] || continue
+    if ! stop_owned_group "$pgid"; then
+      OWNED_DETAIL+="${OWNED_DETAIL:+; }$GROUP_NOTE"
+      rc=1
+    fi
+  done <"$ROOT/owned.pids"
+  return "$rc"
+}
+
 cleanup_root_on_exit() {
   local status=$?
+  trap - EXIT
   if [ -n "$ROOT" ] && [ -d "$ROOT" ]; then
     if ! rm -rf -- "$ROOT"; then
       printf 'ERROR variant=%s code=cleanup could not remove root=%s\n' "$VARIANT" "$ROOT" >&2
-      status=2
+      if [ "$status" -eq 0 ]; then
+        status=2
+      fi
     fi
   fi
   exit "$status"
@@ -238,12 +364,22 @@ import xml.etree.ElementTree as ET
 
 READY_RE = re.compile(r"startup-ready platform=xcb backend=\S+")
 XWININFO_LOST_TOKENS = ("BadWindow", "Bad Drawable", "No such window with id")
+MAP_STATES = ("IsUnMapped", "IsUnviewable", "IsViewable")
+INTERRUPT_SIGNALS = {signal.SIGINT, signal.SIGHUP, signal.SIGTERM}
 
 POLL = 0.1
+# A poll that cannot start with at least this much of its stage left is not
+# started at all: the loop sleeps up to the deadline and reports its timeout
+# at the deadline instead of feeding a starved tool call a bogus budget.
+MIN_OBSERVE = 0.5
 TOOL_LIMIT = 2.0
 STARTUP_TIMEOUT = 30.0
 HIDE_TIMEOUT = 5.0
 HIDE_STABLE = 1.0
+# Room after the end of the 1 s hide interval for the final observation that
+# starts at (or after) that end.  It is a real deadline for those tool calls,
+# so no tool is ever given a budget larger than the time that remains.
+STABLE_ALLOWANCE = 2.0
 RELAUNCH_TIMEOUT = 5.0
 FOCUS_TIMEOUT = 5.0
 QUIT_TIMEOUT = 10.0
@@ -307,6 +443,24 @@ class Interrupted(Exception):
         self.signum = signum
 
 
+class DeferredSignals(object):
+    """Block the interruption signals across a spawn and its registration.
+
+    A signal delivered in that window stays pending; the Python handler runs
+    as soon as the mask is restored, by which point cleanup already owns the
+    new child.  This is what keeps an app or the WM that was spawned but not
+    yet assigned to its state slot from being lost.
+    """
+
+    def __enter__(self):
+        self.previous = signal.pthread_sigmask(signal.SIG_BLOCK, INTERRUPT_SIGNALS)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        signal.pthread_sigmask(signal.SIG_SETMASK, self.previous)
+        return False
+
+
 class State(object):
     pass
 
@@ -330,6 +484,9 @@ st.second = None
 st.wm_out = None
 st.wm_err = None
 st.iteration = time.monotonic()
+st.owned_groups = set()
+st.owned_apps = []
+st.owned_file = None
 
 
 def now():
@@ -391,34 +548,49 @@ def hex_id(window):
 
 
 def tool_budget(deadline):
-    # The smaller of two seconds and the remaining stage time.  A floor of one
-    # poll interval keeps the last poll of a windowed stage from turning a
-    # healthy X tool into a spurious timeout; the loop guards below stop
-    # polling a stage once less than that interval remains.
+    """The smaller of two seconds and the time actually left in the stage."""
     if deadline is None:
         return TOOL_LIMIT
-    return min(TOOL_LIMIT, max(POLL, deadline - now()))
+    left = deadline - now()
+    if left <= 0.0:
+        raise DriverError(
+            "tool",
+            "no time left in stage %s for a tool invocation" % (st.stage,),
+            st.stage,
+        )
+    return min(TOOL_LIMIT, left)
 
 
-def require_time(deadline, code, detail, stage_name):
-    if deadline is not None and deadline - now() <= POLL:
-        raise DriverError(code, detail, stage_name)
+def poll_gap(deadline):
+    """Sleep for the next <=POLL-spaced poll; False when the stage is over.
+
+    A stage is never expired before its deadline: when less than
+    MIN_OBSERVE remains, the loop sleeps exactly the remaining time and the
+    caller then reports its stage timeout at (not before) the deadline.  Every
+    observation starts with a positive, real remaining budget.
+    """
+    remaining = deadline - now()
+    if remaining <= 0.0:
+        return False
+    if remaining < MIN_OBSERVE:
+        time.sleep(remaining)
+        return False
+    gap = POLL - (now() - st.iteration)
+    delay = min(POLL, remaining, gap)
+    if delay > 0.0:
+        time.sleep(delay)
+    return True
 
 
-def sleep_poll(deadline=None):
-    # Keep the observation cadence at or below one poll interval: sleep only the
-    # part of the interval the tools did not already consume.
-    delay = POLL - (now() - st.iteration)
-    if deadline is not None:
-        delay = min(delay, deadline - now())
-    time.sleep(max(0.01, min(POLL, delay)))
-
-
-def run_tool(argv, timeout, what):
-    """Run one external tool, bounded by the stage budget.
+def run_tool(argv, timeout, what, check_original=True):
+    """Run one external tool, bounded by the remaining stage budget.
 
     Statuses are interpreted by the caller according to the per-command table
-    in spec section 2: this helper only reports, it never classifies.
+    in spec section 2: this helper only reports, it never classifies.  Unless
+    the command itself initiates the specified quit, the original process is
+    re-checked before the caller classifies the result, so an application that
+    died during a query is reported as premature-exit rather than as a
+    window/tool symptom.
     """
     if timeout <= 0.0:
         raise DriverError(
@@ -433,7 +605,6 @@ def run_tool(argv, timeout, what):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=timeout,
-            start_new_session=True,
         )
     except FileNotFoundError:
         raise DriverError(
@@ -448,11 +619,105 @@ def run_tool(argv, timeout, what):
             % (what, timeout, st.stage, out, err),
             st.stage,
         )
-    return (
+    result = (
         proc.returncode,
         proc.stdout.decode("utf-8", "replace"),
         proc.stderr.decode("utf-8", "replace"),
     )
+    if check_original:
+        guard_original_status(what)
+    return result
+
+
+def register_group(pgid):
+    """Record an owned process group before interruption can be handled.
+
+    The record is appended while the spawn's signals are still deferred, so
+    the supervisor can reap a group whose driver was killed before its own
+    cleanup ran.
+    """
+    st.owned_groups.add(pgid)
+    if st.owned_file is None:
+        return
+    try:
+        handle = os.open(
+            st.owned_file, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600
+        )
+    except OSError:
+        return
+    try:
+        os.write(handle, ("%d\n" % pgid).encode("ascii"))
+    finally:
+        os.close(handle)
+
+
+def group_members(pgid):
+    """Live (non-zombie) pids still in process group `pgid`."""
+    members = []
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return members
+    for name in entries:
+        if not name.isdigit():
+            continue
+        try:
+            with open("/proc/%s/stat" % name, "rb") as handle:
+                data = handle.read().decode("utf-8", "replace")
+        except OSError:
+            continue
+        close_paren = data.rfind(")")
+        if close_paren < 0:
+            continue
+        fields = data[close_paren + 2:].split()
+        if len(fields) < 3:
+            continue
+        state, pgrp = fields[0], fields[2]
+        if state == "Z":
+            continue
+        try:
+            if int(pgrp) == pgid:
+                members.append(int(name))
+        except ValueError:
+            continue
+    return sorted(members)
+
+
+def reap_group(pgid, grace):
+    """TERM then KILL one owned process group; returns a problem string.
+
+    The group is addressed independently of its leader's exit status: a
+    descendant can outlive the leader the group was created with.
+    """
+    if not group_members(pgid):
+        return ""
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        return ""
+    except PermissionError as exc:
+        return "killpg(%d, SIGTERM): %s" % (pgid, exc)
+    end = now() + grace
+    while now() < end and group_members(pgid):
+        time.sleep(0.05)
+    members = group_members(pgid)
+    if members:
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            return ""
+        except PermissionError as exc:
+            return "killpg(%d, SIGKILL): %s" % (pgid, exc)
+        end = now() + grace
+        while now() < end and group_members(pgid):
+            time.sleep(0.05)
+        members = group_members(pgid)
+    if members:
+        return (
+            "owned process group %d still has live pids=%s after SIGTERM and "
+            "SIGKILL" % (pgid, members)
+        )
+    return ""
 
 
 def read_bytes(path):
@@ -540,27 +805,56 @@ class App(object):
     environment variables beyond the ones the specification allows.  The
     terminal is set raw and drained continuously, so the captured log holds the
     exact merged stdout/stderr bytes.
+
+    The spawn and the registration of the new process group happen with the
+    interruption signals blocked; a failure after the fork reaps the child
+    instead of leaving it behind.
     """
 
     def __init__(self, tag):
         self.tag = tag
         self.path = os.path.join(st.logdir, tag + ".log")
-        self.handle = open(self.path, "wb")
-        self.master, slave = pty.openpty()
-        tty.setraw(slave)
-        self.proc = subprocess.Popen(
-            [st.binary],
-            cwd=st.root,
-            stdin=subprocess.DEVNULL,
-            stdout=slave,
-            stderr=slave,
-            start_new_session=True,
-            close_fds=True,
-        )
-        os.close(slave)
+        self.handle = None
+        self.master = None
+        self.proc = None
+        self.thread = None
         self.stopped = False
-        self.thread = threading.Thread(target=self._drain, daemon=True)
-        self.thread.start()
+        with DeferredSignals():
+            slave = None
+            try:
+                self.handle = open(self.path, "wb")
+                self.master, slave = pty.openpty()
+                tty.setraw(slave)
+                self.proc = subprocess.Popen(
+                    [st.binary],
+                    cwd=st.root,
+                    stdin=subprocess.DEVNULL,
+                    stdout=slave,
+                    stderr=slave,
+                    start_new_session=True,
+                    close_fds=True,
+                )
+            except BaseException:
+                if slave is not None:
+                    try:
+                        os.close(slave)
+                    except OSError:
+                        pass
+                self.reap_failed_construct()
+                raise
+            else:
+                try:
+                    os.close(slave)
+                except OSError:
+                    pass
+            register_group(self.proc.pid)
+            st.owned_apps.append(self)
+        try:
+            self.thread = threading.Thread(target=self._drain, daemon=True)
+            self.thread.start()
+        except BaseException:
+            self.reap_failed_construct()
+            raise
 
     def _drain(self):
         while True:
@@ -587,15 +881,30 @@ class App(object):
         if self.stopped:
             return
         self.stopped = True
-        self.thread.join(timeout=2.0)
-        try:
-            os.close(self.master)
-        except OSError:
-            pass
-        try:
-            self.handle.close()
-        except OSError:
-            pass
+        if self.thread is not None:
+            self.thread.join(timeout=2.0)
+        if self.master is not None:
+            try:
+                os.close(self.master)
+            except OSError:
+                pass
+            self.master = None
+        if self.handle is not None:
+            try:
+                self.handle.close()
+            except OSError:
+                pass
+            self.handle = None
+
+    def reap_failed_construct(self):
+        proc = self.proc
+        if proc is not None:
+            reap_group(proc.pid, 1.0)
+            try:
+                proc.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                pass
+        self.finish()
 
 
 def complete_lines(text):
@@ -604,10 +913,29 @@ def complete_lines(text):
     return [line.rstrip("\r") for line in parts]
 
 
+def guard_original_status(what):
+    """Re-check the original process right after a command, before judgement."""
+    app = st.original
+    if app is None or app.proc is None:
+        return
+    status = app.proc.poll()
+    if status is None:
+        return
+    status = app.proc.wait()
+    app.finish()
+    raise VariantFailure(
+        "premature-exit",
+        "original pid %d exited status %d%s during stage %s immediately after "
+        "%s, before that command's result was classified"
+        % (app.proc.pid, status, signal_note(status), st.stage, what),
+        st.stage,
+    )
+
+
 def assert_alive(app, stage_name):
     status = app.proc.poll()
     if status is not None:
-        app.proc.wait()
+        status = app.proc.wait()
         app.finish()
         raise VariantFailure(
             "premature-exit",
@@ -646,53 +974,107 @@ def wm_output():
     return "stdout=%r stderr=%r" % (read_text(st.wm_out), read_text(st.wm_err))
 
 
-def wm_ready(deadline):
-    stage("wm")
+def wm_probe(deadline):
+    """Wait (<=5 s) until Openbox owns the WM selection and names itself.
+
+    This is the 5 s readiness window of spec section 2 step 1.  It is probed
+    with the root selection property, so `wmctrl -m` itself is invoked exactly
+    once afterwards: its status 1 is the table's driver error ("the WM is
+    missing or not ready") and must not be produced by a transient startup
+    state.
+    """
     last = "<no poll>"
     while True:
         st.iteration = now()
         wm_alive("wm")
-        require_time(
-            deadline,
-            "wm",
-            "wmctrl -m did not exit 0 and report 'Name: Openbox' within 5 s; "
-            "last observation %s; openbox %s"
-            % (last, wm_output()),
-            "wm",
-        )
         rc, out, err = run_tool(
-            ["wmctrl", "-m"], tool_budget(deadline), "wmctrl -m"
+            ["xprop", "-root", "_NET_SUPPORTING_WM_CHECK"],
+            tool_budget(deadline),
+            "xprop -root _NET_SUPPORTING_WM_CHECK",
         )
         last = "status=%d stdout=%r stderr=%r" % (rc, out, err)
-        if rc == 0:
-            if "Name: Openbox" in out:
-                return
-            left = deadline - now()
-            if left <= 0.02:
-                raise DriverError(
-                    "wm",
-                    "wmctrl -m did not report 'Name: Openbox' within 5 s; "
-                    "last observation %s" % last,
-                    "wm",
-                )
-        elif rc == 1:
-            left = deadline - now()
-            if left <= 0.02:
-                raise DriverError(
-                    "wm",
-                    "wmctrl -m was not ready within 5 s (the window manager is "
-                    "missing or not ready); last observation %s; openbox %s"
-                    % (last, wm_output()),
-                    "wm",
-                )
-        else:
+        if rc not in (0, 1):
             raise DriverError(
                 "wm",
-                "wmctrl -m failed with status %d (%r); openbox %s"
-                % (rc, err, wm_output()),
+                "xprop -root _NET_SUPPORTING_WM_CHECK: unexpected status %d "
+                "stderr=%r; openbox %s" % (rc, err, wm_output()),
                 "wm",
             )
-        sleep_poll(deadline)
+        if rc == 1:
+            raise DriverError(
+                "wm",
+                "xprop -root _NET_SUPPORTING_WM_CHECK exited 1 (%r); openbox %s"
+                % (err.strip(), wm_output()),
+                "wm",
+            )
+        match = re.search(r"window id # (0x[0-9a-fA-F]+)", out)
+        if match is not None:
+            owner = match.group(1)
+            rc2, out2, err2 = run_tool(
+                ["xprop", "-id", owner, "_NET_WM_NAME"],
+                tool_budget(deadline),
+                "xprop -id <wm-supporting-window> _NET_WM_NAME",
+            )
+            last += " supporting_window=%s name_status=%d name_stdout=%r name_stderr=%r" % (
+                owner,
+                rc2,
+                out2,
+                err2,
+            )
+            if rc2 == 1 and "BadWindow" in err2:
+                raise DriverError(
+                    "wm",
+                    "the window manager's supporting window %s vanished while "
+                    "its name was being read; openbox %s" % (owner, wm_output()),
+                    "wm",
+                )
+            if rc2 not in (0, 1):
+                raise DriverError(
+                    "wm",
+                    "xprop -id %s _NET_WM_NAME: unexpected status %d stderr=%r; "
+                    "openbox %s" % (owner, rc2, err2, wm_output()),
+                    "wm",
+                )
+            if rc2 == 0 and "Openbox" in out2:
+                return
+        if not poll_gap(deadline):
+            raise DriverError(
+                "wm",
+                "openbox --sm-disable did not publish the WM selection and its "
+                "'Openbox' name within 5 s; last observation %s; openbox %s"
+                % (last, wm_output()),
+                "wm",
+            )
+
+
+def wm_ready(deadline):
+    stage("wm")
+    wm_probe(deadline)
+    # Spec section 2 status table, applied literally: status 1 from wmctrl -m is
+    # a driver error, status 0 with 'Name: Openbox' is readiness, and every
+    # other status is a driver error too.
+    rc, out, err = run_tool(["wmctrl", "-m"], tool_budget(deadline), "wmctrl -m")
+    if rc == 1:
+        raise DriverError(
+            "wm",
+            "wmctrl -m exited 1: the window manager is missing or not ready "
+            "(stderr=%r); openbox %s" % (err.strip(), wm_output()),
+            "wm",
+        )
+    if rc != 0:
+        raise DriverError(
+            "wm",
+            "wmctrl -m failed with status %d (%r); openbox %s"
+            % (rc, err.strip(), wm_output()),
+            "wm",
+        )
+    if "Name: Openbox" not in out:
+        raise DriverError(
+            "wm",
+            "wmctrl -m exited 0 but did not report 'Name: Openbox' "
+            "(stdout=%r); openbox %s" % (out, wm_output()),
+            "wm",
+        )
 
 
 def xdotool_ids(original_pid, visible_only, deadline, what):
@@ -735,9 +1117,12 @@ def xdotool_ids(original_pid, visible_only, deadline, what):
 def wmctrl_managed(deadline, what):
     rc, out, err = run_tool(["wmctrl", "-lp"], tool_budget(deadline), what)
     if rc != 0:
+        # Section 2 table: a non-zero wmctrl -lp is a driver error because the
+        # window manager is missing or no longer ready.
         raise DriverError(
-            "tool",
-            "%s: wmctrl -lp status %d stderr=%r" % (what, rc, err.strip()),
+            "wm",
+            "%s: wmctrl -lp status %d stderr=%r; %s"
+            % (what, rc, err.strip(), wm_output()),
             st.stage,
         )
     mapping = {}
@@ -797,30 +1182,20 @@ def discover(app, deadline, stage_name):
         st.iteration = now()
         assert_alive(app, stage_name)
         wm_alive(stage_name)
-        require_time(
-            deadline,
-            "discovery",
-            "30 s discovery deadline expired; pid %d; last observation %s"
-            % (app.proc.pid, last),
-            stage_name,
-        )
         window, last = discover_once(app, deadline, stage_name)
         if window is not None:
             return window
-        if deadline - now() <= 0.02:
+        if not poll_gap(deadline):
+            if "candidates=[]" in last:
+                kind = "zero candidate windows"
+            else:
+                kind = "ambiguous candidate windows"
             raise DriverError(
                 "discovery",
-                "30 s discovery deadline expired; pid %d; %s; %s"
-                % (
-                    app.proc.pid,
-                    last,
-                    "multiple candidate windows"
-                    if "candidates=[]" not in last
-                    else "zero candidate windows",
-                ),
+                "30 s discovery deadline expired; pid %d; %s; last observation %s"
+                % (app.proc.pid, kind, last),
                 stage_name,
             )
-        sleep_poll(deadline)
 
 
 def wait_ready(app, deadline):
@@ -834,7 +1209,7 @@ def wait_ready(app, deadline):
                 break
         status = app.proc.poll()
         if status is not None:
-            app.proc.wait()
+            status = app.proc.wait()
             app.finish()
             # A line written just before the exit is still a valid record, but
             # an exit before the action is rejected either way.
@@ -857,7 +1232,7 @@ def wait_ready(app, deadline):
             )
         if seen is not None:
             return seen
-        if deadline - now() <= POLL:
+        if not poll_gap(deadline):
             raise DriverError(
                 "startup-timeout",
                 "30 s deadline expired; original pid %d still running; the "
@@ -865,7 +1240,6 @@ def wait_ready(app, deadline):
                 % (app.proc.pid, app.text()[-2000:]),
                 "startup",
             )
-        sleep_poll(deadline)
 
 
 def xwininfo_map_state(window, deadline, stage_name):
@@ -882,6 +1256,13 @@ def xwininfo_map_state(window, deadline, stage_name):
             raise DriverError(
                 "tool",
                 "%s: no 'Map State:' line in output %r" % (what, out),
+                stage_name,
+            )
+        if state not in MAP_STATES:
+            raise DriverError(
+                "tool",
+                "%s: invalid Map State value %r (expected one of %s)"
+                % (what, state, ", ".join(MAP_STATES)),
                 stage_name,
             )
         return state
@@ -947,10 +1328,13 @@ def xprop_pid(window, deadline, stage_name):
     )
 
 
-def send_close(window, deadline, stage_name):
+def send_close(window, deadline, stage_name, check_after=True):
     what = "wmctrl -i -c %s" % hex_id(window)
     rc, out, err = run_tool(
-        ["wmctrl", "-i", "-c", hex_id(window)], tool_budget(deadline), what
+        ["wmctrl", "-i", "-c", hex_id(window)],
+        tool_budget(deadline),
+        what,
+        check_original=check_after,
     )
     if rc == 0:
         return
@@ -975,14 +1359,7 @@ def focus_window(window, deadline):
         st.iteration = now()
         assert_alive(st.original, "focus")
         wm_alive("focus")
-        require_time(
-            deadline,
-            "focus",
-            "5 s focus deadline expired; requested window %d (%s); last "
-            "observation %s" % (window, hex_id(window), last),
-            "focus",
-        )
-        rc, out, err = run_tool(
+        rc, _out, err = run_tool(
             ["xdotool", "windowactivate", "--sync", str(window)],
             tool_budget(deadline),
             "xdotool windowactivate",
@@ -994,8 +1371,8 @@ def focus_window(window, deadline):
                 % (window, rc, err.strip()),
                 "focus",
             )
-        activate = "activate=%d/%r" % (rc, err.strip())
-        rc2, out2, err2 = run_tool(
+        activate_ok = rc == 0
+        rc2, _out2, err2 = run_tool(
             ["xdotool", "windowfocus", "--sync", str(window)],
             tool_budget(deadline),
             "xdotool windowfocus",
@@ -1007,7 +1384,7 @@ def focus_window(window, deadline):
                 % (window, rc2, err2.strip()),
                 "focus",
             )
-        focus = "focus=%d/%r" % (rc2, err2.strip())
+        focus_ok = rc2 == 0
         rc3, out3, err3 = run_tool(
             ["xdotool", "getactivewindow"],
             tool_budget(deadline),
@@ -1034,16 +1411,38 @@ def focus_window(window, deadline):
             )
         active = out3.strip()
         focused = out4.strip()
-        last = "%s %s %s getactivewindow=%r getwindowfocus=%r" % (
-            activate,
-            focus,
-            "verify",
-            active,
-            focused,
+        if rc3 == 0 and not active.isdigit():
+            raise DriverError(
+                "tool",
+                "xdotool getactivewindow: malformed output %r" % (out3,),
+                "focus",
+            )
+        if rc4 == 0 and not focused.isdigit():
+            raise DriverError(
+                "tool",
+                "xdotool getwindowfocus: malformed output %r" % (out4,),
+                "focus",
+            )
+        last = (
+            "activate=%d/%r focus=%d/%r getactivewindow=%r getwindowfocus=%r"
+            % (rc, err.strip(), rc2, err2.strip(), active, focused)
         )
-        if rc3 == 0 and rc4 == 0 and active == str(window) and focused == str(window):
+        if (
+            activate_ok
+            and focus_ok
+            and rc3 == 0
+            and rc4 == 0
+            and active == str(window)
+            and focused == str(window)
+        ):
             return
-        sleep_poll(deadline)
+        if not poll_gap(deadline):
+            raise DriverError(
+                "focus",
+                "5 s focus deadline expired; requested window %d (%s); last "
+                "observation %s" % (window, hex_id(window), last),
+                "focus",
+            )
 
 
 def await_quit(app, window, deadline):
@@ -1055,11 +1454,11 @@ def await_quit(app, window, deadline):
         if status is None:
             wm_alive("await-shutdown")
             if not observed:
-                ok, why = shutdown_evidence()
+                ok, _why = shutdown_evidence()
                 if ok:
                     observed = True
                     emit("shutdown-observed", " elapsed=%.3fs" % elapsed())
-        if status is not None:
+        else:
             status = app.proc.wait()
             app.finish()
             if not observed:
@@ -1084,7 +1483,7 @@ def await_quit(app, window, deadline):
                     "await-shutdown",
                 )
             return
-        if deadline - now() <= POLL:
+        if now() >= deadline:
             ok, why = shutdown_evidence()
             if ok and not observed:
                 observed = True
@@ -1104,7 +1503,7 @@ def await_quit(app, window, deadline):
                 % (app.proc.pid, window, why),
                 "await-shutdown",
             )
-        sleep_poll(deadline)
+        time.sleep(max(0.0, min(POLL, deadline - now())))
 
 
 def hide_then_restore(app):
@@ -1112,20 +1511,13 @@ def hide_then_restore(app):
     wm_alive("hide")
     assert_alive(app, "hide")
     assert_seed("hide")
-    send_close(app.window, None, "hide")
+    send_close(app.window, now() + TOOL_LIMIT, "hide")
     hide_deadline = now() + HIDE_TIMEOUT
     last = "<no poll>"
     while True:
         st.iteration = now()
         assert_alive(app, "hide")
         wm_alive("hide")
-        if hide_deadline - now() <= POLL:
-            raise VariantFailure(
-                "hide-timeout",
-                "5 s; window %d did not reach the exact xwininfo 'Map State: "
-                "IsUnMapped'; last observation %s" % (app.window, last),
-                "hide",
-            )
         state = xwininfo_map_state(app.window, hide_deadline, "hide")
         visible = xdotool_ids(
             app.proc.pid,
@@ -1174,15 +1566,26 @@ def hide_then_restore(app):
                         "hide",
                     )
                 break
-        sleep_poll(hide_deadline)
+        if not poll_gap(hide_deadline):
+            raise VariantFailure(
+                "hide-timeout",
+                "5 s; window %d did not reach the exact xwininfo 'Map State: "
+                "IsUnMapped'; last observation %s" % (app.window, last),
+                "hide",
+            )
 
+    # Observe window, process and seed through the whole interval: every
+    # iteration checks all three, and the loop ends only after an observation
+    # that starts at or after stable_end.  Stage deadlines for the tool calls
+    # leave room for that final observation and are real remaining budgets.
     stage("hide-stability")
-    stable_deadline = now() + HIDE_STABLE
-    while stable_deadline - now() > POLL:
+    stable_end = now() + HIDE_STABLE
+    stage_deadline = stable_end + STABLE_ALLOWANCE
+    while True:
         st.iteration = now()
         status = app.proc.poll()
         if status is not None:
-            app.proc.wait()
+            status = app.proc.wait()
             app.finish()
             raise VariantFailure(
                 "premature-exit",
@@ -1192,7 +1595,7 @@ def hide_then_restore(app):
                 "hide-stability",
             )
         wm_alive("hide-stability")
-        state = xwininfo_map_state(app.window, stable_deadline, "hide-stability")
+        state = xwininfo_map_state(app.window, stage_deadline, "hide-stability")
         if state != "IsUnMapped":
             raise VariantFailure(
                 "hide-not-stable",
@@ -1203,13 +1606,13 @@ def hide_then_restore(app):
         visible = xdotool_ids(
             app.proc.pid,
             True,
-            stable_deadline,
+            stage_deadline,
             "xdotool search --all --onlyvisible --pid (hide stability)",
         )
         every = xdotool_ids(
             app.proc.pid,
             False,
-            stable_deadline,
+            stage_deadline,
             "xdotool search --all --pid (hide stability)",
         )
         if app.window in visible:
@@ -1227,7 +1630,7 @@ def hide_then_restore(app):
                 % (app.window, app.proc.pid),
                 "hide-stability",
             )
-        kind, value = xprop_pid(app.window, stable_deadline, "hide-stability")
+        kind, value = xprop_pid(app.window, stage_deadline, "hide-stability")
         if kind == "notfound" or kind == "badwindow":
             raise VariantFailure(
                 "hide-window-lost",
@@ -1258,7 +1661,12 @@ def hide_then_restore(app):
                 "config bytes changed during the 1 s hide interval",
                 "hide-stability",
             )
-        sleep_poll(stable_deadline)
+        if st.iteration >= stable_end:
+            break
+        target = min(st.iteration + POLL, stable_end)
+        delay = target - now()
+        if delay > 0.0:
+            time.sleep(delay)
 
     emit("hide-pass", " elapsed=%.3fs" % elapsed())
     return
@@ -1272,31 +1680,27 @@ def relaunch(app):
     st.second = App("second")
     deadline = now() + RELAUNCH_TIMEOUT
     last = "<no poll>"
+    window = None
     while True:
         st.iteration = now()
         status = st.second.proc.poll()
+        assert_alive(app, "relaunch")
+        wm_alive("relaunch")
         if status is not None and status != 0:
             st.second.proc.wait()
             st.second.finish()
             raise VariantFailure(
                 "relaunch-status",
                 "second pid %d exited status %d%s; the second instance must "
-                "exit exactly 0" % (
-                    st.second.proc.pid,
-                    status,
-                    signal_note(status),
-                ),
+                "exit exactly 0"
+                % (st.second.proc.pid, status, signal_note(status)),
                 "relaunch",
             )
-        assert_alive(app, "relaunch")
-        wm_alive("relaunch")
-        if deadline - now() > POLL:
-            window = None
-            if status == 0:
-                window, last = discover_once(app, deadline, "relaunch")
-                if window is not None:
-                    break
-        if deadline - now() <= POLL:
+        if status == 0 and deadline - now() >= MIN_OBSERVE:
+            window, last = discover_once(app, deadline, "relaunch")
+            if window is not None:
+                break
+        if not poll_gap(deadline):
             raise VariantFailure(
                 "relaunch-timeout",
                 "5 s; second pid %d status %s; original pid %d alive; the "
@@ -1304,13 +1708,14 @@ def relaunch(app):
                 "%s"
                 % (
                     st.second.proc.pid,
-                    "exited 0" if status == 0 else ("running" if status is None else status),
+                    "exited 0"
+                    if status == 0
+                    else ("running" if status is None else status),
                     app.proc.pid,
                     last,
                 ),
                 "relaunch",
             )
-        sleep_poll(deadline)
 
     if st.second.proc.poll() is None:
         # A window reappeared but the second instance is still running; it must
@@ -1320,7 +1725,7 @@ def relaunch(app):
             status = st.second.proc.poll()
             if status is not None:
                 break
-            if deadline - now() <= POLL:
+            if now() >= deadline:
                 raise VariantFailure(
                     "relaunch-timeout",
                     "5 s; second pid %d still running after the window "
@@ -1328,7 +1733,7 @@ def relaunch(app):
                     % (st.second.proc.pid, app.proc.pid),
                     "relaunch",
                 )
-            sleep_poll(deadline)
+            time.sleep(max(0.0, min(POLL, deadline - now())))
         if status != 0:
             st.second.proc.wait()
             st.second.finish()
@@ -1345,27 +1750,12 @@ def relaunch(app):
     return window
 
 
-def run_barrier(app):
-    stage("close")
-    wm_alive("close")
-    assert_alive(app, "close")
-    assert_seed("close")
-    quit_deadline = now() + QUIT_TIMEOUT
-    send_close(app.window, quit_deadline, "close")
-    await_quit(app, app.window, quit_deadline)
-
-
-def run_no_barrier(app):
-    stage("focus")
-    focus_window(app.window, now() + FOCUS_TIMEOUT)
-    wm_alive("pre-key")
-    assert_alive(app, "pre-key")
-    assert_seed("pre-key")
-    quit_deadline = now() + QUIT_TIMEOUT
-    rc, out, err = run_tool(
+def send_ctrl_q(quit_deadline):
+    rc, _out, err = run_tool(
         ["xdotool", "key", "--clearmodifiers", "ctrl+q"],
         tool_budget(quit_deadline),
         "xdotool key --clearmodifiers ctrl+q",
+        check_original=False,
     )
     if rc == 1:
         raise DriverError(
@@ -1373,15 +1763,35 @@ def run_no_barrier(app):
             "xdotool key --clearmodifiers ctrl+q: the key could not be "
             "delivered (status 1, stderr=%r); this is never a variant failure"
             % (err.strip(),),
-            "pre-key",
+            st.stage,
         )
     if rc != 0:
         raise DriverError(
             "tool",
             "xdotool key --clearmodifiers ctrl+q: unexpected status %d "
             "stderr=%r" % (rc, err.strip()),
-            "pre-key",
+            st.stage,
         )
+
+
+def run_barrier(app):
+    stage("close")
+    wm_alive("close")
+    assert_alive(app, "close")
+    assert_seed("close")
+    quit_deadline = now() + QUIT_TIMEOUT
+    send_close(app.window, quit_deadline, "close", check_after=False)
+    await_quit(app, app.window, quit_deadline)
+
+
+def run_no_barrier(app):
+    focus_window(app.window, now() + FOCUS_TIMEOUT)
+    stage("pre-key")
+    wm_alive("pre-key")
+    assert_alive(app, "pre-key")
+    assert_seed("pre-key")
+    quit_deadline = now() + QUIT_TIMEOUT
+    send_ctrl_q(quit_deadline)
     await_quit(app, app.window, quit_deadline)
 
 
@@ -1389,30 +1799,12 @@ def run_close_to_tray(app):
     hide_then_restore(app)
     window = relaunch(app)
     focus_window(window, now() + FOCUS_TIMEOUT)
+    stage("pre-key")
     wm_alive("pre-key")
     assert_alive(app, "pre-key")
     assert_seed("pre-key")
     quit_deadline = now() + QUIT_TIMEOUT
-    rc, out, err = run_tool(
-        ["xdotool", "key", "--clearmodifiers", "ctrl+q"],
-        tool_budget(quit_deadline),
-        "xdotool key --clearmodifiers ctrl+q",
-    )
-    if rc == 1:
-        raise DriverError(
-            "tool",
-            "xdotool key --clearmodifiers ctrl+q: the key could not be "
-            "delivered (status 1, stderr=%r); this is never a variant failure"
-            % (err.strip(),),
-            "pre-key",
-        )
-    if rc != 0:
-        raise DriverError(
-            "tool",
-            "xdotool key --clearmodifiers ctrl+q: unexpected status %d "
-            "stderr=%r" % (rc, err.strip()),
-            "pre-key",
-        )
+    send_ctrl_q(quit_deadline)
     await_quit(app, window, quit_deadline)
 
 
@@ -1420,23 +1812,25 @@ def start_wm():
     stage("wm")
     st.wm_out = os.path.join(st.logdir, "openbox.out")
     st.wm_err = os.path.join(st.logdir, "openbox.err")
-    out_handle = open(st.wm_out, "wb")
-    err_handle = open(st.wm_err, "wb")
-    try:
-        st.wm = subprocess.Popen(
-            ["openbox", "--sm-disable"],
-            cwd=st.root,
-            stdin=subprocess.DEVNULL,
-            stdout=out_handle,
-            stderr=err_handle,
-            start_new_session=True,
-            close_fds=True,
-        )
-    except FileNotFoundError:
-        raise DriverError("wm", "openbox --sm-disable: command not found", "wm")
-    finally:
-        out_handle.close()
-        err_handle.close()
+    with DeferredSignals():
+        out_handle = open(st.wm_out, "wb")
+        err_handle = open(st.wm_err, "wb")
+        try:
+            st.wm = subprocess.Popen(
+                ["openbox", "--sm-disable"],
+                cwd=st.root,
+                stdin=subprocess.DEVNULL,
+                stdout=out_handle,
+                stderr=err_handle,
+                start_new_session=True,
+                close_fds=True,
+            )
+        except FileNotFoundError:
+            raise DriverError("wm", "openbox --sm-disable: command not found", "wm")
+        finally:
+            out_handle.close()
+            err_handle.close()
+        register_group(st.wm.pid)
     wm_ready(now() + 5.0)
 
 
@@ -1507,57 +1901,77 @@ def run():
 
 
 def cleanup(aborted):
+    """Reap every owned group and child; any problem is a cleanup error.
+
+    On failure every owned group is signalled (TERM, then KILL) whether or not
+    its leader still exists: a descendant can outlive the leader that created
+    the group.  On success the apps must have been reaped naturally, so their
+    groups are only observed; a leak is reported instead of signalled.
+    """
     problems = []
-    apps = [app for app in (st.original, st.second) if app is not None]
+    wm_pgid = st.wm.pid if st.wm is not None else None
     if aborted:
-        for app in apps:
-            if app.proc.poll() is None:
-                try:
-                    os.killpg(app.proc.pid, signal.SIGTERM)
-                except (ProcessLookupError, PermissionError):
-                    pass
-        end = now() + 2.0
-        while now() < end and any(app.proc.poll() is None for app in apps):
-            time.sleep(0.05)
-        for app in apps:
-            if app.proc.poll() is None:
-                try:
-                    os.killpg(app.proc.pid, signal.SIGKILL)
-                except (ProcessLookupError, PermissionError):
-                    pass
-    for app in apps:
+        for pgid in sorted(st.owned_groups):
+            problem = reap_group(pgid, 2.0)
+            if problem:
+                problems.append(problem)
+    for app in list(st.owned_apps):
         try:
             app.proc.wait(timeout=5.0)
         except subprocess.TimeoutExpired:
-            problems.append("pid %d did not reap" % (app.proc.pid,))
+            problems.append("owned pid %d did not reap within 5 s" % (app.proc.pid,))
+            problem = reap_group(app.proc.pid, 2.0)
+            if problem:
+                problems.append(problem)
+            try:
+                app.proc.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                problems.append(
+                    "owned pid %d still did not reap after SIGKILL" % (app.proc.pid,)
+                )
         app.finish()
     if st.wm is not None:
-        if st.wm.poll() is None:
-            try:
-                st.wm.terminate()
-            except ProcessLookupError:
-                pass
-            try:
-                st.wm.wait(timeout=2.0)
-            except subprocess.TimeoutExpired:
-                st.wm.kill()
-                try:
-                    st.wm.wait(timeout=2.0)
-                except subprocess.TimeoutExpired:
-                    problems.append("openbox pid %d did not reap" % (st.wm.pid,))
-        else:
-            st.wm.wait()
+        if st.wm.poll() is None or group_members(wm_pgid):
+            problem = reap_group(wm_pgid, 2.0)
+            if problem:
+                problems.append(problem)
+        try:
+            st.wm.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            problems.append("openbox pid %d did not reap" % (wm_pgid,))
+    if not aborted:
+        for pgid in sorted(st.owned_groups):
+            if pgid == wm_pgid:
+                continue
+            end = now() + 2.0
+            while now() < end and group_members(pgid):
+                time.sleep(0.05)
+            members = group_members(pgid)
+            if members:
+                problems.append(
+                    "owned process group %d still has live pids=%s after a "
+                    "passing run (not signalled on success)"
+                    % (pgid, members)
+                )
     if problems:
         raise DriverError("cleanup", "; ".join(problems), "cleanup")
 
 
 def print_logs():
+    apps = list(st.owned_apps)
+    original_path = (
+        st.original.path
+        if st.original is not None
+        else (apps[0].path if apps else None)
+    )
+    second_path = (
+        st.second.path
+        if st.second is not None
+        else (apps[1].path if len(apps) > 1 else None)
+    )
     entries = (
-        (
-            "original application log",
-            st.original.path if st.original is not None else None,
-        ),
-        ("second application log", st.second.path if st.second is not None else None),
+        ("original application log", original_path),
+        ("second application log", second_path),
         ("openbox stdout", st.wm_out),
         ("openbox stderr", st.wm_err),
     )
@@ -1576,7 +1990,7 @@ def print_logs():
         print(text, end="" if text.endswith("\n") else "\n", flush=True)
 
 
-def write_result(verdict, code, detail, stage_name):
+def write_result(verdict, code, detail, stage_name, secondary):
     path = os.path.join(st.root, "result.json")
     payload = {
         "token": st.token,
@@ -1588,6 +2002,7 @@ def write_result(verdict, code, detail, stage_name):
         "original_pid": st.pid,
         "window": st.window,
         "elapsed_seconds": round(elapsed(), 3),
+        "secondary": secondary,
     }
     temporary = path + ".tmp"
     with open(temporary, "w", encoding="utf-8") as handle:
@@ -1613,6 +2028,7 @@ def main():
     st.binary, st.variant, st.root = sys.argv[1], sys.argv[2], sys.argv[3]
     st.logdir = os.path.join(st.root, "log")
     st.cfg = os.path.join(st.root, "home/.goldendict/config")
+    st.owned_file = os.path.join(st.root, "owned.pids")
     signal.signal(signal.SIGINT, on_signal)
     signal.signal(signal.SIGHUP, on_signal)
     signal.signal(signal.SIGTERM, on_signal)
@@ -1620,6 +2036,7 @@ def main():
     verdict = "pass"
     code = None
     detail = ""
+    secondary = None
     try:
         run()
     except VariantFailure as exc:
@@ -1644,15 +2061,25 @@ def main():
     try:
         cleanup(aborted=(verdict != "pass"))
     except DriverError as exc:
-        if verdict == "pass":
-            verdict, code, detail = "error", "cleanup", exc.detail
-        else:
-            code = "cleanup"
-            detail = detail + "; cleanup: " + exc.detail
-        error_report(code, exc.detail, "cleanup")
+        # Spec section 4: a cleanup error makes the verdict error/exit 2 and
+        # the original outcome is retained only as secondary detail.
+        secondary = {
+            "verdict": verdict,
+            "code": code,
+            "detail": detail,
+            "stage": st.stage,
+        }
+        verdict, code = "error", "cleanup"
+        detail = "%s (secondary: verdict=%s code=%s detail=%s)" % (
+            exc.detail,
+            secondary["verdict"],
+            secondary["code"] or "-",
+            secondary["detail"] or "-",
+        )
+        error_report(code, detail, "cleanup")
 
     try:
-        write_result(verdict, code, detail, st.stage)
+        write_result(verdict, code, detail, st.stage, secondary)
     except OSError as exc:
         print(
             "ERROR variant=%s code=cleanup stage=result detail=could not write "
@@ -1695,6 +2122,29 @@ main() {
       ;;
   esac
 
+  # Check every required command before the first one is used, so a missing
+  # readlink reports the missing-dependency diagnostic and not a binary error.
+  local -a deps=(
+    bash python3 env mktemp mkdir dirname readlink chmod rm sleep
+    xvfb-run Xvfb xauth dbus-run-session dbus-daemon
+    openbox wmctrl xdotool xprop xwininfo
+  )
+  local -a missing=()
+  local dep
+  for dep in "${deps[@]}"; do
+    if ! command -v "$dep" >/dev/null 2>&1; then
+      missing+=("$dep")
+    fi
+  done
+  if [ "${#missing[@]}" -gt 0 ]; then
+    local missing_list=''
+    for dep in "${missing[@]}"; do
+      missing_list+="$dep "
+    done
+    supervisor_error dependency "missing_commands=${missing_list% }"
+    return 2
+  fi
+
   local resolved=''
   if ! resolved=$(readlink -f -- "$binary_arg" 2>/dev/null); then
     supervisor_error binary "argument=$binary_arg readlink -f failed"
@@ -1722,27 +2172,6 @@ main() {
   if [ -d "$bin_dir/portable" ]; then
     supervisor_error portable \
       "resolved_binary=$resolved portable_dir=$bin_dir/portable reason=portable build not supported by this check"
-    return 2
-  fi
-
-  local -a deps=(
-    bash python3 env mktemp mkdir dirname readlink chmod rm
-    xvfb-run Xvfb xauth dbus-run-session dbus-daemon
-    openbox wmctrl xdotool xprop xwininfo
-  )
-  local -a missing=()
-  local dep
-  for dep in "${deps[@]}"; do
-    if ! command -v "$dep" >/dev/null 2>&1; then
-      missing+=("$dep")
-    fi
-  done
-  if [ "${#missing[@]}" -gt 0 ]; then
-    local missing_list=''
-    for dep in "${missing[@]}"; do
-      missing_list+="$dep "
-    done
-    supervisor_error dependency "missing_commands=${missing_list% }"
     return 2
   fi
 
@@ -1777,15 +2206,60 @@ main() {
   fi
 
   run_driver "$resolved" "$VARIANT" &
-  WRAPPER_PID=$!
+  DRIVER_PID=$!
+  DRIVER_GROUP=$DRIVER_PID
+  if [ -n "$INTERRUPT_SIGNAL" ]; then
+    # The signal arrived between the fork and the pid assignment above.
+    kill -TERM -- "-$DRIVER_PID" 2>/dev/null || true
+  fi
 
   local wrapper_rc=0
-  wait "$WRAPPER_PID" || wrapper_rc=$?
-  WRAPPER_PID=''
+  wait_driver_exit "$DRIVER_PID"
+  wrapper_rc=$WAIT_STATUS
+  DRIVER_PID=''
+
+  # The direct child is reaped.  The wrappers stop their own private Xvfb and
+  # D-Bus first; only the process group this invocation created is ever
+  # addressed.  Give them a bounded moment, then escalate inside that group.
+  local deadline
+  deadline=$(( $(now_us) + 1000000 ))
+  while [ -n "$(group_members "$DRIVER_GROUP")" ] && [ "$(now_us)" -lt "$deadline" ]; do
+    sleep 0.02
+  done
+  if [ -n "$(group_members "$DRIVER_GROUP")" ]; then
+    TREE_ESCALATED=1
+    if stop_owned_group "$DRIVER_GROUP"; then
+      TREE_DETAIL="escalated to SIGTERM/SIGKILL for owned process group $DRIVER_GROUP after the wrappers exited"
+    else
+      TREE_SURVIVORS=1
+      TREE_DETAIL=$GROUP_NOTE
+    fi
+  else
+    TREE_DETAIL='no owned wrapper process survived'
+  fi
+
+  # Belt and braces: an app or WM group can outlive a driver that was killed
+  # before its own cleanup ran.  They are separate sessions, so they are only
+  # reachable by the group ids the driver recorded.
+  local owned_rc=0
+  if ! cleanup_owned_pids; then
+    owned_rc=1
+  fi
+  if [ -n "$OWNED_DETAIL" ]; then
+    TREE_DETAIL+="; $OWNED_DETAIL"
+  fi
+
+  if [ "$TREE_SURVIVORS" -eq 1 ] || [ "$owned_rc" -eq 1 ]; then
+    supervisor_error cleanup \
+      "wrapper_status=$wrapper_rc $TREE_DETAIL"
+    print_wrapper_stdout
+    print_failure_logs
+    return 2
+  fi
 
   if [ -n "$INTERRUPT_SIGNAL" ]; then
     supervisor_error interrupted \
-      "received SIG$INTERRUPT_SIGNAL while the xvfb-run/Xvfb and dbus-run-session driver tree was running (wrapper_status=$wrapper_rc)"
+      "received SIG$INTERRUPT_SIGNAL while the xvfb-run/Xvfb and dbus-run-session tree was running; wrapper_status=$wrapper_rc; $TREE_DETAIL"
     print_wrapper_stdout
     print_failure_logs
     return 2
@@ -1803,8 +2277,12 @@ main() {
   fi
 
   local verdict=$word2 driver_code=$word3
+  if [ "$TREE_ESCALATED" -eq 1 ]; then
+    printf 'NOTE wrapper tree escalated after exit: %s\n' "$TREE_DETAIL"
+  fi
   case "$verdict" in
     pass)
+      # The wrapper status is only a cross-check for a passing verdict.
       if [ "$wrapper_rc" -ne 0 ]; then
         supervisor_error wrapper \
           "driver verdict=pass but wrapper_status=$wrapper_rc (xvfb-run/Xvfb and the private dbus-run-session tree did not exit cleanly)"
@@ -1816,26 +2294,18 @@ main() {
       return 0
       ;;
     fail)
-      if [ "$wrapper_rc" -ne 1 ]; then
-        supervisor_error wrapper \
-          "driver verdict=fail code=$driver_code but wrapper_status=$wrapper_rc; expected 1 from the driver inside xvfb-run/dbus-run-session"
-        print_wrapper_stdout
-        print_failure_logs
-        return 2
-      fi
+      # The token-bound driver result is authoritative: a fail stays exit 1
+      # even if a wrapper's own cleanup changed the wrapper status.
       print_wrapper_stdout
+      printf 'NOTE token-bound verdict=fail code=%s wrapper_status=%s\n' \
+        "$driver_code" "$wrapper_rc"
       print_failure_logs
       return 1
       ;;
     error)
-      if [ "$wrapper_rc" -ne 2 ]; then
-        supervisor_error wrapper \
-          "driver verdict=error code=$driver_code but wrapper_status=$wrapper_rc; expected 2 from the driver inside xvfb-run/dbus-run-session"
-        print_wrapper_stdout
-        print_failure_logs
-        return 2
-      fi
       print_wrapper_stdout
+      printf 'NOTE token-bound verdict=error code=%s wrapper_status=%s\n' \
+        "$driver_code" "$wrapper_rc"
       print_failure_logs
       return 2
       ;;
