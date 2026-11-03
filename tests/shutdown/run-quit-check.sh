@@ -60,6 +60,20 @@
 # Escalation is always bounded to processes this invocation created: never
 # `kill 0`, never a name based kill, never the caller's process group.
 #
+# Every supervisor deadline and every SIGTERM/SIGKILL grace period is measured
+# on one genuine monotonic clock, selected once before the first bound is
+# computed (/proc/uptime, or python3 time.monotonic_ns() when /proc/uptime is
+# unreadable).  Wall-clock time is never read, so a clock step or an NTP
+# correction can neither extend nor cut a bound; an unreadable clock expires
+# pending bounds instead of silently moving the clock under them.
+#
+# A signal that arrives during result reporting or the final output can never
+# produce a passing exit.  Finalization re-checks a pending interruption before
+# the token-bound result is interpreted and again before a pass is returned,
+# and the EXIT trap applies the same rule immediately before the root is
+# removed.  Those diagnostics are printed while the captured logs still exist,
+# and a cleanup error keeps precedence over an interrupt verdict.
+#
 # This is a standalone check.  It is deliberately NOT registered in
 # `make check` and it adds no QtTest suite: the existing aggregate is a closed
 # 19-suite inventory.  It is documented here, takes the binary as an argument
@@ -101,12 +115,90 @@ supervisor_error() { # <code> <detail>
   printf 'ERROR variant=%s code=%s %s\n' "$VARIANT" "$1" "$2" >&2
 }
 
-now_us() { # monotonic enough for bounds; sub-second resolution, locale proof
-  if [ -n "${EPOCHREALTIME-}" ]; then
-    printf '%s\n' "${EPOCHREALTIME//[!0-9]/}"
-  else
-    printf '%s\n' "$(( SECONDS * 1000000 ))"
+# --- monotonic clock -------------------------------------------------------
+# Every supervisor deadline and grace period is measured on a genuine
+# monotonic clock, never on wall-clock time.  $EPOCHREALTIME and $SECONDS are
+# wall-clock based: a clock step would silently move every deadline under a
+# running bound, so neither is used anywhere in this script.
+#   proc    /proc/uptime (CLOCK_BOOTTIME); 10 ms resolution, no subprocess
+#   python  time.monotonic_ns(), through the already required python3
+# The source is chosen once, by select_monotonic_source(), before the first
+# deadline exists, and every later read uses that same source, so two
+# different clocks can never be mixed inside one bound.
+MONOTONIC_SOURCE=''
+CLOCK_FAILED=0
+NOW_US=0
+
+read_uptime_us() { # /proc/uptime -> monotonic microseconds; 1 when unreadable
+  local uptime rest whole frac
+  { IFS=' ' read -r uptime rest < /proc/uptime; } 2>/dev/null || return 1
+  [ -n "$uptime" ] || return 1
+  whole=${uptime%%.*}
+  case $uptime in
+    *.*) frac=${uptime#*.} ;;
+    *) frac='' ;;
+  esac
+  case $whole in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  case $frac in
+    *[!0-9]*) return 1 ;;
+  esac
+  frac="${frac}000000"
+  frac=${frac:0:6}
+  printf '%s\n' "$(( 10#$whole * 1000000 + 10#$frac ))"
+}
+
+select_monotonic_source() { # choose one monotonic source, once, and cache it
+  [ -n "$MONOTONIC_SOURCE" ] && return 0
+  if read_uptime_us >/dev/null 2>&1; then
+    MONOTONIC_SOURCE=proc
+    return 0
   fi
+  if python3 -c 'import time; print(time.monotonic_ns() // 1000)' >/dev/null 2>&1; then
+    MONOTONIC_SOURCE=python
+    return 0
+  fi
+  return 1
+}
+
+now_us() { # sets NOW_US; monotonic microseconds, never wall-clock time
+  # The value is stored in NOW_US rather than printed: a command substitution
+  # would run in a subshell, so a clock failure could not set CLOCK_FAILED for
+  # the caller and the failure would stay invisible.
+  local source_us=''
+  case "$MONOTONIC_SOURCE" in
+    proc)
+      source_us=$(read_uptime_us 2>/dev/null) || source_us=''
+      ;;
+    python)
+      source_us=$(python3 -c 'import time; print(time.monotonic_ns() // 1000)' 2>/dev/null) || source_us=''
+      ;;
+    *)
+      source_us=''
+      ;;
+  esac
+  case $source_us in
+    ''|*[!0-9]*)
+      # Fail closed and loudly: never fall back to wall-clock time inside a
+      # live bound.  NOW_US is set beyond every representable deadline, so each
+      # pending bound expires at once; main() reports CLOCK_FAILED as a
+      # cleanup error, so a clock failure can neither pass nor hang.
+      NOW_US=999999999999999999
+      if [ "$CLOCK_FAILED" -eq 0 ]; then
+        CLOCK_FAILED=1
+        printf 'ERROR variant=%s code=cleanup the supervisor monotonic clock (source=%s) could not be read; pending bounds are treated as expired rather than measured on wall-clock time\n' \
+          "$VARIANT" "${MONOTONIC_SOURCE:-unset}" >&2
+      fi
+      return 1
+      ;;
+  esac
+  NOW_US=$source_us
+  return 0
+}
+
+before_deadline() { # <deadline_us>; 0 while that monotonic bound has time left
+  now_us && [ "$NOW_US" -lt "$1" ]
 }
 
 group_members() { # <pgid>; live (non-zombie) pids in that process group
@@ -143,15 +235,17 @@ stop_owned_group() { # <pgid>; TERM then KILL one owned group, bounded
   members=$(group_members "$pgid")
   [ -n "$members" ] || return 0
   kill -TERM -- "-$pgid" 2>/dev/null || true
-  deadline=$(( $(now_us) + 2000000 ))
-  while [ -n "$(group_members "$pgid")" ] && [ "$(now_us)" -lt "$deadline" ]; do
+  now_us || true
+  deadline=$(( NOW_US + 2000000 ))
+  while [ -n "$(group_members "$pgid")" ] && before_deadline "$deadline"; do
     sleep 0.05
   done
   members=$(group_members "$pgid")
   if [ -n "$members" ]; then
     kill -KILL -- "-$pgid" 2>/dev/null || true
-    deadline=$(( $(now_us) + 2000000 ))
-    while [ -n "$(group_members "$pgid")" ] && [ "$(now_us)" -lt "$deadline" ]; do
+    now_us || true
+    deadline=$(( NOW_US + 2000000 ))
+    while [ -n "$(group_members "$pgid")" ] && before_deadline "$deadline"; do
       sleep 0.05
     done
     members=$(group_members "$pgid")
@@ -182,7 +276,8 @@ proc_state() { # <pid>; /proc state letter, empty when the pid is gone
 wait_driver_bounded() { # <pid> <bound_us>; 0 = reaped (WAIT_STATUS), 1 = bound
   local pid=$1 bound_us=$2 deadline state attempt
   WAIT_STATUS=0
-  deadline=$(( $(now_us) + bound_us ))
+  now_us || true
+  deadline=$(( NOW_US + bound_us ))
   while :; do
     state=$(proc_state "$pid")
     if [ -z "$state" ] || [ "$state" = 'Z' ]; then
@@ -200,7 +295,7 @@ wait_driver_bounded() { # <pid> <bound_us>; 0 = reaped (WAIT_STATUS), 1 = bound
       done
       return 1
     fi
-    if [ "$(now_us)" -ge "$deadline" ]; then
+    if ! before_deadline "$deadline"; then
       return 1
     fi
     sleep 0.05
@@ -249,14 +344,34 @@ cleanup_owned_pids() { # reap any owned app/WM group that outlived its driver
 }
 
 cleanup_root_on_exit() {
-  local status=$?
+  local status=$? interrupt_overrode=0
   trap - EXIT
   if [ -n "$ROOT" ] && [ -d "$ROOT" ]; then
+    # A signal that is still pending when finalization ends must never leave a
+    # passing exit status behind.  It is honoured here, before the root - and
+    # with it every captured log - is removed, so its diagnostics can still be
+    # printed.  A failed removal below stays a cleanup error and keeps
+    # precedence through VERDICT_NOTE.
+    if [ -n "$INTERRUPT_SIGNAL" ] && [ "$status" -eq 0 ]; then
+      interrupt_overrode=1
+      supervisor_error interrupted \
+        "received SIG$INTERRUPT_SIGNAL during finalization (result reporting or the final output); the token-bound result is not accepted and exit status 0 is overridden"
+      print_wrapper_stdout
+      print_failure_logs
+      status=2
+    fi
     if ! rm -rf -- "$ROOT"; then
       # A failed removal is a cleanup error even when the prior verdict was a
       # variant failure: exit 2, with the prior verdict as secondary detail.
       printf 'ERROR variant=%s code=cleanup could not remove root=%s exit_status_before_cleanup=%s prior_verdict=%s\n' \
         "$VARIANT" "$ROOT" "$status" "${VERDICT_NOTE:-none}" >&2
+      status=2
+    fi
+    # A signal can also arrive while the root is being removed.  The same rule
+    # applies, but the logs are gone by now, so only the verdict is reported.
+    if [ "$interrupt_overrode" -eq 0 ] && [ -n "$INTERRUPT_SIGNAL" ] && [ "$status" -eq 0 ]; then
+      supervisor_error interrupted \
+        "received SIG$INTERRUPT_SIGNAL while the root was being removed; the token-bound result is not accepted and exit status 0 is overridden"
       status=2
     fi
   fi
@@ -377,6 +492,19 @@ print("OK", verdict, data.get("code") or "-")
 PY_RESULT
 }
 
+interrupt_during_finalization() { # <where>; 1 when a pending signal wins
+  [ -n "$INTERRUPT_SIGNAL" ] || return 0
+  # The driver may already have written a pass into its token-bound result
+  # file.  A signal that arrived while that result was being read or reported
+  # makes this an interruption error, never a pass: finalization did not run to
+  # completion, so its outcome is not trustworthy.
+  supervisor_error interrupted \
+    "received SIG$INTERRUPT_SIGNAL $1; the token-bound result is not accepted because a signal received during finalization must never produce a passing exit"
+  print_wrapper_stdout
+  print_failure_logs
+  return 1
+}
+
 run_driver() { # <resolved-binary> <variant>
   local resolved=$1 variant=$2
   env -i \
@@ -421,13 +549,12 @@ TOOL_LIMIT = 2.0
 STARTUP_TIMEOUT = 30.0
 HIDE_TIMEOUT = 5.0
 HIDE_STABLE = 1.0
-# The 1 s hide-stability interval keeps the tail of its own budget for the one
-# observation that may authorise hide-pass: at least HIDE_FINAL_FLOOR seconds,
-# or four times the measured cost of a complete observation when that is
-# larger, and never more than half the interval.  The continuous polling uses
-# everything before that point, so it can never spend the final observation's
-# budget, and no tool is ever given time beyond the interval's real deadline.
-HIDE_FINAL_FLOOR = 0.1
+# The 1 s hide-stability interval is observed end to end by the polling that
+# runs until its own monotonic deadline.  The boundary observation that may
+# authorise hide-pass starts only after that deadline has passed and carries
+# its own budget, so the polling inside the interval can never spend it and a
+# fast observation taken before the interval ends can never authorise a pass.
+HIDE_BOUNDARY_LIMIT = TOOL_LIMIT
 RELAUNCH_TIMEOUT = 5.0
 FOCUS_TIMEOUT = 5.0
 QUIT_TIMEOUT = 10.0
@@ -1759,105 +1886,113 @@ def hide_then_restore(app):
                 "hide-stability",
             )
 
-    # Observe window, process and seed through the whole interval.  The tail of
-    # the interval is reserved for the mandatory final observation below and
-    # its size follows the measured cost of a complete observation, so the
-    # polling here can never take budget away from that final observation.  No
-    # tool is ever given time beyond the interval's real deadline.
+    # Observe window, process and seed through the whole interval, and only
+    # then perform the boundary observation.  hide-pass is never emitted from a
+    # sampling iteration and never from an observation that starts before the
+    # interval has fully elapsed: a fast observation taken 0.1-0.5 s early must
+    # not authorise a pass for less than the specified second.
     stage("hide-stability")
     stable_end = now() + HIDE_STABLE
     last = "<no poll>"
-    observation_cost = 0.0
     while True:
         st.iteration = now()
         stability_guard()
-        reserve = min(
-            HIDE_STABLE / 2.0, max(HIDE_FINAL_FLOOR, 4.0 * observation_cost)
-        )
-        polling_end = stable_end - reserve
-        if st.iteration >= polling_end:
+        if st.iteration >= stable_end:
             break
         wm_alive("hide-stability")
-        started = now()
         try:
             state, visible, _every, _value, detail = hidden_observation(
-                app, polling_end, "hide-stability", "hide stability"
+                app, stable_end, "hide-stability", "hide stability"
             )
-            last = detail
-            if state != "IsUnMapped":
-                raise VariantFailure(
-                    "hide-not-stable",
-                    "window %d remapped to %r during the 1 s hide interval"
-                    % (app.window, state),
-                    "hide-stability",
-                )
-            if app.window in visible:
-                raise VariantFailure(
-                    "hide-not-stable",
-                    "window %d reappeared in the visible search %s during the "
-                    "1 s hide interval" % (app.window, visible),
-                    "hide-stability",
-                )
-            observation_cost = max(observation_cost, now() - started)
         except StageDeadline as exc:
-            # The polling slice ended while this observation was running: it is
-            # not extended.  The mandatory final observation below still has
-            # the reserved tail of the interval and decides the outcome.
+            # The interval ended while this observation was running: it is not
+            # extended, and the boundary observation below decides the outcome.
             last += " (deadline: %s)" % (exc.detail,)
             break
-        target = min(st.iteration + POLL, polling_end)
+        last = detail
+        if state != "IsUnMapped":
+            raise VariantFailure(
+                "hide-not-stable",
+                "window %d remapped to %r during the 1 s hide interval"
+                % (app.window, state),
+                "hide-stability",
+            )
+        if app.window in visible:
+            raise VariantFailure(
+                "hide-not-stable",
+                "window %d reappeared in the visible search %s during the "
+                "1 s hide interval" % (app.window, visible),
+                "hide-stability",
+            )
+        target = min(st.iteration + POLL, stable_end)
         delay = target - now()
         if delay > 0.0:
             time.sleep(delay)
 
-    # Mandatory final observation.  hide-pass is never emitted from the polling
-    # iterations alone: it requires this complete four-part observation of the
-    # recorded window, taken as late as the interval allows (the reserve above
-    # is exactly its start point) and still inside the same deadline.  If it
-    # cannot be completed, the interval is a hide-timeout, not a pass.
+    # The boundary observation.  It starts only after the whole interval has
+    # elapsed - the polling loop above can only stop at or after stable_end,
+    # because its exit condition is a fresh monotonic sample and a
+    # StageDeadline can only be raised once that same deadline has passed - and
+    # it has its own budget after the interval, so the polling inside the
+    # interval can never spend it.  Its completion time is checked as well: an
+    # observation that completes before the interval ended is never a pass.
     st.iteration = now()
     stability_guard()
-    if st.iteration >= stable_end:
+    wm_alive("hide-stability")
+    boundary_started = now()
+    if boundary_started < stable_end:
         raise VariantFailure(
-            "hide-timeout",
-            "the 1 s hide interval expired before the mandatory final "
-            "observation of window %d could start; last completed observation "
-            "%s" % (app.window, last),
+            "hide-not-stable",
+            "the boundary observation of window %d would start %.3fs before "
+            "the 1 s hide interval ended; an observation that does not reach "
+            "the boundary is not evidence of a stable hide"
+            % (app.window, stable_end - boundary_started),
             "hide-stability",
         )
-    wm_alive("hide-stability")
+    boundary_deadline = boundary_started + HIDE_BOUNDARY_LIMIT
     try:
         state, visible, every, value, final_detail = hidden_observation(
-            app, stable_end, "hide-stability", "hide stability final"
+            app, boundary_deadline, "hide-stability", "hide stability boundary"
         )
     except StageDeadline as exc:
         raise VariantFailure(
             "hide-timeout",
-            "the 1 s hide interval expired before the mandatory final "
-            "observation of window %d completed (%s); last completed "
-            "observation %s" % (app.window, exc.detail, last),
+            "the boundary observation of window %d at the end of the 1 s hide "
+            "interval did not complete within %.1fs of the interval's end "
+            "(%s); last completed observation %s"
+            % (app.window, HIDE_BOUNDARY_LIMIT, exc.detail, last),
+            "hide-stability",
+        )
+    boundary_completed = now()
+    if boundary_completed < stable_end:
+        raise VariantFailure(
+            "hide-not-stable",
+            "the boundary observation of window %d completed %.3fs before the "
+            "1 s hide interval ended; a fast observation that does not reach "
+            "the boundary is not evidence of a stable hide"
+            % (app.window, stable_end - boundary_completed),
             "hide-stability",
         )
     if state != "IsUnMapped":
         raise VariantFailure(
             "hide-not-stable",
-            "the mandatory final observation at the end of the 1 s hide "
-            "interval reports window %d in map state %r" % (app.window, state),
+            "the boundary observation at the end of the 1 s hide interval "
+            "reports window %d in map state %r" % (app.window, state),
             "hide-stability",
         )
     if app.window in visible:
         raise VariantFailure(
             "hide-not-stable",
-            "the mandatory final observation at the end of the 1 s hide "
-            "interval lists window %d in the visible search %s"
+            "the boundary observation at the end of the 1 s hide interval "
+            "lists window %d in the visible search %s"
             % (app.window, visible),
             "hide-stability",
         )
     if app.window not in every or value != app.proc.pid:
         raise VariantFailure(
             "hide-window-lost",
-            "the mandatory final observation at the end of the 1 s hide "
-            "interval did not keep window %d in the all-windows search with "
+            "the boundary observation at the end of the 1 s hide interval did "
+            "not keep window %d in the all-windows search with "
             "_NET_WM_PID=%d (all=%s pid=%r)"
             % (app.window, app.proc.pid, every, value),
             "hide-stability",
@@ -1865,7 +2000,14 @@ def hide_then_restore(app):
     stability_guard()
     emit(
         "hide-pass",
-        " elapsed=%.3fs final_observation=%s" % (elapsed(), final_detail),
+        " elapsed=%.3fs boundary_started_after_interval_end=%.3fs "
+        "boundary_completed_after_interval_end=%.3fs final_observation=%s"
+        % (
+            elapsed(),
+            boundary_started - stable_end,
+            boundary_completed - stable_end,
+            final_detail,
+        ),
     )
     return
 
@@ -2362,6 +2504,15 @@ main() {
     return 2
   fi
 
+  # A genuine monotonic clock is as required as the commands above: every
+  # supervisor bound and grace period is measured on it, never on wall-clock
+  # time.  It is selected once here, before the first deadline exists.
+  if ! select_monotonic_source; then
+    supervisor_error dependency \
+      "no genuine monotonic clock: /proc/uptime is unreadable and python3 time.monotonic_ns() failed"
+    return 2
+  fi
+
   local resolved=''
   if ! resolved=$(readlink -f -- "$binary_arg" 2>/dev/null); then
     supervisor_error binary "argument=$binary_arg readlink -f failed"
@@ -2477,8 +2628,9 @@ main() {
   # inside that group when nobody escalated it already.
   if [ "$TREE_ESCALATED" -eq 0 ]; then
     local deadline
-    deadline=$(( $(now_us) + 1000000 ))
-    while [ -n "$(group_members "$DRIVER_GROUP")" ] && [ "$(now_us)" -lt "$deadline" ]; do
+    now_us || true
+    deadline=$(( NOW_US + 1000000 ))
+    while [ -n "$(group_members "$DRIVER_GROUP")" ] && before_deadline "$deadline"; do
       sleep 0.02
     done
     if [ -n "$(group_members "$DRIVER_GROUP")" ]; then
@@ -2499,10 +2651,13 @@ main() {
     TREE_DETAIL+="; $OWNED_DETAIL"
   fi
 
-  if [ "$TREE_SURVIVORS" -eq 1 ] || [ "$owned_rc" -eq 1 ] || [ "$DRIVER_UNREAPED" -eq 1 ]; then
+  if [ "$TREE_SURVIVORS" -eq 1 ] || [ "$owned_rc" -eq 1 ] || [ "$DRIVER_UNREAPED" -eq 1 ] || [ "$CLOCK_FAILED" -eq 1 ]; then
     local cleanup_problem=''
     if [ "$DRIVER_UNREAPED" -eq 1 ]; then
       cleanup_problem="the driver's direct child did not exit within ${DRIVER_REAP_AFTER_KILL_US}us after the owned wrapper group was escalated to SIGTERM/SIGKILL"
+    fi
+    if [ "$CLOCK_FAILED" -eq 1 ]; then
+      cleanup_problem+="${cleanup_problem:+; }the supervisor's monotonic clock (source=${MONOTONIC_SOURCE:-unset}) could not be read, so a bound was treated as expired instead of measured"
     fi
     if [ "$TREE_SURVIVORS" -eq 1 ]; then
       cleanup_problem+="${cleanup_problem:+; }$TREE_DETAIL"
@@ -2533,6 +2688,11 @@ main() {
 
   local parsed word1 word2 word3
   parsed=$(read_driver_result) || parsed='READER_ERROR '
+  # A signal may have arrived while the result file was being read.  It is
+  # honoured before the result is interpreted, with the logs still present.
+  if ! interrupt_during_finalization "while the driver result was being read"; then
+    return 2
+  fi
   read -r word1 word2 word3 <<<"$parsed"
   if [ "${word1:-}" != 'OK' ]; then
     supervisor_error wrapper \
@@ -2558,6 +2718,12 @@ main() {
         return 2
       fi
       print_wrapper_stdout
+      # A signal that arrived while the passing result was being reported must
+      # not leave exit status 0 behind, and its diagnostics still have the
+      # captured logs available here.
+      if ! interrupt_during_finalization "while the passing result was being reported"; then
+        return 2
+      fi
       return 0
       ;;
     fail)
