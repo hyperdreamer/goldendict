@@ -421,6 +421,13 @@ TOOL_LIMIT = 2.0
 STARTUP_TIMEOUT = 30.0
 HIDE_TIMEOUT = 5.0
 HIDE_STABLE = 1.0
+# The 1 s hide-stability interval keeps the tail of its own budget for the one
+# observation that may authorise hide-pass: at least HIDE_FINAL_FLOOR seconds,
+# or four times the measured cost of a complete observation when that is
+# larger, and never more than half the interval.  The continuous polling uses
+# everything before that point, so it can never spend the final observation's
+# budget, and no tool is ever given time beyond the interval's real deadline.
+HIDE_FINAL_FLOOR = 0.1
 RELAUNCH_TIMEOUT = 5.0
 FOCUS_TIMEOUT = 5.0
 QUIT_TIMEOUT = 10.0
@@ -1618,6 +1625,71 @@ def await_quit(app, window, deadline):
     )
 
 
+def hidden_observation(app, deadline, stage_name, label):
+    """One complete hide observation of the recorded window.
+
+    Every place that claims the window is hidden uses this function, so the
+    first hide poll, the stability polls and the mandatory final observation
+    cannot drift apart.  It performs every check the specification requires:
+    xwininfo's exact `Map State:` value, absence from the visible search,
+    presence in the all-windows search and `_NET_WM_PID` still equal to the
+    original pid.  A window that is destroyed or that no longer belongs to the
+    original process raises hide-window-lost directly; any other map state is
+    returned, because only the caller knows whether it is a hide still in
+    progress or a remap.  A StageDeadline means the observation did not
+    complete inside the deadline.
+    """
+    state = xwininfo_map_state(app.window, deadline, stage_name)
+    visible = xdotool_ids(
+        app.proc.pid,
+        True,
+        deadline,
+        "xdotool search --all --onlyvisible --pid (%s)" % label,
+    )
+    every = xdotool_ids(
+        app.proc.pid,
+        False,
+        deadline,
+        "xdotool search --all --pid (%s)" % label,
+    )
+    detail = "map_state=%r visible=%s all=%s" % (state, visible, every)
+    if state != "IsUnMapped":
+        return state, visible, every, None, detail
+    if app.window in visible:
+        return state, visible, every, None, detail + " (still listed as visible)"
+    if app.window not in every:
+        raise VariantFailure(
+            "hide-window-lost",
+            "window %d is no longer present in xdotool search --all --pid %d; "
+            "a destroyed window is not a hide; %s"
+            % (app.window, app.proc.pid, detail),
+            stage_name,
+        )
+    kind, value = xprop_pid(app.window, deadline, stage_name)
+    if kind == "notfound":
+        raise VariantFailure(
+            "hide-window-lost",
+            "window %d: xprop _NET_WM_PID reports %r, so the window is "
+            "destroyed rather than hidden" % (app.window, value),
+            stage_name,
+        )
+    if kind == "badwindow":
+        raise VariantFailure(
+            "hide-window-lost",
+            "window %d: xprop _NET_WM_PID reports BadWindow (%r)"
+            % (app.window, value),
+            stage_name,
+        )
+    if value != app.proc.pid:
+        raise VariantFailure(
+            "hide-window-lost",
+            "window %d reports _NET_WM_PID=%d but the original pid is %d"
+            % (app.window, value, app.proc.pid),
+            stage_name,
+        )
+    return state, visible, every, value, detail + " pid=%d" % (value,)
+
+
 def hide_then_restore(app):
     stage("hide")
     wm_alive("hide")
@@ -1634,54 +1706,12 @@ def hide_then_restore(app):
         assert_alive(app, "hide")
         wm_alive("hide")
         try:
-            state = xwininfo_map_state(app.window, hide_window_end, "hide")
-            visible = xdotool_ids(
-                app.proc.pid,
-                True,
-                hide_window_end,
-                "xdotool search --all --onlyvisible --pid (hide verification)",
+            state, visible, _every, _value, detail = hidden_observation(
+                app, hide_window_end, "hide", "hide verification"
             )
-            every = xdotool_ids(
-                app.proc.pid,
-                False,
-                hide_window_end,
-                "xdotool search --all --pid (hide verification)",
-            )
-            last = "map_state=%r visible=%s all=%s" % (state, visible, every)
-            if state == "IsUnMapped":
-                if app.window in visible:
-                    last += " (still listed as visible)"
-                elif app.window not in every:
-                    raise VariantFailure(
-                        "hide-window-lost",
-                        "window %d is no longer present in xdotool search --all "
-                        "--pid %d; %s" % (app.window, app.proc.pid, last),
-                        "hide",
-                    )
-                else:
-                    kind, value = xprop_pid(app.window, hide_window_end, "hide")
-                    if kind == "notfound":
-                        raise VariantFailure(
-                            "hide-window-lost",
-                            "window %d: xprop _NET_WM_PID reports %r, so the window "
-                            "is destroyed rather than hidden" % (app.window, value),
-                            "hide",
-                        )
-                    if kind == "badwindow":
-                        raise VariantFailure(
-                            "hide-window-lost",
-                            "window %d: xprop _NET_WM_PID reports BadWindow (%r)"
-                            % (app.window, value),
-                            "hide",
-                        )
-                    if value != app.proc.pid:
-                        raise VariantFailure(
-                            "hide-window-lost",
-                            "window %d reports _NET_WM_PID=%d but the original pid "
-                            "is %d" % (app.window, value, app.proc.pid),
-                            "hide",
-                        )
-                    hidden = True
+            last = detail
+            if state == "IsUnMapped" and app.window not in visible:
+                hidden = True
         except StageDeadline as exc:
             last += " (deadline: %s)" % (exc.detail,)
         if hidden:
@@ -1697,16 +1727,11 @@ def hide_then_restore(app):
             "hide",
         )
 
-    # Observe window, process and seed through the whole interval.  The process
-    # check and the seed bytes need no external tool, so they are verified even
-    # by the iteration that starts at stable_end; the X tools of that iteration
-    # would have no budget left and are correctly skipped, because every
-    # observation that did run passed.  No tool is ever given time beyond the
-    # interval's real deadline.
-    stage("hide-stability")
-    stable_end = now() + HIDE_STABLE
-    while True:
-        st.iteration = now()
+    # Process and seed checks that need no external tool.  They run in every
+    # stability iteration and once more immediately before the pass record, so
+    # an exit during the interval is still reported as premature-exit, which
+    # takes precedence over hide-not-stable.
+    def stability_guard():
         status = app.proc.poll()
         if status is not None:
             status = app.proc.wait()
@@ -1733,11 +1758,32 @@ def hide_then_restore(app):
                 "config bytes changed during the 1 s hide interval",
                 "hide-stability",
             )
-        if st.iteration >= stable_end:
+
+    # Observe window, process and seed through the whole interval.  The tail of
+    # the interval is reserved for the mandatory final observation below and
+    # its size follows the measured cost of a complete observation, so the
+    # polling here can never take budget away from that final observation.  No
+    # tool is ever given time beyond the interval's real deadline.
+    stage("hide-stability")
+    stable_end = now() + HIDE_STABLE
+    last = "<no poll>"
+    observation_cost = 0.0
+    while True:
+        st.iteration = now()
+        stability_guard()
+        reserve = min(
+            HIDE_STABLE / 2.0, max(HIDE_FINAL_FLOOR, 4.0 * observation_cost)
+        )
+        polling_end = stable_end - reserve
+        if st.iteration >= polling_end:
             break
         wm_alive("hide-stability")
+        started = now()
         try:
-            state = xwininfo_map_state(app.window, stable_end, "hide-stability")
+            state, visible, _every, _value, detail = hidden_observation(
+                app, polling_end, "hide-stability", "hide stability"
+            )
+            last = detail
             if state != "IsUnMapped":
                 raise VariantFailure(
                     "hide-not-stable",
@@ -1745,60 +1791,82 @@ def hide_then_restore(app):
                     % (app.window, state),
                     "hide-stability",
                 )
-            visible = xdotool_ids(
-                app.proc.pid,
-                True,
-                stable_end,
-                "xdotool search --all --onlyvisible --pid (hide stability)",
-            )
-            every = xdotool_ids(
-                app.proc.pid,
-                False,
-                stable_end,
-                "xdotool search --all --pid (hide stability)",
-            )
             if app.window in visible:
                 raise VariantFailure(
                     "hide-not-stable",
-                    "window %d reappeared in the visible search %s during the 1 s "
-                    "hide interval" % (app.window, visible),
+                    "window %d reappeared in the visible search %s during the "
+                    "1 s hide interval" % (app.window, visible),
                     "hide-stability",
                 )
-            if app.window not in every:
-                raise VariantFailure(
-                    "hide-window-lost",
-                    "window %d disappeared from xdotool search --all --pid %d "
-                    "during the 1 s hide interval"
-                    % (app.window, app.proc.pid),
-                    "hide-stability",
-                )
-            kind, value = xprop_pid(app.window, stable_end, "hide-stability")
-            if kind == "notfound" or kind == "badwindow":
-                raise VariantFailure(
-                    "hide-window-lost",
-                    "window %d lost its _NET_WM_PID during the 1 s hide interval "
-                    "(%s=%r)" % (app.window, kind, value),
-                    "hide-stability",
-                )
-            if value != app.proc.pid:
-                raise VariantFailure(
-                    "hide-window-lost",
-                    "window %d reports _NET_WM_PID=%d during the 1 s hide interval "
-                    "but the original pid is %d"
-                    % (app.window, value, app.proc.pid),
-                    "hide-stability",
-                )
-        except StageDeadline:
-            # The interval ended while this observation was running: it is not
-            # extended, and the process/seed checks above already covered the
-            # deadline itself.
+            observation_cost = max(observation_cost, now() - started)
+        except StageDeadline as exc:
+            # The polling slice ended while this observation was running: it is
+            # not extended.  The mandatory final observation below still has
+            # the reserved tail of the interval and decides the outcome.
+            last += " (deadline: %s)" % (exc.detail,)
             break
-        target = min(st.iteration + POLL, stable_end)
+        target = min(st.iteration + POLL, polling_end)
         delay = target - now()
         if delay > 0.0:
             time.sleep(delay)
 
-    emit("hide-pass", " elapsed=%.3fs" % elapsed())
+    # Mandatory final observation.  hide-pass is never emitted from the polling
+    # iterations alone: it requires this complete four-part observation of the
+    # recorded window, taken as late as the interval allows (the reserve above
+    # is exactly its start point) and still inside the same deadline.  If it
+    # cannot be completed, the interval is a hide-timeout, not a pass.
+    st.iteration = now()
+    stability_guard()
+    if st.iteration >= stable_end:
+        raise VariantFailure(
+            "hide-timeout",
+            "the 1 s hide interval expired before the mandatory final "
+            "observation of window %d could start; last completed observation "
+            "%s" % (app.window, last),
+            "hide-stability",
+        )
+    wm_alive("hide-stability")
+    try:
+        state, visible, every, value, final_detail = hidden_observation(
+            app, stable_end, "hide-stability", "hide stability final"
+        )
+    except StageDeadline as exc:
+        raise VariantFailure(
+            "hide-timeout",
+            "the 1 s hide interval expired before the mandatory final "
+            "observation of window %d completed (%s); last completed "
+            "observation %s" % (app.window, exc.detail, last),
+            "hide-stability",
+        )
+    if state != "IsUnMapped":
+        raise VariantFailure(
+            "hide-not-stable",
+            "the mandatory final observation at the end of the 1 s hide "
+            "interval reports window %d in map state %r" % (app.window, state),
+            "hide-stability",
+        )
+    if app.window in visible:
+        raise VariantFailure(
+            "hide-not-stable",
+            "the mandatory final observation at the end of the 1 s hide "
+            "interval lists window %d in the visible search %s"
+            % (app.window, visible),
+            "hide-stability",
+        )
+    if app.window not in every or value != app.proc.pid:
+        raise VariantFailure(
+            "hide-window-lost",
+            "the mandatory final observation at the end of the 1 s hide "
+            "interval did not keep window %d in the all-windows search with "
+            "_NET_WM_PID=%d (all=%s pid=%r)"
+            % (app.window, app.proc.pid, every, value),
+            "hide-stability",
+        )
+    stability_guard()
+    emit(
+        "hide-pass",
+        " elapsed=%.3fs final_observation=%s" % (elapsed(), final_detail),
+    )
     return
 
 
@@ -1817,16 +1885,20 @@ def relaunch(app):
         status = st.second.proc.poll()
         assert_alive(app, "relaunch")
         wm_alive("relaunch")
-        if status is not None and status != 0:
-            st.second.proc.wait()
-            st.second.finish()
-            raise VariantFailure(
-                "relaunch-status",
-                "second pid %d exited status %d%s; the second instance must "
-                "exit exactly 0"
-                % (st.second.proc.pid, status, signal_note(status)),
-                "relaunch",
-            )
+        if status is not None:
+            # Reap the second instance here and judge its real wait() status: a
+            # nonzero or signal status must fail even when the child had
+            # already exited before the window was observed.
+            status = st.second.proc.wait()
+            if status != 0:
+                st.second.finish()
+                raise VariantFailure(
+                    "relaunch-status",
+                    "second pid %d exited status %d%s; the second instance must "
+                    "exit exactly 0"
+                    % (st.second.proc.pid, status, signal_note(status)),
+                    "relaunch",
+                )
         if status == 0 and st.iteration < window_end:
             try:
                 window, last = discover_once(app, window_end, "relaunch")
@@ -1855,33 +1927,33 @@ def relaunch(app):
             "relaunch",
         )
 
-    if st.second.proc.poll() is None:
-        # A window reappeared but the second instance is still running; it must
-        # still reach status 0 within the 5 s deadline.
-        while True:
-            st.iteration = now()
-            status = st.second.proc.poll()
-            if status is not None:
-                break
-            if now() >= window_end:
-                raise VariantFailure(
-                    "relaunch-timeout",
-                    "5 s; second pid %d still running after the window "
-                    "reappeared; original pid %d alive"
-                    % (st.second.proc.pid, app.proc.pid),
-                    "relaunch",
-                )
-            time.sleep(max(0.0, min(POLL, window_end - now())))
-        if status != 0:
-            st.second.proc.wait()
-            st.second.finish()
+    # The window reappeared, but the exit-0 requirement still holds in every
+    # case, including the case where the second instance had already exited
+    # when the window was discovered.  Reap it (bounded by the same 5 s window)
+    # and require exactly 0 instead of discarding the status.
+    while True:
+        st.iteration = now()
+        status = st.second.proc.poll()
+        if status is not None:
+            status = st.second.proc.wait()
+            break
+        if now() >= window_end:
             raise VariantFailure(
-                "relaunch-status",
-                "second pid %d exited status %d%s after the window reappeared"
-                % (st.second.proc.pid, status, signal_note(status)),
+                "relaunch-timeout",
+                "5 s; second pid %d still running after the window "
+                "reappeared; original pid %d alive"
+                % (st.second.proc.pid, app.proc.pid),
                 "relaunch",
             )
-    st.second.proc.wait()
+        time.sleep(max(0.0, min(POLL, window_end - now())))
+    if status != 0:
+        st.second.finish()
+        raise VariantFailure(
+            "relaunch-status",
+            "second pid %d exited status %d%s after the window reappeared"
+            % (st.second.proc.pid, status, signal_note(status)),
+            "relaunch",
+        )
     st.second.finish()
     app.window = window
     st.window = window
