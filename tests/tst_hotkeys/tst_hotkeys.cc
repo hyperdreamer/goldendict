@@ -45,6 +45,7 @@
 #include <QDBusConnection>
 #include <QDBusConnectionInterface>
 #include <QDBusMessage>
+#include <QScopeGuard>
 #include <QScopedPointer>
 #include <QSet>
 #include <QSignalSpy>
@@ -590,6 +591,15 @@ private slots:
   void sourceFollowsThePreference();
   void scanPopupActivationWiringIsPinned();
   void xcbGuardDoesNotCreateThePopup();
+
+  // The third Hotkeys row and its selection snapshots (§4.7).
+  void selectionStatusRowRendersSnapshots_data();
+  void selectionStatusRowRendersSnapshots();
+  void scanPopupRowPlatformMatrix_data();
+  void scanPopupRowPlatformMatrix();
+  void scanPopupRowWaylandValuesAndEdits();
+  void scanPopupRowWaylandProbe();
+  void scanPopupRowBaseStatuses();
 
 private slots:
   void wireBarrier( uint marker ) { seenMarker = marker; }
@@ -3443,6 +3453,192 @@ void TstHotkeys::xcbGuardDoesNotCreateThePopup()
   QVERIFY( selectionOrdered( body, { "++scanPopupRequestId", "scanPopup.reset()", "if( !cfg.preferences.enableScanPopup", "new ScanPopup" } ) );
   QVERIFY( selectionCompact( body ).contains( "if(!cfg.preferences.enableScanPopup&&!cfg.preferences.enableClipboardHotkey&&!scanPopupBindingPlanned(QGuiApplication::platformName(),cfg.preferences.enableScanPopupHotkey))return;" ) );
   QVERIFY( !body.contains( "!cfg.preferences.enableScanPopupHotkey" ) );
+}
+
+void TstHotkeys::selectionStatusRowRendersSnapshots_data()
+{
+  QTest::addColumn<int>( "state" ); QTest::addColumn<QString>( "reason" );
+  QTest::addColumn<bool>( "seen" ); QTest::addColumn<QString>( "suffix" );
+  using S = WaylandSelectionSource::State;
+  QTest::newRow( "starting" ) << int(S::Starting) << QString() << false << QString( "selection source starting" );
+  QTest::newRow( "available-seen" ) << int(S::Available) << QString() << true << QString( "primary selection supported" );
+  QTest::newRow( "available-unseen" ) << int(S::Available) << QString() << false << QString( "selection not observed yet" );
+  QTest::newRow( "unavailable" ) << int(S::Unavailable) << QString( "manager removed" ) << true << QString( "selection unavailable: manager removed — clipboard is used instead" );
+  QTest::newRow( "unsupported" ) << int(S::Unsupported) << QString() << false << QString( "selection unsupported in this build — clipboard is used instead" );
+}
+void TstHotkeys::selectionStatusRowRendersSnapshots()
+{
+  QFETCH( int, state ); QFETCH( QString, reason ); QFETCH( bool, seen ); QFETCH( QString, suffix );
+  Config::Class cfg; cfg.preferences.enableScanPopupHotkey = true;
+  cfg.preferences.scanPopupHotkey.rawText = "Ctrl+Meta+D";
+  Preferences dialog( nullptr, cfg );
+  auto enabled = dialog.findChild<QCheckBox *>( "enableScanPopupHotkey" );
+  auto editor = dialog.findChild<HotKeyEdit *>( "scanPopupHotkey" );
+  auto label = dialog.findChild<QLabel *>( "scanPopupHotkeyStatus" );
+  QVERIFY( enabled && editor && label );
+  dialog.setHotkeyStatus( "wayland", HotkeyBackend::State::Bound, {}, {}, true );
+  enabled->setChecked( true );
+  SelectionStatus snapshot{ WaylandSelectionSource::State(state), reason, seen };
+  auto render = [&] { dialog.setHotkeyStatus( "wayland", HotkeyBackend::State::Bound, {}, {{"scan-popup", "Portal selected trigger"}}, true, snapshot ); };
+  render(); QCOMPARE( label->text(), QString( "Portal selected trigger · " ) + suffix );
+  QCOMPARE( label->textFormat(), Qt::PlainText );
+  for( char const * name : { "mainWindowHotkeyStatus", "clipboardHotkeyStatus" } )
+  {
+    auto other = dialog.findChild<QLabel *>( name ); QVERIFY( other );
+    QVERIFY( !other->text().contains( " · " ) ); QCOMPARE( other->textFormat(), Qt::PlainText );
+  }
+  auto const before = editor->getHotKey().toKeySequence(); QString const display = editor->text();
+  snapshot = { WaylandSelectionSource::State::Available, {}, false }; render();
+  QCOMPARE( label->text(), QString( "Portal selected trigger · selection not observed yet" ) );
+  snapshot.primarySelectionSeen = true; render();
+  QCOMPARE( label->text(), QString( "Portal selected trigger · primary selection supported" ) );
+  QVERIFY( enabled->isChecked() ); QCOMPARE( editor->text(), display );
+  QCOMPARE( editor->getHotKey().toKeySequence(), before );
+  QCOMPARE( dialog.getPreferences().scanPopupHotkey.rawText, QString( "Ctrl+Meta+D" ) );
+}
+void TstHotkeys::scanPopupRowPlatformMatrix_data()
+{
+  QTest::addColumn<QString>( "platform" ); QTest::addColumn<bool>( "wayland" ); QTest::addColumn<QString>( "label" );
+  QTest::newRow( "xcb" ) << QString( "xcb" ) << false << QString( "Not used on X11 — the Held keys setting on the Scan Popup tab applies" );
+  QTest::newRow( "windows" ) << QString( "windows" ) << false << QString( "Not used outside Wayland sessions" );
+  QTest::newRow( "cocoa" ) << QString( "cocoa" ) << false << QString( "Not used outside Wayland sessions" );
+  QTest::newRow( "offscreen" ) << QString( "offscreen" ) << false << QString( "Not used outside Wayland sessions" );
+  QTest::newRow( "wayland" ) << QString( "wayland" ) << true << QString( "Portal selected trigger · selection unavailable: manager removed — clipboard is used instead" );
+  QTest::newRow( "wayland-egl" ) << QString( "wayland-egl" ) << true << QString( "Portal selected trigger · selection unavailable: manager removed — clipboard is used instead" );
+}
+void TstHotkeys::scanPopupRowPlatformMatrix()
+{
+  QFETCH( QString, platform ); QFETCH( bool, wayland ); QFETCH( QString, label );
+  Config::Class cfg; cfg.preferences.enableScanPopupHotkey = true;
+  cfg.preferences.scanPopupHotkey.rawText = "Ctrl+Meta+D";
+  Config::HotKey const original = cfg.preferences.scanPopupHotkey;
+  Preferences dialog( nullptr, cfg );
+  auto enabled = dialog.findChild<QCheckBox *>( "enableScanPopupHotkey" );
+  auto editor = dialog.findChild<HotKeyEdit *>( "scanPopupHotkey" );
+  auto status = dialog.findChild<QLabel *>( "scanPopupHotkeyStatus" );
+  QVERIFY( enabled && editor && status );
+  SelectionStatus const snapshot{ WaylandSelectionSource::State::Unavailable, "manager removed", true };
+  auto render = [&] { dialog.setHotkeyStatus( platform, HotkeyBackend::State::Bound, {}, {{"scan-popup", "Portal selected trigger"}}, true, snapshot ); };
+  render(); if( wayland ) enabled->setChecked( true ); render();
+  QCOMPARE( enabled->isEnabled(), wayland ); QCOMPARE( enabled->isChecked(), wayland );
+  QCOMPARE( editor->isEnabled(), wayland ); QCOMPARE( status->text(), label );
+  QVERIFY( cfg.preferences.enableScanPopupHotkey );
+  QCOMPARE( cfg.preferences.scanPopupHotkey.rawText, original.rawText );
+  QCOMPARE( cfg.preferences.scanPopupHotkey.toKeySequence(), original.toKeySequence() );
+  QCOMPARE( scanPopupBindingPlanned( platform, true ), wayland );
+  if( xcbSession() && !wayland )
+  {
+    auto const result = dialog.getPreferences(); QVERIFY( result.enableScanPopupHotkey );
+    QCOMPARE( result.scanPopupHotkey.rawText, original.rawText );
+    QCOMPARE( result.scanPopupHotkey.toKeySequence(), original.toKeySequence() );
+    QCOMPARE( result.scanPopupHotkey.key1, original.key1 ); QCOMPARE( result.scanPopupHotkey.key2, original.key2 );
+    QCOMPARE( result.scanPopupHotkey.modifiers, original.modifiers );
+  }
+  qInfo( "source assertions: real-QPA persistence ternaries; logical matrix is renderer evidence" );
+  QString const getter = selectionCompact( selectionBlock( selectionSourceText( "preferences.cc" ), "Config::Preferences Preferences::getPreferences()" ) );
+  QVERIFY( getter.contains( "boolconstwayland=QGuiApplication::platformName().startsWith(QLatin1String(\"wayland\"));" ) );
+  QVERIFY( getter.contains( "p.enableScanPopupHotkey=wayland?ui.enableScanPopupHotkey->isChecked():cfg.preferences.enableScanPopupHotkey;" ) );
+  QVERIFY( getter.contains( "p.scanPopupHotkey=wayland?(scanPopupHotkeyEdited?ui.scanPopupHotkey->getHotKey():cfg.preferences.scanPopupHotkey):cfg.preferences.scanPopupHotkey;" ) );
+}
+void TstHotkeys::scanPopupRowWaylandValuesAndEdits()
+{
+  QString const kwin = QStandardPaths::findExecutable( "kwin_wayland" );
+  QVERIFY2( !kwin.isEmpty(), "required selected-text UI probe needs kwin_wayland" );
+  TestSupport::PrivateSessionBus bus; QString reason; QVERIFY2( bus.start( &reason ), qPrintable( reason ) );
+  QTemporaryDir runtime; QVERIFY( runtime.isValid() );
+  QVERIFY( QFile::setPermissions( runtime.path(), QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner ) );
+  QProcess compositor, child;
+  auto cleanup = qScopeGuard( [&] {
+    for( QProcess * process : { &child, &compositor } ) if( process->state() != QProcess::NotRunning )
+    {
+      process->terminate();
+      if( !process->waitForFinished( 500 ) ) { process->kill(); process->waitForFinished( 1000 ); }
+    }
+  } );
+  auto env = QProcessEnvironment::systemEnvironment(); env.insert( "DBUS_SESSION_BUS_ADDRESS", bus.address() );
+  env.insert( "XDG_RUNTIME_DIR", runtime.path() ); env.insert( "QT_QPA_PLATFORM", "offscreen" );
+  env.insert( "KWIN_COMPOSE", "Q" ); env.insert( "LIBGL_ALWAYS_SOFTWARE", "1" );
+  compositor.setProcessEnvironment( env );
+  compositor.start( kwin, { "--virtual", "--no-kactivities", "--no-global-shortcuts", "--socket", "gd-selection-ui" } );
+  QVERIFY2( QTest::qWaitFor( [&] { return QFile::exists( runtime.filePath( "gd-selection-ui" ) ) || compositor.state() == QProcess::NotRunning; }, 5000 ), "selection UI compositor startup deadline" );
+  QVERIFY2( QFile::exists( runtime.filePath( "gd-selection-ui" ) ), compositor.readAllStandardError().constData() );
+  env.insert( "WAYLAND_DISPLAY", "gd-selection-ui" ); env.insert( "QT_QPA_PLATFORM", "wayland" );
+  env.insert( "GD_SCAN_POPUP_UI_PROBE", "1" ); child.setProcessEnvironment( env );
+  child.start( QCoreApplication::applicationFilePath(), { "scanPopupRowWaylandProbe" } );
+  QVERIFY2( QTest::qWaitFor( [&] { return child.state() == QProcess::NotRunning; }, 15000 ), "selected-text Wayland UI child deadline" );
+  QByteArray const output = child.readAllStandardOutput() + child.readAllStandardError();
+  QCOMPARE( child.exitStatus(), QProcess::NormalExit ); QVERIFY2( child.exitCode() == 0, output.constData() );
+  QVERIFY2( output.contains( "scan-popup-wayland-preferences: PASS" ), output.constData() );
+}
+void TstHotkeys::scanPopupRowWaylandProbe()
+{
+  if( qEnvironmentVariable( "GD_SCAN_POPUP_UI_PROBE" ) != "1" ) return;
+  QVERIFY( QGuiApplication::platformName().startsWith( QLatin1String( "wayland" ) ) );
+  Config::Class cfg; cfg.preferences.enableScanPopupHotkey = true;
+  cfg.preferences.scanPopupHotkey.rawText = "Ctrl+Meta+D";
+  Preferences dialog( nullptr, cfg );
+  auto enabled = dialog.findChild<QCheckBox *>( "enableScanPopupHotkey" );
+  auto editor = dialog.findChild<HotKeyEdit *>( "scanPopupHotkey" ); QVERIFY( enabled && editor );
+  QVERIFY( enabled->isEnabled() && enabled->isChecked() && editor->isEnabled() );
+  QCOMPARE( dialog.getPreferences().scanPopupHotkey.rawText, QString( "Ctrl+Meta+D" ) );
+  enabled->setChecked( false ); QVERIFY( !dialog.getPreferences().enableScanPopupHotkey );
+  QCOMPARE( dialog.getPreferences().scanPopupHotkey.rawText, QString( "Ctrl+Meta+D" ) );
+  enabled->setChecked( true ); QVERIFY( dialog.getPreferences().enableScanPopupHotkey );
+  QTest::keyPress( editor, Qt::Key_Control ); QTest::keyRelease( editor, Qt::Key_Control );
+  QCOMPARE( dialog.getPreferences().scanPopupHotkey.rawText, QString( "Ctrl+Meta+D" ) );
+  QTest::keyClick( editor, Qt::Key_J, Qt::ControlModifier | Qt::AltModifier );
+  auto edited = dialog.getPreferences(); QVERIFY( edited.scanPopupHotkey.rawText.isEmpty() );
+  QCOMPARE( edited.scanPopupHotkey.toKeySequence().toString( QKeySequence::PortableText ), QString( "Ctrl+Alt+J" ) );
+  auto const sequence = editor->getHotKey().toKeySequence(); auto const display = editor->text();
+  for( SelectionStatus const & snapshot : QList<SelectionStatus>{
+         { WaylandSelectionSource::State::Available, {}, false },
+         { WaylandSelectionSource::State::Available, {}, true },
+         { WaylandSelectionSource::State::Unavailable, "manager removed", true } } )
+  {
+    dialog.setHotkeyStatus( "wayland", HotkeyBackend::State::Bound, {}, {{"scan-popup", "Portal selected trigger"}}, true, snapshot );
+    QCOMPARE( editor->getHotKey().toKeySequence(), sequence ); QCOMPARE( editor->text(), display ); QVERIFY( enabled->isChecked() );
+    QVERIFY( dialog.getPreferences().scanPopupHotkey.rawText.isEmpty() );
+  }
+  enabled->setChecked( false );
+  dialog.setHotkeyStatus( "wayland", HotkeyBackend::State::Bound, {}, {}, true, {} );
+  QVERIFY( !enabled->isChecked() ); QVERIFY( !editor->isEnabled() );
+  dialog.reject(); QVERIFY( cfg.preferences.enableScanPopupHotkey );
+  QCOMPARE( cfg.preferences.scanPopupHotkey.rawText, QString( "Ctrl+Meta+D" ) );
+  qInfo( "scan-popup-wayland-preferences: PASS" );
+}
+void TstHotkeys::scanPopupRowBaseStatuses()
+{
+  using B = HotkeyBackend::State;
+  SelectionStatus const snapshot{ WaylandSelectionSource::State::Available, {}, true };
+  QString const base = "Hover lookup and focus restoration are unavailable on Wayland. Clipboard-change scanning and explicit clipboard lookup remain available; global shortcuts use the portal.";
+  Config::Class cfg; cfg.preferences.enableScanPopupHotkey = true;
+  Preferences dialog( nullptr, cfg );
+  auto enabled = dialog.findChild<QCheckBox *>( "enableScanPopupHotkey" );
+  auto editor = dialog.findChild<HotKeyEdit *>( "scanPopupHotkey" );
+  auto label = dialog.findChild<QLabel *>( "scanPopupHotkeyStatus" );
+  auto note = dialog.findChild<QLabel *>( "clipboardCapabilityNote" ); QVERIFY( enabled && editor && label && note );
+  dialog.setHotkeyStatus( "wayland", B::Bound, {}, {}, true, snapshot ); enabled->setChecked( true );
+  dialog.setHotkeyStatus( "wayland", B::Bound, {}, {}, true, snapshot );
+  QCOMPARE( label->text(), QString( "Not assigned by the portal — use Configure shortcuts · primary selection supported" ) );
+  QCOMPARE( note->text(), base + " Selected-text shortcut: primary selection supported." );
+  auto const before = editor->getHotKey().toKeySequence();
+  dialog.setHotkeyStatus( "wayland", B::Denied, "permission refused", {{"scan-popup", "stale"}}, false, snapshot );
+  QCOMPARE( label->text(), QString( "permission refused · primary selection supported" ) );
+  QCOMPARE( editor->getHotKey().toKeySequence(), before ); QVERIFY( enabled->isChecked() );
+  enabled->setChecked( false ); dialog.setHotkeyStatus( "wayland", B::Bound, {}, {}, true, snapshot );
+  QCOMPARE( label->text(), QString( "Disabled" ) );
+  QCOMPARE( note->text(), base + " Selected-text shortcut is disabled." );
+  cfg.preferences.scanPopupHotkey.rawText = "Ctrl+G,Ctrl+H,Ctrl+I";
+  Preferences invalid( nullptr, cfg );
+  auto invalidEnabled = invalid.findChild<QCheckBox *>( "enableScanPopupHotkey" );
+  auto invalidLabel = invalid.findChild<QLabel *>( "scanPopupHotkeyStatus" ); QVERIFY( invalidEnabled && invalidLabel );
+  invalid.setHotkeyStatus( "wayland", B::Bound, {}, {}, true, snapshot ); invalidEnabled->setChecked( true );
+  for( int i = 0; i != 2; ++i )
+  {
+    invalid.setHotkeyStatus( "wayland", B::Bound, {}, {{"scan-popup", "stale"}}, true, snapshot );
+    QCOMPARE( invalidLabel->text(), QString( "Unavailable on Wayland: Only one or two key combinations are supported. · primary selection supported" ) );
+    QVERIFY( !invalidLabel->text().contains( "stale" ) ); QVERIFY( invalidEnabled->isChecked() );
+  }
 }
 
 QTEST_MAIN( TstHotkeys )

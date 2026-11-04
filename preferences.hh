@@ -40,6 +40,7 @@ private:
 
   Ui::Preferences ui;
   bool mainHotkeyEdited = false, clipboardHotkeyEdited = false;
+  bool scanPopupHotkeyEdited = false;
   bool eventFilter( QObject *, QEvent * ) override;
 
 private slots:
@@ -59,6 +60,7 @@ private slots:
 
   void on_enableMainWindowHotkey_toggled( bool checked );
   void on_enableClipboardHotkey_toggled( bool checked );
+  void on_enableScanPopupHotkey_toggled( bool checked );
 
   void on_buttonBox_accepted();
 

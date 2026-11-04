@@ -207,6 +207,13 @@ Preferences::Preferences( QWidget * parent, Config::Class & cfg_ ):
   ui.mainWindowHotkey->installEventFilter( this );
   ui.clipboardHotkey->installEventFilter( this );
 
+  bool const wayland = QGuiApplication::platformName().startsWith( QLatin1String( "wayland" ) );
+  ui.enableScanPopupHotkey->setEnabled( wayland );
+  ui.enableScanPopupHotkey->setChecked( wayland && p.enableScanPopupHotkey );
+  ui.scanPopupHotkey->setHotKey( p.scanPopupHotkey );
+  ui.scanPopupHotkey->setEnabled( ui.enableScanPopupHotkey->isEnabled() && ui.enableScanPopupHotkey->isChecked() );
+  ui.scanPopupHotkey->installEventFilter( this );
+
   ui.enableScanPopup->setChecked( p.enableScanPopup );
   ui.startWithScanPopupOn->setChecked( p.startWithScanPopupOn );
   ui.enableScanPopupModifiers->setChecked( p.enableScanPopupModifiers );
@@ -431,6 +438,12 @@ Config::Preferences Preferences::getPreferences()
   p.mainWindowHotkey = mainHotkeyEdited ? ui.mainWindowHotkey->getHotKey() : cfg.preferences.mainWindowHotkey;
   p.enableClipboardHotkey = ui.enableClipboardHotkey->isChecked();
   p.clipboardHotkey = clipboardHotkeyEdited ? ui.clipboardHotkey->getHotKey() : cfg.preferences.clipboardHotkey;
+  bool const wayland = QGuiApplication::platformName().startsWith( QLatin1String( "wayland" ) );
+  p.enableScanPopupHotkey = wayland ? ui.enableScanPopupHotkey->isChecked()
+                                    : cfg.preferences.enableScanPopupHotkey;
+  p.scanPopupHotkey = wayland
+      ? ( scanPopupHotkeyEdited ? ui.scanPopupHotkey->getHotKey() : cfg.preferences.scanPopupHotkey )
+      : cfg.preferences.scanPopupHotkey;
 
   p.enableScanPopup = ui.enableScanPopup->isChecked();
   p.startWithScanPopupOn = ui.startWithScanPopupOn->isChecked();
@@ -607,6 +620,7 @@ bool Preferences::eventFilter( QObject * watched, QEvent * event )
     {
       if( watched == ui.mainWindowHotkey ) mainHotkeyEdited = true;
       if( watched == ui.clipboardHotkey ) clipboardHotkeyEdited = true;
+      if( watched == ui.scanPopupHotkey ) scanPopupHotkeyEdited = true;
     }
   }
   return QDialog::eventFilter( watched, event );
@@ -618,16 +632,13 @@ void Preferences::setHotkeyStatus( QString const & platform, HotkeyBackend::Stat
                                    bool configureAvailable,
                                    SelectionStatus const & selection )
 {
-  Q_UNUSED( selection )
   bool const wayland = platform.startsWith( QLatin1String( "wayland" ) );
   bool const active = state == HotkeyBackend::State::Bound || state == HotkeyBackend::State::Partial;
   QString status;
   switch( state )
   {
-    case HotkeyBackend::State::Bound:
-      status = wayland ? tr( "Portal bound" ) : tr( "X11 active" ); break;
-    case HotkeyBackend::State::Partial:
-      status = wayland ? tr( "Portal partial" ) : tr( "X11 partial" ); break;
+    case HotkeyBackend::State::Bound: status = wayland ? tr( "Portal bound" ) : tr( "X11 active" ); break;
+    case HotkeyBackend::State::Partial: status = wayland ? tr( "Portal partial" ) : tr( "X11 partial" ); break;
     case HotkeyBackend::State::Denied: status = tr( "Portal denied" ); break;
     case HotkeyBackend::State::Unavailable: status = tr( "Global shortcuts unavailable" ); break;
     case HotkeyBackend::State::Unsupported: status = tr( "Global shortcuts unsupported" ); break;
@@ -637,41 +648,78 @@ void Preferences::setHotkeyStatus( QString const & platform, HotkeyBackend::Stat
     case HotkeyBackend::State::Closed: status = tr( "Global shortcuts closed" ); break;
   }
   ui.hotkeyCapability->setText( explanation.isEmpty() ? status : status + ": " + explanation );
-  auto display = [&]( QString const & id, HotKeyEdit * editor, QCheckBox * enabled, QLabel * label ) {
-    if( !enabled->isChecked() ) { label->setText( tr( "Disabled" ) ); return; }
+  QString suffix;
+  switch( selection.state )
+  {
+    case WaylandSelectionSource::State::Starting: suffix = tr( "selection source starting" ); break;
+    case WaylandSelectionSource::State::Available:
+      suffix = selection.primarySelectionSeen ? tr( "primary selection supported" ) : tr( "selection not observed yet" ); break;
+    case WaylandSelectionSource::State::Unavailable:
+      suffix = tr( "selection unavailable: %1 — clipboard is used instead" ).arg( selection.reason ); break;
+    case WaylandSelectionSource::State::Unsupported:
+      suffix = tr( "selection unsupported in this build — clipboard is used instead" ); break;
+  }
+  struct Row {
+    QString id;
+    HotKeyEdit * editor;
+    QCheckBox * enabled;
+    QLabel * label;
+    Config::HotKey const & stored;
+    bool const & edited;
+  };
+  Row const rows[] = {
+    { "main-window", ui.mainWindowHotkey, ui.enableMainWindowHotkey,
+      ui.mainWindowHotkeyStatus, cfg.preferences.mainWindowHotkey, mainHotkeyEdited },
+    { "clipboard-lookup", ui.clipboardHotkey, ui.enableClipboardHotkey,
+      ui.clipboardHotkeyStatus, cfg.preferences.clipboardHotkey, clipboardHotkeyEdited },
+    { "scan-popup", ui.scanPopupHotkey, ui.enableScanPopupHotkey,
+      ui.scanPopupHotkeyStatus, cfg.preferences.scanPopupHotkey, scanPopupHotkeyEdited },
+  };
+  auto display = [&]( Row const & row ) {
+    if( !row.enabled->isChecked() ) { row.label->setText( tr( "Disabled" ) ); return; }
     QString reason, trigger;
-    Config::HotKey key = editor->getHotKey();
-    bool const edited = editor == ui.mainWindowHotkey ? mainHotkeyEdited : clipboardHotkeyEdited;
-    auto const & stored = editor == ui.mainWindowHotkey ? cfg.preferences.mainWindowHotkey : cfg.preferences.clipboardHotkey;
-    if( wayland && !edited && !stored.rawText.isEmpty() && !HotkeySyntax::parse( stored.rawText, &key, &reason ) )
-    {
-      label->setText( tr( "Unavailable on Wayland: %1" ).arg( reason ) );
-      return;
-    }
+    Config::HotKey key = row.editor->getHotKey();
+    if( wayland && !row.edited && !row.stored.rawText.isEmpty() && !HotkeySyntax::parse( row.stored.rawText, &key, &reason ) )
+    { row.label->setText( tr( "Unavailable on Wayland: %1" ).arg( reason ) ); return; }
     if( wayland && !HotkeySyntax::preferredTrigger( key, &trigger, &reason ) )
-    {
-      label->setText( tr( "Unavailable on Wayland: %1" ).arg( reason ) );
-      return;
-    }
+    { row.label->setText( tr( "Unavailable on Wayland: %1" ).arg( reason ) ); return; }
     if( active )
       for( auto const & binding : bindings )
-        if( binding.id == id && !binding.triggerDescription.isEmpty() )
-        { label->setText( binding.triggerDescription ); return; }
+        if( binding.id == row.id && !binding.triggerDescription.isEmpty() )
+        { row.label->setText( binding.triggerDescription ); return; }
     if( wayland && configureAvailable )
-    {
-      label->setText( tr( "Not assigned by the portal — use Configure shortcuts" ) );
-      return;
-    }
-    label->setText( state == HotkeyBackend::State::Bound && !wayland ? tr( "Active" ) :
-                   ( explanation.isEmpty() ? status : explanation ) );
+    { row.label->setText( tr( "Not assigned by the portal — use Configure shortcuts" ) ); return; }
+    row.label->setText( state == HotkeyBackend::State::Bound && !wayland ? tr( "Active" ) :
+                       ( explanation.isEmpty() ? status : explanation ) );
   };
-  display( "main-window", ui.mainWindowHotkey, ui.enableMainWindowHotkey, ui.mainWindowHotkeyStatus );
-  display( "clipboard-lookup", ui.clipboardHotkey, ui.enableClipboardHotkey, ui.clipboardHotkeyStatus );
+  for( Row const & row : rows )
+  {
+    row.label->setTextFormat( Qt::PlainText );
+    if( row.id == QLatin1String( "scan-popup" ) )
+    {
+      row.enabled->setEnabled( wayland );
+      if( !wayland )
+      {
+        row.enabled->setChecked( false ); row.editor->setEnabled( false );
+        row.label->setText( platform == QLatin1String( "xcb" )
+          ? tr( "Not used on X11 — the Held keys setting on the Scan Popup tab applies" )
+          : tr( "Not used outside Wayland sessions" ) );
+        continue;
+      }
+      row.editor->setEnabled( row.enabled->isChecked() );
+    }
+    display( row );
+    if( wayland && row.id == QLatin1String( "scan-popup" ) && row.enabled->isChecked() )
+      row.label->setText( row.label->text() + QStringLiteral( " · " ) + suffix );
+  }
   ui.configureShortcuts->setVisible( wayland );
   ui.configureShortcuts->setEnabled( wayland && configureAvailable );
-  ui.clipboardCapabilityNote->setText( wayland
+  QString note = wayland
     ? tr( "Hover lookup and focus restoration are unavailable on Wayland. Clipboard-change scanning and explicit clipboard lookup remain available; global shortcuts use the portal." )
-    : tr( "Clipboard-change scanning and explicit clipboard lookup remain available independently of global shortcuts." ) );
+    : tr( "Clipboard-change scanning and explicit clipboard lookup remain available independently of global shortcuts." );
+  if( wayland ) note += QLatin1Char( ' ' ) + ( ui.enableScanPopupHotkey->isChecked()
+    ? tr( "Selected-text shortcut: %1." ).arg( suffix ) : tr( "Selected-text shortcut is disabled." ) );
+  ui.clipboardCapabilityNote->setText( note );
 }
 
 void Preferences::enableScanPopupToggled( bool b )
@@ -750,6 +798,11 @@ void Preferences::on_enableMainWindowHotkey_toggled( bool checked )
 void Preferences::on_enableClipboardHotkey_toggled( bool checked )
 {
   ui.clipboardHotkey->setEnabled( checked );
+}
+
+void Preferences::on_enableScanPopupHotkey_toggled( bool checked )
+{
+  ui.scanPopupHotkey->setEnabled( ui.enableScanPopupHotkey->isEnabled() && checked );
 }
 
 void Preferences::on_buttonBox_accepted()
