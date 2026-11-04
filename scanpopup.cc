@@ -466,6 +466,17 @@ void ScanPopup::translateWordFromClipboard(QClipboard::Mode m)
   translateWord( str );
 }
 
+bool ScanPopup::translateSelectedText( QString const & text )
+{
+  Config::InputPhrase const phrase = cfg.preferences.sanitizeInputPhrase( text );
+  if( !phrase.isValid() )
+    return false;
+  if( isVisible() && phrase == inputPhrase )
+    return true;
+  translateWord( text );
+  return true;
+}
+
 void ScanPopup::translateWord( QString const & word )
 {
   pendingInputPhrase = cfg.preferences.sanitizeInputPhrase( word );

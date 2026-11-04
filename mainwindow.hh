@@ -32,6 +32,8 @@
 #include "helpwindow.hh"
 
 #include "hotkeybackend.hh"
+#include "waylandselection.hh"
+#include "waylandselectionlogic.hh"
 #include "hotkeywrapper.hh"
 #include "articleprofile.hh"
 #include <QPointer>
@@ -111,6 +113,8 @@ private:
   void finishShutdown();
   void failStartup( QString const & reason );
   void refreshHotkeyStatus();
+  void reconcileSelectionSource();
+  void reportNothingToTranslate();
 
   QSystemTrayIcon * trayIcon;
 
@@ -177,6 +181,10 @@ private:
   QString translateBoxSuffix; ///< A punctuation suffix that corresponds to translateLine's text.
 
   WordFinder wordFinder;
+
+  std::unique_ptr< WaylandSelectionSource > selectionSource;
+  quint64 scanPopupRequestId = 0;
+  qint64 clipboardChangedAt = 0;
 
   sptr< ScanPopup > scanPopup;
 

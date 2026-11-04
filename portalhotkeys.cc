@@ -79,11 +79,6 @@ QString uniqueToken()
     return QStringLiteral( "gd_" ) + QUuid::createUuid().toString( QUuid::Id128 );
 }
 
-bool knownBindingId( QString const & id )
-{
-    return id == QLatin1String( "main-window" ) || id == QLatin1String( "clipboard-lookup" );
-}
-
 bool validStringProperty( QVariantMap const & properties, QString const & name )
 {
     return !properties.contains( name )
@@ -849,7 +844,7 @@ void PortalBackend::beginGeneration( QVector< HotkeyBinding > const & bindings )
     bool valid = true;
     for ( HotkeyBinding const & binding : bindings )
     {
-        if ( binding.id.isEmpty() || !knownBindingId( binding.id ) || ids.contains( binding.id ) )
+        if ( binding.id.isEmpty() || !isKnownPortalBindingId( binding.id ) || ids.contains( binding.id ) )
         {
             valid = false;
             break;

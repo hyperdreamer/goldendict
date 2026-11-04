@@ -50,6 +50,9 @@ public:
   void applyWordsZoomLevel();
   /// Translate the word
   void translateWord( QString const & word );
+  /// Translate the given selected text through the existing translation path.
+  /// Returns false when the text sanitises to an invalid phrase.
+  bool translateSelectedText( QString const & text );
 
   void setDictionaryIconSize();
 

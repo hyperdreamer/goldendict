@@ -150,6 +150,12 @@ unix:!mac {
   QMAKE_LFLAGS += -rdynamic
 
     CONFIG += link_pkgconfig
+    packagesExist(wayland-client) {
+        DEFINES += HAVE_WAYLAND_DATA_CONTROL
+        PKGCONFIG += wayland-client
+        INCLUDEPATH += $$PWD/protocols/ext-data-control-v1
+        SOURCES += $$PWD/protocols/ext-data-control-v1/ext-data-control-v1-protocol.c
+    }
     PKGCONFIG += vorbisfile \
         vorbis \
         ogg \
@@ -414,6 +420,8 @@ HEADERS += folding.hh \
     hotkeybackend.hh \
     hotkeysyntax.hh \
     portalhotkeys.hh \
+    waylandselectionlogic.hh \
+    waylandselection.hh \
     platformwindow.hh
 
 FORMS += groups.ui \
@@ -558,6 +566,8 @@ SOURCES += folding.cc \
     hotkeybackend.cc \
     hotkeysyntax.cc \
     portalhotkeys.cc \
+    waylandselectionlogic.cc \
+    waylandselection.cc \
     platformwindow.cc
 
 win32 {
@@ -707,7 +717,9 @@ TRANSLATIONS += locale/ru_RU.ts \
 
   ALL_SOURCES = $$SOURCES $$HEADERS $$FORMS
   for(src, ALL_SOURCES) {
-    QUALIFIED_SOURCES += $${PWD}/$${src}
+    # A source entry may itself be absolute (the optional ext-data-control
+    # protocol code); prefixing it again would produce a doubled path.
+    QUALIFIED_SOURCES += $$absolute_path($$src, $$PWD)
   }
   revtarget.depends = $$QUALIFIED_SOURCES
 }
@@ -755,9 +767,8 @@ tests-makefile.commands = $$QMAKE_QMAKE $$PWD/tests/tests.pro -o $$PWD/tests/$$C
 tests-build.target = tests-build
 tests-build.depends = tests-makefile
 # The suites are independent projects with private object directories, so the
-# build half runs in parallel: a serial cold build of all 18 suites does not fit
-# the gate's own 900 s budget (measured: 900 s built 3 of 18 suites). The run
-# half stays serial for deterministic test execution.
+# build half runs in parallel for all 20 suites. The run half stays serial for
+# deterministic test execution within the gate's wall-clock budget.
 tests-build.commands = $(GD_TEST_WRAPPER) $(MAKE) -C $$PWD/tests -f $$CHECK_MAKEFILE -j$(shell nproc)
 
 tests-run.target = tests-run

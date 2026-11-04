@@ -83,6 +83,10 @@ CONFIG( old_hunspell ): DEFINES += GD_TEST_CONFIG_OLD_HUNSPELL
 
 unix:!mac {
     DEFINES += HAVE_X11
+    CONFIG += link_pkgconfig
+    packagesExist(wayland-client) {
+        DEFINES += HAVE_WAYLAND_DATA_CONTROL
+    }
 }
 
 !CONFIG( no_ffmpeg_player ) {

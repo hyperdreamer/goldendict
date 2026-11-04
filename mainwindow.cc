@@ -834,6 +834,12 @@ MainWindow::MainWindow( Config::Class & cfg_ ):
 
   applyQtStyleSheet( cfg.preferences.displayStyle, cfg.preferences.addonStyle );
 
+  connect( QApplication::clipboard(), &QClipboard::changed, this,
+           [this]( QClipboard::Mode mode ) {
+    if( WaylandSelection::clipboardStampAdvances( mode == QClipboard::Clipboard ) )
+      clipboardChangedAt = Monotonic::nowMs();
+  } );
+
   makeScanPopup();
 
   if ( trayIcon )
@@ -1025,9 +1031,11 @@ void MainWindow::mousePressEvent( QMouseEvent *event)
 
 MainWindow::~MainWindow()
 {
+  shuttingDown = true;
   hotkeyBackend.reset();
   installGate.reset();
   startupDeadline.stop();
+  if( selectionSource ) selectionSource->stop();
   scanPopup.reset();
 #ifdef Q_OS_WIN
   if( isMaximized() )
@@ -1282,6 +1290,7 @@ void MainWindow::quitApp()
   wordFinder.cancel();
   hotkeyBackend.reset();
   installGate.reset();
+  if( selectionSource ) selectionSource->stop();
   scanPopup.reset();
   closeHeadwordsDialog();
   closeFullTextSearchDialog();
@@ -1309,6 +1318,7 @@ void MainWindow::finishShutdown()
 {
   if( shutdownComplete ) return;
   shutdownComplete = true;
+  if( selectionSource ) selectionSource->stop();
   scanPopup.reset();
   destroyArticleViews();
   qApp->quit();
@@ -1327,6 +1337,7 @@ void MainWindow::failStartup( QString const & reason )
     shuttingDown = true;
     hotkeyBackend.reset();
     installGate.reset();
+    if( selectionSource ) selectionSource->stop();
     scanPopup.reset();
     destroyArticleViews();
     QCoreApplication::exit( 1 );
@@ -1518,10 +1529,13 @@ void MainWindow::updateDictionaryBar()
 
 void MainWindow::makeScanPopup()
 {
+  ++scanPopupRequestId;
   scanPopup.reset();
 
-  if ( !cfg.preferences.enableScanPopup &&
-       !cfg.preferences.enableClipboardHotkey )
+  if( !cfg.preferences.enableScanPopup &&
+      !cfg.preferences.enableClipboardHotkey &&
+      !scanPopupBindingPlanned( QGuiApplication::platformName(),
+                                cfg.preferences.enableScanPopupHotkey ) )
     return;
 
   scanPopup = new ScanPopup( 0, cfg, *articleProfile->profile(), articleNetMgr, audioPlayerFactory.player(),
@@ -3208,9 +3222,57 @@ void MainWindow::forceX11Focus()
 }
 #endif
 
+void MainWindow::reconcileSelectionSource()
+{
+  bool const wanted = cfg.preferences.enableScanPopupHotkey &&
+    scanPopupCaptureSupported( kHaveWaylandDataControl, QGuiApplication::platformName() );
+  if( !wanted )
+  {
+    if( selectionSource )
+    {
+      ++scanPopupRequestId;
+      selectionSource->stop();
+      selectionSource.reset();
+    }
+    refreshHotkeyStatus();
+    return;
+  }
+  if( selectionSource ) { refreshHotkeyStatus(); return; }
+  selectionSource = std::make_unique<WaylandSelectionSource>(this);
+  connect( selectionSource.get(), &WaylandSelectionSource::stateChanged,
+           this, [this]( WaylandSelectionSource::State, QString const & ) { refreshHotkeyStatus(); } );
+  connect( selectionSource.get(), &WaylandSelectionSource::capabilityChanged,
+           this, &MainWindow::refreshHotkeyStatus );
+  connect( selectionSource.get(), &WaylandSelectionSource::captureFinished,
+           this, [this]( quint64 requestId, QString const & selection, qint64 capturedAt ) {
+    if( shuttingDown || requestId != scanPopupRequestId || !scanPopup ) return;
+    QString const text = WaylandSelection::chooseText(
+        capturedAt > 0 ? selection : QString(), capturedAt,
+        QApplication::clipboard()->text( QClipboard::Clipboard ), clipboardChangedAt );
+    if( !scanPopup->translateSelectedText( text ) )
+      reportNothingToTranslate();
+  } );
+  refreshHotkeyStatus();
+  QPointer< WaylandSelectionSource > const source( selectionSource.get() );
+  QTimer::singleShot( 0, this, [this, source] {
+    if( shuttingDown || !source || source.data() != selectionSource.get() ) return;
+    source->start();
+  } );
+}
+void MainWindow::reportNothingToTranslate()
+{
+  gdDebug( "selection-empty" );
+  QString const message = tr( "No selected text or clipboard text to translate" );
+  if( isVisible() )
+    mainStatusBar->showMessage( message, 3000 );
+  else if( trayIcon )
+    trayIcon->showMessage( tr( "GoldenDict" ), message, QSystemTrayIcon::Information, 3000 );
+}
+
 void MainWindow::installHotKeys( HotkeyInstallIntent intent )
 {
   if( shuttingDown ) return;
+  reconcileSelectionSource();
   auto const platform = QGuiApplication::platformName();
   bool const portal = platform.startsWith( QLatin1String( "wayland" ) );
   QVector<HotkeyBinding> desired;
@@ -3228,6 +3290,9 @@ void MainWindow::installHotKeys( HotkeyInstallIntent intent )
   };
   add( cfg.preferences.enableMainWindowHotkey, "main-window", tr( "Show or hide the main window" ), cfg.preferences.mainWindowHotkey );
   add( cfg.preferences.enableClipboardHotkey, "clipboard-lookup", tr( "Translate clipboard text" ), cfg.preferences.clipboardHotkey );
+  if( scanPopupBindingPlanned( QGuiApplication::platformName(),
+                               cfg.preferences.enableScanPopupHotkey ) )
+    add( true, "scan-popup", tr( "Translate the selected text" ), cfg.preferences.scanPopupHotkey );
   if( !installGate.shouldBind( hotkeyBackend != nullptr, desired, hotkeyState, intent ) )
   {
     refreshHotkeyStatus();
@@ -3249,6 +3314,19 @@ void MainWindow::installHotKeys( HotkeyInstallIntent intent )
         {
           PlatformWindow::applyActivation( scanPopup.get(), token );
           hotKeyActivated( 1 );
+        }
+        else if( id == "scan-popup" && scanPopup )
+        {
+          scanPopup->winId();
+          PlatformWindow::applyActivation( scanPopup.get(), token );
+          if( selectionSource )
+          {
+            quint64 const requestId = ++scanPopupRequestId;
+            selectionSource->requestCapture( requestId );
+          }
+          else if( !scanPopup->translateSelectedText(
+                     QApplication::clipboard()->text( QClipboard::Clipboard ) ) )
+            reportNothingToTranslate();
         }
       } );
     connect( hotkeyBackend.get(), &HotkeyBackend::bindingsChanged, this,
@@ -3280,9 +3358,16 @@ void MainWindow::installHotKeys( HotkeyInstallIntent intent )
 
 void MainWindow::refreshHotkeyStatus()
 {
+  SelectionStatus selection;
+  if( selectionSource )
+  {
+    selection.state = selectionSource->state();
+    selection.reason = selectionSource->reason();
+    selection.primarySelectionSeen = selectionSource->primarySelectionSeen();
+  }
   if( preferencesDialog )
     preferencesDialog->setHotkeyStatus( QGuiApplication::platformName(), hotkeyState,
-      hotkeyExplanation, reportedHotkeys, hotkeyBackend && hotkeyBackend->isConfigureAvailable() );
+      hotkeyExplanation, reportedHotkeys, hotkeyBackend && hotkeyBackend->isConfigureAvailable(), selection );
 }
 
 void MainWindow::hotKeyActivated( int hk )

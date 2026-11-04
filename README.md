@@ -226,8 +226,11 @@ documented, not silent:
   mode remains the existing escape hatch (its URL-base/port bug is corrected).
 * Portal shortcuts accept one combination. Existing two-key defaults and
   multi-key sequences stay stored and are shown as unavailable until changed.
-  Clipboard-change scanning and explicit lookup remain separate behaviours. Hover
-  translation and X11 focus restoration remain X11-only.
+  Selected-text translation is available through a global shortcut on
+  compositors exposing `ext_data_control_manager_v1`, with clipboard fallback
+  when primary-selection capture is unavailable. Clipboard-change scanning and
+  explicit clipboard lookup remain separate behaviours. Hover translation and
+  X11 focus restoration remain X11-only.
 * Portal dialogs are unparented on Wayland because the portal's `parent_window`
   handle is empty. Activation requests may be declined by the compositor.
 * Print preview and direct print render a frozen PDF snapshot. New printer layout

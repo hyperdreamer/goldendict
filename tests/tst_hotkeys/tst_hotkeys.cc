@@ -40,10 +40,12 @@
 #include <QKeySequence>
 #include <QProcess>
 #include <QProcessEnvironment>
+#include <QRegularExpression>
 #include <QStandardPaths>
 #include <QDBusConnection>
 #include <QDBusConnectionInterface>
 #include <QDBusMessage>
+#include <QScopeGuard>
 #include <QScopedPointer>
 #include <QSet>
 #include <QSignalSpy>
@@ -66,6 +68,7 @@
 #include "keyboardstate.hh"
 #include "platformwindow.hh"
 #include "portalhotkeys.hh"
+#include "waylandselection.hh"
 #include "preferences.hh"
 #include "hotkeyedit.hh"
 #include <QCheckBox>
@@ -388,6 +391,173 @@ bool fakeKey( Display * display, KeySym keySym, bool press )
 }
 #endif
 
+QString selectionSourceText( char const * path )
+{
+  return QString::fromUtf8( readFileBytes( QDir( TestSupport::repositoryRoot() ).filePath( QLatin1String( path ) ) ) );
+}
+QString selectionCompact( QString text )
+{
+  text.remove( QRegularExpression( QStringLiteral( "\\s+" ) ) );
+  return text;
+}
+// Extract a balanced body, ignoring braces in quoted strings and comments.
+// Empty means anchor/opening/closing brace missing; every caller asserts nonempty.
+// The extractor also reads the qmake text these assertions inspect: an anchor that
+// ends with the opening brace opens the body itself, a leading '#' starts a line
+// comment, a backslash escapes the next character, and "/*" is a block comment
+// only when a closing "*/" exists (glob paths such as redist/icons/*.* are not).
+QString selectionBlock( QString const & text, QString const & anchor )
+{
+  qsizetype const at = text.indexOf( anchor );
+  if( at < 0 ) return {};
+  qsizetype const first = anchor.endsWith( '{' ) ? at + anchor.size() - 1
+                                                : text.indexOf( '{', at + anchor.size() );
+  if( first < 0 ) return {};
+  int depth = 0;
+  QChar quote;
+  bool line = false, block = false, escape = false, lineStart = true;
+  for( qsizetype i = first; i < text.size(); ++i )
+  {
+    QChar const c = text[i];
+    QChar const next = i + 1 < text.size() ? text[i+1] : QChar{};
+    if( line ) { if( c == '\n' ) { line = false; lineStart = true; } continue; }
+    if( block ) { if( c == '*' && next == '/' ) { block = false; ++i; } continue; }
+    if( !quote.isNull() )
+    {
+      if( escape ) escape = false;
+      else if( c == '\\' ) escape = true;
+      else if( c == quote ) quote = QChar{};
+      continue;
+    }
+    if( c == '\\' ) { ++i; continue; }
+    if( c == '#' && lineStart ) { line = true; continue; }
+    if( c == '/' && next == '/' ) { line = true; ++i; continue; }
+    if( c == '/' && next == '*' && text.indexOf( QStringLiteral( "*/" ), i + 2 ) >= 0 )
+    { block = true; ++i; continue; }
+    if( c == '"' || c == '\'' ) { quote = c; continue; }
+    if( c == '{' ) { ++depth; lineStart = false; }
+    else if( c == '}' && --depth == 0 ) return text.mid( first + 1, i - first - 1 );
+    else if( c == '\n' ) lineStart = true;
+    else if( c != ' ' && c != '\t' && c != '\r' ) lineStart = false;
+  }
+  return {};
+}
+// Tokenize the C++ fragments under review without changing string contents or
+// token boundaries. Only braces around one simple controlled statement are
+// optional: nested control flow and multi-statement blocks keep their scopes.
+QString selectionCode( QString const & text )
+{
+  QRegularExpression const lexer( R"cpp("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|//[^\n]*|/\*[\s\S]*?\*/|[A-Za-z_][A-Za-z_0-9]*|[0-9]+|::|->|\+\+|--|&&|\|\||==|!=|<=|>=|\+=|-=|<<|>>|\S)cpp" );
+  QStringList tokens;
+  auto matches = lexer.globalMatch( text );
+  while( matches.hasNext() )
+  {
+    QString const token = matches.next().captured();
+    if( !token.startsWith( "//" ) && !token.startsWith( "/*" ) ) tokens.append( token );
+  }
+  for( qsizetype i = 0; i < tokens.size(); ++i )
+  {
+    qsizetype body = i + 1;
+    if( tokens[i] == "if" || tokens[i] == "for" || tokens[i] == "while" )
+    {
+      if( body == tokens.size() || tokens[body] != "(" ) continue;
+      int depth = 0;
+      do
+      {
+        if( tokens[body] == "(" ) ++depth;
+        else if( tokens[body] == ")" ) --depth;
+        ++body;
+      } while( body < tokens.size() && depth > 0 );
+      if( depth != 0 ) continue;
+    }
+    else if( tokens[i] != "else" ) continue;
+    if( body + 2 >= tokens.size() || tokens[body] != "{" ) continue;
+    QString const first = tokens[body + 1];
+    if( first == "if" || first == "for" || first == "while" || first == "switch" || first == "do" ) continue;
+    qsizetype end = body + 1;
+    int parentheses = 0, semicolons = 0;
+    for( ; end < tokens.size() && tokens[end] != "{" && tokens[end] != "}"; ++end )
+    {
+      if( tokens[end] == "(" ) ++parentheses;
+      else if( tokens[end] == ")" ) --parentheses;
+      else if( tokens[end] == ";" && parentheses == 0 ) ++semicolons;
+    }
+    if( end < tokens.size() && tokens[end] == "}" && tokens[end - 1] == ";" &&
+        parentheses == 0 && semicolons == 1 )
+    {
+      tokens.removeAt( end );
+      tokens.removeAt( body );
+    }
+  }
+  return tokens.join( ' ' );
+}
+// Unlike selectionBlock(), this requires the body to start immediately after
+// the condition and also handles an unbraced action such as EINTR's continue.
+QString selectionBranch( QString text, QString condition )
+{
+  text = selectionCode( text );
+  condition = selectionCode( condition );
+  qsizetype const at = text.indexOf( condition );
+  if( at < 0 ) return {};
+  qsizetype first = at + condition.size();
+  while( first < text.size() && text[first].isSpace() ) ++first;
+  if( first == text.size() ) return {};
+  if( text[first] == '{' ) return selectionBlock( text.mid( first ), "{" );
+  qsizetype const end = text.indexOf( ';', first );
+  if( end < 0 ) return {};
+  QString const action = text.mid( first, end - first + 1 );
+  if( action.contains( '{' ) || action.contains( '}' ) ) return {};
+  return action;
+}
+bool selectionOrdered( QString const & text, QStringList const & needles )
+{
+  qsizetype previous = -1;
+  for( QString const & needle : needles )
+  {
+    previous = text.indexOf( needle, previous + 1 );
+    if( previous < 0 ) return false;
+  }
+  return true;
+}
+
+/// Adds, replaces or removes one <preferences> child in the suite's installed
+/// isolated fixture. Only the copy Config::load() reads is edited: the
+/// repository fixtures stay exactly as committed, so a case can inspect the
+/// effect of one stored value without inventing a second fixture. Returns false
+/// when the document cannot be read, has no <preferences> element, or cannot be
+/// written back completely.
+bool selectionAmendPreference( QString const & name, QString const & value, bool present = true )
+{
+  QString const path = Config::getConfigFileName();
+  QDomDocument document;
+
+  if( !document.setContent( readFileBytes( path ) ) )
+    return false;
+
+  auto preferences = document.documentElement().firstChildElement( "preferences" );
+
+  if( preferences.isNull() )
+    return false;
+
+  while( !preferences.firstChildElement( name ).isNull() )
+    preferences.removeChild( preferences.firstChildElement( name ) );
+
+  if( present )
+  {
+    auto element = document.createElement( name );
+    element.appendChild( document.createTextNode( value ) );
+    preferences.appendChild( element );
+  }
+
+  QFile output( path );
+
+  if( !output.open( QIODevice::WriteOnly | QIODevice::Truncate ) )
+    return false;
+
+  auto const bytes = document.toByteArray();
+  return output.write( bytes ) == bytes.size();
+}
+
 } // namespace
 
 class TstHotkeys : public QObject
@@ -469,6 +639,34 @@ private slots:
   void preferencesReportHotkeyCapabilities();
   void preferencesExplainRendererParity();
   void preferencesKeepAudioVariant();
+
+  // Shared portal binding contracts published for the selected-text action.
+  void scanPopupBindingIsPortalOnly();
+  void portalIdPredicateAcceptsThreeIds();
+  void threeBindingsStayBound();
+  void capabilityConstantMatchesBuild();
+  void scanPopupSourceLoopContractIsPinned();
+
+  // Opt-in selected-text shortcut preference (§5).
+  void defaultScanPopupHotkeyIsBindable();
+  void scanPopupPortalBindingSurvivesSaveLoad();
+  void scanPopupHotkeyKeepsVerbatimText();
+  void legacyConfigDefaultsScanPopupHotkeyOff();
+  void scanPopupConfigBooleanValues();
+
+  // Selection ownership and portal activation wiring (§4.3-§4.6).
+  void sourceFollowsThePreference();
+  void scanPopupActivationWiringIsPinned();
+  void xcbGuardDoesNotCreateThePopup();
+
+  // The third Hotkeys row and its selection snapshots (§4.7).
+  void selectionStatusRowRendersSnapshots_data();
+  void selectionStatusRowRendersSnapshots();
+  void scanPopupRowPlatformMatrix_data();
+  void scanPopupRowPlatformMatrix();
+  void scanPopupRowWaylandValuesAndEdits();
+  void scanPopupRowWaylandProbe();
+  void scanPopupRowBaseStatuses();
 
 private slots:
   void wireBarrier( uint marker ) { seenMarker = marker; }
@@ -2839,6 +3037,798 @@ void TstHotkeys::preferencesKeepAudioVariant()
   QVERIFY( external->isChecked() );
   QCOMPARE( dialog.getPreferences().internalPlayerBackend.uiName(), QStringLiteral( "Legacy custom backend" ) );
 #endif
+}
+
+void TstHotkeys::scanPopupBindingIsPortalOnly()
+{
+  for( QString const & platform : QStringList{ "xcb", "wayland", "wayland-egl", "offscreen", "windows", "cocoa" } )
+  {
+    bool const wayland = platform == "wayland" || platform == "wayland-egl";
+    for( bool enabled : { false, true } )
+      QCOMPARE( scanPopupBindingPlanned( platform, enabled ), enabled && wayland );
+    for( bool build : { false, true } )
+      QCOMPARE( scanPopupCaptureSupported( build, platform ), build && wayland );
+  }
+}
+void TstHotkeys::portalIdPredicateAcceptsThreeIds()
+{
+  for( QString const & id : QStringList{ "main-window", "clipboard-lookup", "scan-popup" } )
+    QVERIFY( isKnownPortalBindingId( id ) );
+  QVERIFY( !isKnownPortalBindingId( {} ) ); QVERIFY( !isKnownPortalBindingId( "foreign-action" ) );
+  qInfo( "source assertions: shared portal ID predicate and call sites" );
+  QString const header = selectionSourceText( "hotkeybackend.hh" );
+  QString const config = selectionSourceText( "config.cc" );
+  QString const portal = selectionSourceText( "portalhotkeys.cc" );
+  QVERIFY( !header.isEmpty() && !config.isEmpty() && !portal.isEmpty() );
+  QCOMPARE( header.count( "inline bool isKnownPortalBindingId(" ), 1 );
+  QString const predicate = selectionBlock( header, "inline bool isKnownPortalBindingId(" );
+  for( QString const & id : QStringList{ "main-window", "clipboard-lookup", "scan-popup" } )
+    QVERIFY2( predicate.contains( '"' + id + '"' ), qPrintable( "source assertion: missing ID " + id ) );
+  QRegularExpression const definition( "\\bbool\\s+(?:isKnownPortalBindingId|knownBindingId)\\s*\\(" );
+  QVERIFY2( !definition.match( config ).hasMatch(), "source assertion: config retains a predicate definition" );
+  QVERIFY2( !definition.match( portal ).hasMatch(), "source assertion: portal retains a predicate definition" );
+  QVERIFY( selectionBlock( config, "loadPortalBindings(" ).contains( "isKnownPortalBindingId( id )" ) );
+  QVERIFY( selectionBlock( config, "void save( Class const & c )" ).contains( "isKnownPortalBindingId( display.id )" ) );
+  QString const generation = selectionBlock( portal, "void PortalBackend::beginGeneration(" );
+  QVERIFY( !generation.isEmpty() );
+  QVERIFY( selectionCompact( generation ).contains( "isKnownPortalBindingId(binding.id)" ) );
+  QVERIFY( !generation.contains( "knownBindingId(" ) );
+}
+void TstHotkeys::threeBindingsStayBound()
+{
+  using State = HotkeyBackend::State;
+  QStringList const all{ "main-window", "clipboard-lookup", "scan-popup" };
+  QVector<HotkeyBinding> const desired{
+    { "main-window", "Main", "CTRL+ALT+g" },
+    { "clipboard-lookup", "Clipboard", "CTRL+ALT+h" },
+    { "scan-popup", "Translate the selected text", "CTRL+LOGO+d" }
+  };
+  for( QStringList const & returned : QList<QStringList>{ all, { "main-window", "scan-popup" } } )
+  {
+    TestSupport::PrivateSessionBus bus; QString reason;
+    QVERIFY2( bus.start( &reason ), qPrintable( reason ) );
+    TestSupport::FakePortal portal;
+    QVERIFY2( portal.start( bus.fixtureConnection(), 2 ), qPrintable( portal.errorString() ) );
+    portal.setListShortcuts( {} );
+    portal.setBoundIds( returned );
+    QVector<PortalBindingDisplay> reported;
+    PortalBackend backend( bus.connection() );
+    QSignalSpy states( &backend, &HotkeyBackend::stateChanged );
+    connect( &backend, &HotkeyBackend::bindingsChanged, this,
+             [&]( QVector<PortalBindingDisplay> const & value ) { reported = value; } );
+    backend.bind( desired );
+    State const expected = returned.size() == 3 ? State::Bound : State::Partial;
+    QVERIFY2( QTest::qWaitFor( [&] { return backend.state() == expected; }, 1500 ), "three-ID portal bind did not settle" );
+    for( auto const & event : states ) QVERIFY( qvariant_cast<State>( event[0] ) != State::Unavailable );
+    int requests = 0;
+    for( auto const & call : portal.calls() ) if( call.member == "BindShortcuts" )
+    {
+      ++requests; QCOMPARE( call.shortcutIds, all );
+      QSet<QString> unique; for( auto const & id : call.shortcutIds ) unique.insert( id );
+      QCOMPARE( unique.size(), 3 );
+      QCOMPARE( call.shortcuts.size(), 3 );
+      for( int i = 0; i != 3; ++i )
+        QCOMPARE( call.shortcuts[i].properties.value( "preferred_trigger" ).toString(), desired[i].sequence );
+    }
+    QCOMPARE( requests, 1 ); QVERIFY( portal.protocolViolations().isEmpty() );
+    QStringList reportedIds; for( auto const & entry : reported ) reportedIds.append( entry.id );
+    QStringList sortedReturned = returned; reportedIds.sort(); sortedReturned.sort();
+    QCOMPARE( reportedIds, sortedReturned );
+  }
+}
+
+void TstHotkeys::capabilityConstantMatchesBuild()
+{
+#ifdef HAVE_WAYLAND_DATA_CONTROL
+  QCOMPARE( kHaveWaylandDataControl, true );
+#else
+  QCOMPARE( kHaveWaylandDataControl, false );
+#endif
+  qInfo( "source assertions: nested qmake optional-feature scopes" );
+  for( char const * file : { "goldendict.pro", "tests/testsupport.pri" } )
+  {
+    QString const project = selectionSourceText( file ); QVERIFY( !project.isEmpty() );
+    QString const unixScope = selectionBlock( project, "unix:!mac {" ); QVERIFY( !unixScope.isEmpty() );
+    QString const probe = selectionBlock( unixScope, "packagesExist(wayland-client)" ); QVERIFY( !probe.isEmpty() );
+    QVERIFY2( probe.contains( "DEFINES += HAVE_WAYLAND_DATA_CONTROL" ), file );
+    if( QString::fromLatin1( file ) == "goldendict.pro" )
+    {
+      QVERIFY( probe.contains( "PKGCONFIG += wayland-client" ) );
+      QVERIFY( probe.contains( "INCLUDEPATH += $$PWD/protocols/ext-data-control-v1" ) );
+      QVERIFY( probe.contains( "SOURCES += $$PWD/protocols/ext-data-control-v1/ext-data-control-v1-protocol.c" ) );
+    }
+    else QVERIFY( !project.contains( "PKGCONFIG += wayland-client" ) );
+  }
+  QString const hotkeys = selectionSourceText( "tests/tst_hotkeys/tst_hotkeys.pro" );
+  QVERIFY( !hotkeys.contains( "$$GD_REPO_ROOT/waylandselection.cc" ) );
+  QVERIFY( !hotkeys.contains( "HEADERS += $$GD_REPO_ROOT/waylandselection.hh" ) );
+}
+void TstHotkeys::scanPopupSourceLoopContractIsPinned()
+{
+  qInfo( "source assertions: protocol loop/teardown contracts; no syscall or compositor observation" );
+  QString const source = selectionSourceText( "waylandselection.cc" ); QVERIFY( !source.isEmpty() );
+  auto method = [&]( QString const & name ) { return selectionBlock( source, name ); };
+  QString const codeSource = selectionCode( source );
+  auto codeMethod = [&]( QString const & name ) { return selectionBlock( codeSource, selectionCode( name ) ); };
+  auto sameAction = []( QString const & actual, QString const & expected ) {
+    return selectionCode( actual ) == selectionCode( expected );
+  };
+  auto before = []( QString const & text, QString const & anchor ) {
+    QString const code = selectionCode( text );
+    qsizetype const at = code.indexOf( selectionCode( anchor ) );
+    return at < 0 ? QString() : code.left( at );
+  };
+  auto from = []( QString const & text, QString const & anchor, bool last = false ) {
+    QString const code = selectionCode( text );
+    QString const needle = selectionCode( anchor );
+    qsizetype const at = last ? code.lastIndexOf( needle ) : code.indexOf( needle );
+    return at < 0 ? QString() : code.mid( at );
+  };
+  auto orderedAction = []( QString const & text, QStringList needles ) {
+    for( QString & needle : needles ) needle = selectionCode( needle );
+    return selectionOrdered( selectionCode( text ), needles );
+  };
+  QString const start = method( "void start()" );
+  QVERIFY( !start.isEmpty() );
+  QVERIFY( selectionOrdered( start, { "if( started || ownerStopped ) return", "started = true", "wl_display_connect( nullptr )",
+                                      "wl_display_get_registry", "wl_registry_add_listener", "wl_display_sync", "wl_callback_add_listener", "flushRequests()" } ) );
+  QVERIFY( start.contains( "fail( \"cannot get Wayland registry\" ); return" ) );
+  QVERIFY( start.contains( "fail( \"cannot create Wayland sync callback\" ); return" ) );
+  QString const done = method( "static void discoveryDone(" );
+  QVERIFY( selectionOrdered( done, { "wl_callback_destroy", "discoveryComplete = true", "if( !self->manager )", "no ext_data_control_manager_v1", "maybeAvailable()" } ) );
+  QString const removed = method( "static void registryGlobalRemoved(" );
+  QVERIFY( selectionOrdered( removed, { "name == self->managerName", "manager removed", "name != self->seatNameId", "retirePrimary()",
+                                        "destroyDeviceAndSeat()", "seats.isEmpty()", "seat removed", "bindSeat" } ) );
+  QString const primary = method( "static void primarySelection(" );
+  QVERIFY( selectionOrdered( primary, { "receivedAt = Monotonic::nowMs()", "primary-selection-seen=1", "retirePrimary()", "pendingOffer", "takeForPrimary()", "offerStamp = receivedAt", "flushRequests()" } ) );
+  QString const clipboard = method( "static void selection(" );
+  QVERIFY( selectionOrdered( clipboard, { "pendingOffer", "discardForClipboard()", "destroyOffer", "flushRequests()" } ) );
+  QVERIFY( !clipboard.contains( "receive(" ) && !clipboard.contains( "cache =" ) );
+  QString const promote = method( "void promote()" );
+  QCOMPARE( source.count( "transferStartedAt = Monotonic::nowMs()" ), 1 );
+  QVERIFY( selectionOrdered( promote, { "if( !transferStartedAt )", "transferStartedAt = Monotonic::nowMs()", "TransferTimeoutMs", "startMimeAttempt()" } ) );
+  QString const attempt = method( "bool startMimeAttempt()" );
+  QVERIFY( selectionOrdered( attempt, { "beginMimeAttempt()", "pipe2( fds, O_CLOEXEC )", "fcntl( fds[0], F_GETFL )",
+                                        "fcntl( fds[0], F_SETFL, oldFlags | O_NONBLOCK )", "beginRead()", "ext_data_control_offer_v1_receive", "close( fds[1] )", "flushRequests()" } ) );
+  QVERIFY( !attempt.contains( "O_CLOEXEC | O_NONBLOCK" ) );
+  QVERIFY( !attempt.contains( "fcntl( fds[1]" ) );
+  QVERIFY( !attempt.contains( "transferStartedAt =" ) );
+  QString const drain = codeMethod( "void drainPipe(" );
+  QVERIFY( orderedAction( drain, { "offersState.accepts( token )", "checkTransferDeadline( token )", "char buffer[16384]",
+                                  "MaxPayloadBytes + 1 - bytesObserved", "::read(", "if( count > 0 )", "bytesObserved == MaxPayloadBytes + 1", "if( count == 0 )" } ) );
+  QString const drainLoop = selectionBranch( drain, "for( ;; )" );
+  QVERIFY2( sameAction( selectionBranch( drainLoop, "if( errno == EINTR )" ), "continue;" ),
+            "pipe EINTR must retry the read loop without returning or rearming the notifier" );
+  QVERIFY2( sameAction( selectionBranch( drainLoop, "if( errno == EAGAIN || errno == EWOULDBLOCK )" ),
+                        "checkTransferDeadline( token ); if( offersState.accepts( token ) ) pipeRead->setEnabled( true ); return;" ),
+            "pipe EAGAIN must check the deadline, rearm only for the accepted token, and return" );
+  QVERIFY2( sameAction( drainLoop,
+                        "checkTransferDeadline( token ); if( !offersState.accepts( token ) ) return;"
+                        "char buffer[16384]; int const remaining = MaxPayloadBytes + 1 - bytesObserved;"
+                        "ssize_t const count = ::read( readEnd, buffer, std::min<int>( sizeof buffer, remaining ) );"
+                        "if( count > 0 ) { payload.append( QByteArray( buffer, count ) );"
+                        "bytesObserved += int( count ); lastProgressAt = Monotonic::nowMs();"
+                        "if( bytesObserved == MaxPayloadBytes + 1 ) { complete( token ); return; } continue; }"
+                        "if( count == 0 ) { complete( token ); return; }"
+                        "if( errno == EINTR ) continue;"
+                        "if( errno == EAGAIN || errno == EWOULDBLOCK ) { checkTransferDeadline( token );"
+                        "if( offersState.accepts( token ) ) pipeRead->setEnabled( true ); return; }"
+                        "int const error = errno; gdDebug( \"selection-transfer-error operation=read errno=%d\", error );"
+                        "if( bytesObserved == 0 ) { offersState.mimeAttemptFailed(); closeRead(); startMimeAttempt(); }"
+                        "else dropCapture( false ); return;" ),
+            "pipe read loop must reach each result branch without intervening returns or notifier state changes" );
+  QString const readFailure = selectionBranch( drain, "if( bytesObserved == 0 )" );
+  QVERIFY( orderedAction( readFailure, { "offersState.mimeAttemptFailed()", "closeRead()", "startMimeAttempt()" } ) );
+  QVERIFY( selectionCompact( selectionCode( drain ) ).contains( "elsedropCapture(false);" ) );
+  QString const timeout = codeMethod( "void checkTransferDeadline(" );
+  QVERIFY2( sameAction( before( timeout, "if( ownerStopped )" ), "assertThread();" ) &&
+              sameAction( selectionBranch( timeout, "if( ownerStopped )" ), "return;" ),
+            "deadline owner-stopped path must return silently before token checks" );
+  QString const rejectedDeadline = selectionBranch( timeout, "if( !offersState.accepts( token ) )" );
+  QVERIFY2( sameAction( rejectedDeadline, "gdDebug( \"selection-ignored reason=stale-token\" ); return;" ) &&
+              sameAction( before( timeout, "qint64 const now" ),
+                          "assertThread(); if( ownerStopped ) return;"
+                          "if( !offersState.accepts( token ) ) { gdDebug( \"selection-ignored reason=stale-token\" ); return; }" ),
+            "deadline stale-token path must log selection-ignored reason=stale-token and return without state changes" );
+  QVERIFY( orderedAction( timeout, { "if( ownerStopped )", "if( !offersState.accepts( token ) )", "qint64 const now", "now >= transferDeadline", "now >= lastProgressAt + IdleTimeoutMs", "bytesObserved == 0", "mimeAttemptFailed()", "startMimeAttempt()" } ) );
+  QString const success = method( "void complete(" );
+  QVERIFY( selectionOrdered( success, { "offersState.accepts( token )", "checkTransferDeadline( token )", "offersState.accepts( token )", "cache = decodePayload", "cacheStamp =", "offersState.completed( token )", "closeRead()", "destroyOffer", "flushRequests()", "expireInterest()", "answerInterest" } ) );
+  QString const retire = method( "void retirePrimary()" );
+  QVERIFY( selectionOrdered( retire, { "offersState.retire()", "debounce.stop()", "closeRead()", "destroyOffer" } ) );
+  // These branches cannot be forced by the live compositor harness. Compare
+  // normalized complete actions, including their returns and ordering, so an
+  // unreachable or differently guarded token cannot satisfy the contract.
+  QString const rearmRead = "if( flushRequests() && live() ) displayRead->setEnabled( true );";
+  QString const readable = codeMethod( "void dispatchDisplayReadable()" );
+  QString const prepareFailure = selectionBranch( readable, "if( wl_display_prepare_read( c->display ) != 0 )" );
+  QVERIFY2( sameAction( prepareFailure,
+                        "if( wl_display_get_error( c->display ) ) { fail( \"Wayland display error\" ); return; }"
+                        "if( !dispatchPending( c, generation ) ) return;" + rearmRead + "return;" ),
+            "prepare-read failure must fail on display error or dispatch once, flush/rearm only while live, and return without reading" );
+  QString const pollNotReady = selectionBranch( readable, "if( ::poll( &ready, 1, 0 ) <= 0 || !( ready.revents & ( POLLIN | POLLHUP | POLLERR ) ) )" );
+  QVERIFY2( sameAction( pollNotReady, "wl_display_cancel_read( c->display ); c->prepared = false;" + rearmRead + "return;" ),
+            "poll-not-ready path must cancel the prepared read, clear prepared, flush/rearm only while live, and return without reading" );
+  QVERIFY2( sameAction( before( readable, "if( wl_display_prepare_read" ),
+                        "assertThread(); if( !live() ) return; auto const c = connection;"
+                        "quint64 const generation = c->generation; displayRead->setEnabled( false );" ),
+            "readable path must guard liveness and disable the reader before preparing" );
+  QVERIFY2( sameAction( before( from( readable, "c->prepared = true" ), "if( ::poll(" ),
+                        "c->prepared = true; pollfd ready{ c->fd, POLLIN, 0 };" ),
+            "successful prepare must mark the read prepared and poll without an intervening return" );
+  QString const consumed = from( readable, "++c->dispatchDepth" );
+  QVERIFY( !consumed.isEmpty() );
+  QVERIFY2( sameAction( before( consumed, "if( c->retired" ),
+                        "++c->dispatchDepth; int const result = wl_display_read_events( c->display );"
+                        "--c->dispatchDepth; c->prepared = false;" ),
+            "read-events must consume the prepared read and clear prepared without canceling it" );
+  QVERIFY2( sameAction( selectionBranch( consumed, "if( c->retired || c->generation != generation )" ),
+                        "c->destroyConnection(); return;" ),
+            "consumed-read retirement must destroy the connection and return before further dispatch" );
+  QVERIFY2( sameAction( selectionBranch( consumed, "if( result < 0 || wl_display_get_error( c->display ) )" ),
+                        "fail( \"Wayland display error\" ); return;" ),
+            "consumed-read error must fail and return without canceling or dispatching" );
+  QVERIFY2( sameAction( from( consumed, "if( !dispatchPending" ),
+                        "if( !dispatchPending( c, generation ) ) return;" + rearmRead ),
+            "consumed-read success must stop on dispatch failure and flush/rearm only while live without canceling" );
+  QVERIFY2( sameAction( consumed,
+                        "++c->dispatchDepth; int const result = wl_display_read_events( c->display );"
+                        "--c->dispatchDepth; c->prepared = false;"
+                        "if( c->retired || c->generation != generation ) { c->destroyConnection(); return; }"
+                        "if( result < 0 || wl_display_get_error( c->display ) ) { fail( \"Wayland display error\" ); return; }"
+                        "if( !dispatchPending( c, generation ) ) return;" + rearmRead ),
+            "consumed-read paths must remain contiguous without extra cancellation, state changes, or early returns" );
+  QVERIFY2( sameAction( readable,
+                        "assertThread(); if( !live() ) return; auto const c = connection;"
+                        "quint64 const generation = c->generation; displayRead->setEnabled( false );"
+                        "if( wl_display_prepare_read( c->display ) != 0 ) {" + prepareFailure + "}"
+                        "c->prepared = true; pollfd ready{ c->fd, POLLIN, 0 };"
+                        "if( ::poll( &ready, 1, 0 ) <= 0 || !( ready.revents & ( POLLIN | POLLHUP | POLLERR ) ) ) {" + pollNotReady + "}" + consumed ),
+            "readable branches must remain contiguous without bypassing prepare, cancel, or read consumption" );
+  QString const dispatch = codeMethod( "bool dispatchPending(" );
+  QVERIFY2( sameAction( before( dispatch, "if( c->retired" ),
+                        "++c->dispatchDepth; int const result = wl_display_dispatch_pending( c->display ); --c->dispatchDepth;" ),
+            "pending dispatch must unwind dispatch depth before checking retirement" );
+  QVERIFY2( sameAction( selectionBranch( dispatch, "if( c->retired || c->generation != generation )" ),
+                        "c->destroyConnection(); return false;" ),
+            "pending-dispatch retirement must destroy the connection and return false" );
+  QVERIFY2( sameAction( from( dispatch, "if( wl_display_get_error" ),
+                        "if( wl_display_get_error( c->display ) ) { fail( \"Wayland display error\" ); return false; }"
+                        "if( result < 0 ) return flushRequests(); return true;" ),
+            "pending-dispatch error must fail, a negative result must return the flush result, and success must return true" );
+  QVERIFY2( sameAction( dispatch,
+                        "++c->dispatchDepth; int const result = wl_display_dispatch_pending( c->display ); --c->dispatchDepth;"
+                        "if( c->retired || c->generation != generation ) { c->destroyConnection(); return false; }"
+                        "if( wl_display_get_error( c->display ) ) { fail( \"Wayland display error\" ); return false; }"
+                        "if( result < 0 ) return flushRequests(); return true;" ),
+            "pending-dispatch branches must remain contiguous without extra dispatch or early returns" );
+  QString const flush = codeMethod( "bool flushRequests()" );
+  QVERIFY2( sameAction( before( flush, "for( ;; )" ), "assertThread(); if( !live() ) return false;" ),
+            "flush must return false while not live before accessing the connection" );
+  QString const flushLoop = selectionBranch( flush, "for( ;; )" );
+  QVERIFY2( sameAction( before( flushLoop, "if( result >= 0 )" ),
+                        "if( wl_display_get_error( connection->display ) ) { fail( \"Wayland display error\" ); return false; }"
+                        "int const result = wl_display_flush( connection->display );"
+                        "if( wl_display_get_error( connection->display ) ) { fail( \"Wayland display error\" ); return false; }" ),
+            "flush must check display errors before and after each attempt without changing writer arming" );
+  QVERIFY2( sameAction( selectionBranch( flushLoop, "if( result >= 0 )" ), "displayWrite->setEnabled( false ); return true;" ),
+            "successful flush must disarm the writer and return true" );
+  QVERIFY2( sameAction( selectionBranch( flushLoop, "if( errno == EINTR )" ), "continue;" ),
+            "flush EINTR must retry the flush loop without disarming an armed writer" );
+  QVERIFY2( sameAction( selectionBranch( flushLoop, "if( errno == EAGAIN )" ), "displayWrite->setEnabled( true ); return true;" ),
+            "flush EAGAIN must arm the writer and return true" );
+  QVERIFY2( sameAction( from( flushLoop, "fail(", true ), "fail( \"Wayland display error\" ); return false;" ),
+            "unrecoverable flush error must fail and return false" );
+  QVERIFY2( sameAction( flushLoop,
+                        "if( wl_display_get_error( connection->display ) ) { fail( \"Wayland display error\" ); return false; }"
+                        "int const result = wl_display_flush( connection->display );"
+                        "if( wl_display_get_error( connection->display ) ) { fail( \"Wayland display error\" ); return false; }"
+                        "if( result >= 0 ) { displayWrite->setEnabled( false ); return true; }"
+                        "if( errno == EINTR ) continue;"
+                        "if( errno == EAGAIN ) { displayWrite->setEnabled( true ); return true; }"
+                        "fail( \"Wayland display error\" ); return false;" ),
+            "flush loop must reach each result branch without intervening returns or writer state changes" );
+  QString const writable = codeMethod( "void dispatchDisplayWritable()" );
+  QVERIFY2( sameAction( writable, "assertThread(); if( ownerStopped || !connection || connection->retired ) return; flushRequests();" ),
+            "writable callback must return after stop or retirement and otherwise retry the flush" );
+  QString const dispose = method( "void dispose()" );
+  QVERIFY( selectionOrdered( dispose, { "c->retired = true", "++c->generation", "offersState.retire()", "debounce.stop()", "activation.stop()",
+                                       "closeRead()", "displayRead.reset()", "displayWrite.reset()", "destroyProtocol()", "if( c->dispatchDepth == 0 )", "c->destroyConnection()", "[c]" } ) );
+  QVERIFY( !dispose.contains( "[this" ) );
+  QVERIFY( selectionOrdered( dispose, { "destroyProtocol()", "terminalNotificationPending = false", "publishState()", "captureFinished( id, QString(), 0 )", "if( c->dispatchDepth == 0 )", "c->destroyConnection()" } ) );
+  QString const destroy = method( "void destroyConnection()" );
+  QVERIFY( selectionOrdered( destroy, { "if( destroyed_ ) return", "Q_ASSERT( dispatchDepth == 0 )", "destroyed_ = true", "if( prepared )", "wl_display_cancel_read", "wl_display_flush", "wl_display_disconnect", "display = nullptr" } ) );
+  QVERIFY( source.contains( "std::shared_ptr<Connection> connection" ) );
+  QVERIFY( method( "~Connection()" ).contains( "destroyConnection()" ) );
+  QVERIFY( method( "void stop()" ).contains( "ownerStopped = true" ) );
+  QVERIFY( selectionOrdered( method( "void stop()" ), { "ownerStopped = true", "dispose()" } ) );
+  QVERIFY( method( "void fail(" ).contains( "dispose()" ) );
+  QVERIFY( method( "WaylandSelectionSource::~WaylandSelectionSource()" ).contains( "stop()" ) );
+  for( QString const & callback : QStringList{ "registryGlobal", "registryGlobalRemoved", "discoveryDone", "dataOffer", "offeredMime", "selection", "primarySelection", "deviceFinished", "seatCapabilities", "seatName" } )
+  {
+    QString const b = method( "static void " + callback + "(" ); QVERIFY2( !b.isEmpty(), qPrintable( callback ) );
+    QVERIFY2( !b.contains( "wl_display_disconnect" ), qPrintable( "source assertion: listener disconnects: " + callback ) );
+    QVERIFY2( !QRegularExpression( "\\bdelete\\b|\\.reset\\s*\\(|destroyConnection\\s*\\(|deleteLater\\s*\\(" ).match( b ).hasMatch(), qPrintable( "source assertion: listener performs physical/owner teardown: " + callback ) );
+  }
+  QString const request = method( "void requestCapture( quint64 id )" );
+  QString const overlap = selectionBlock( request, "if( superseded )" ); QVERIFY( !overlap.isEmpty() );
+  QVERIFY( !overlap.contains( "beginRead" ) && !overlap.contains( "activeToken" ) && !overlap.contains( "retirePrimary" ) );
+  QVERIFY( selectionOrdered( request, { "interestedId = id", "armActivation()", "if( superseded )", "captureFinished( superseded", "if( ownerStopped || interestedId != id ) return" } ) );
+  QVERIFY( !source.contains( "wl_display_roundtrip" ) );
+  QVERIFY( !source.contains( "nativeInterface" ) && !source.contains( "PlatformWindow::x11Display" ) );
+  QVERIFY( !source.contains( "create_data_source(" ) && !source.contains( "set_primary_selection(" ) && !source.contains( "set_selection(" ) );
+}
+
+// ---------------------------------------------------------------------------
+// Opt-in selected-text shortcut preference (§5)
+// ---------------------------------------------------------------------------
+
+// The default the specification names: one Ctrl+Meta+D combination, off by
+// default, bindable as a portal shortcut and stored as its PortableText.
+void TstHotkeys::defaultScanPopupHotkeyIsBindable()
+{
+  Config::Class cfg;
+  auto const & p = cfg.preferences;
+
+  QVERIFY( !p.enableScanPopupHotkey );
+  QCOMPARE( p.scanPopupHotkey.key1, int( Qt::Key_D ) );
+  QCOMPARE( p.scanPopupHotkey.key2, 0 );
+  QCOMPARE( p.scanPopupHotkey.modifiers,
+            Qt::KeyboardModifiers( Qt::ControlModifier | Qt::MetaModifier ) );
+  QCOMPARE( p.scanPopupHotkey.toKeySequence().count(), 1 );
+  QCOMPARE( p.scanPopupHotkey.toKeySequence().toString( QKeySequence::PortableText ),
+            QString( "Meta+Ctrl+D" ) );
+
+  QString trigger, reason;
+  QVERIFY2( HotkeySyntax::preferredTrigger( p.scanPopupHotkey, &trigger, &reason ),
+            qPrintable( reason ) );
+  QVERIFY( reason.isEmpty() );
+  QCOMPARE( trigger, QString( "CTRL+LOGO+d" ) );
+
+  auto const saved = saveAndRead( cfg );
+  QCOMPARE( saved.documentElement().firstChildElement( "preferences" )
+              .firstChildElement( "scanPopupHotkey" ).text(),
+            QString( "Meta+Ctrl+D" ) );
+}
+
+// The additive <hotkeys>/<portalBindings> section is the only place a portal
+// description is stored, it keeps escaped text, and later duplicates are
+// last-wins. A stored description never turns a foreign ID into a known one.
+void TstHotkeys::scanPopupPortalBindingSurvivesSaveLoad()
+{
+  Config::Class cfg;
+  cfg.hotkeys.portalBindings = { { "main-window", "Main" },
+                                 { "clipboard-lookup", "Clipboard" },
+                                 { "scan-popup", "Portal <selected> & key" },
+                                 { "foreign-action", "Foreign" } };
+
+  QDomDocument saved = saveAndRead( cfg );
+  auto bindings = saved.documentElement().firstChildElement( "hotkeys" )
+                    .firstChildElement( "portalBindings" );
+  auto const nodes = bindings.elementsByTagName( "binding" );
+
+  QCOMPARE( nodes.size(), 3 );
+
+  QSet<QString> ids;
+
+  for( int i = 0; i != nodes.size(); ++i )
+  {
+    auto const e = nodes.at( i ).toElement();
+    ids.insert( e.attribute( "id" ) );
+
+    if( e.attribute( "id" ) == "scan-popup" )
+      QCOMPARE( e.attribute( "triggerDescription" ), QString( "Portal <selected> & key" ) );
+  }
+
+  QCOMPARE( ids, ( QSet<QString>{ "main-window", "clipboard-lookup", "scan-popup" } ) );
+
+  auto loaded = Config::load();
+  int count = 0;
+
+  for( auto const & entry : loaded.hotkeys.portalBindings )
+    if( entry.id == "scan-popup" )
+    {
+      ++count;
+      QCOMPARE( entry.triggerDescription, QString( "Portal <selected> & key" ) );
+    }
+
+  QCOMPARE( count, 1 );
+  QCOMPARE( loaded.preferences.scanPopupHotkey.toKeySequence().toString( QKeySequence::PortableText ),
+            QString( "Meta+Ctrl+D" ) );
+
+  for( auto const & pair : QList<QPair<QString, QString>>{
+         { "scan-popup", "last <description> & value" }, { "foreign-action", "ignored" } } )
+  {
+    auto e = saved.createElement( "binding" );
+    e.setAttribute( "id", pair.first );
+    e.setAttribute( "triggerDescription", pair.second );
+    bindings.appendChild( e );
+  }
+
+  QFile file( Config::getConfigFileName() );
+  QVERIFY( file.open( QIODevice::WriteOnly | QIODevice::Truncate ) );
+  auto bytes = saved.toByteArray();
+  QCOMPARE( file.write( bytes ), bytes.size() );
+  file.close();
+
+  loaded = Config::load();
+  count = 0;
+
+  for( auto const & entry : loaded.hotkeys.portalBindings )
+  {
+    QVERIFY( entry.id != "foreign-action" );
+
+    if( entry.id == "scan-popup" )
+    {
+      ++count;
+      QCOMPARE( entry.triggerDescription, QString( "last <description> & value" ) );
+    }
+  }
+
+  QCOMPARE( count, 1 );
+}
+
+// An untouched stored value is written back exactly as it was read, including
+// text that is not a representable shortcut. Opening the preferences dialog and
+// accepting it unchanged is part of the round trip (SD-15).
+void TstHotkeys::scanPopupHotkeyKeepsVerbatimText()
+{
+  for( QString const & raw : QStringList{ "Ctrl+Meta+D", "Ctrl+G,Ctrl+H,Ctrl+I", "not a shortcut" } )
+  {
+    QVERIFY( !installConfigFixture( "config/legacy.xml" ).isEmpty() );
+    QVERIFY( selectionAmendPreference( "enableScanPopupHotkey", "1" ) );
+    QVERIFY( selectionAmendPreference( "scanPopupHotkey", raw ) );
+
+    auto cfg = Config::load();
+    QCOMPARE( cfg.preferences.scanPopupHotkey.rawText, raw );
+
+    Preferences dialog( nullptr, cfg );
+    dialog.accept();
+    cfg.preferences = dialog.getPreferences();
+
+    auto const saved = saveAndRead( cfg );
+    QCOMPARE( saved.documentElement().firstChildElement( "preferences" )
+                .firstChildElement( "scanPopupHotkey" ).text(),
+              raw );
+    QCOMPARE( Config::load().preferences.scanPopupHotkey.rawText, raw );
+  }
+}
+
+// A configuration written before the preference existed keeps the constructed
+// default: the boolean stays off and the shortcut stays the shipped combination.
+void TstHotkeys::legacyConfigDefaultsScanPopupHotkeyOff()
+{
+  QString const installed = installConfigFixture( "config/legacy.xml" );
+  QVERIFY( !installed.isEmpty() );
+
+  QByteArray const before = readFileBytes( installed );
+  auto cfg = Config::load();
+
+  QCOMPARE( readFileBytes( installed ), before );
+  QVERIFY( !cfg.preferences.enableScanPopupHotkey );
+
+  auto const & key = cfg.preferences.scanPopupHotkey;
+  QCOMPARE( key.key1, int( Qt::Key_D ) );
+  QCOMPARE( key.key2, 0 );
+  QCOMPARE( key.modifiers, Qt::KeyboardModifiers( Qt::ControlModifier | Qt::MetaModifier ) );
+  QCOMPARE( key.toKeySequence().count(), 1 );
+  QCOMPARE( key.toKeySequence().toString( QKeySequence::PortableText ), QString( "Meta+Ctrl+D" ) );
+
+  auto const saved = saveAndRead( cfg );
+  auto const p = saved.documentElement().firstChildElement( "preferences" );
+
+  QCOMPARE( p.firstChildElement( "enableScanPopupHotkey" ).text(), QString( "0" ) );
+  QCOMPARE( p.firstChildElement( "scanPopupHotkey" ).text(), QString( "Meta+Ctrl+D" ) );
+
+  auto const reloaded = Config::load();
+  QVERIFY( !reloaded.preferences.enableScanPopupHotkey );
+  QCOMPARE( reloaded.preferences.scanPopupHotkey.toKeySequence().toString( QKeySequence::PortableText ),
+            QString( "Meta+Ctrl+D" ) );
+}
+
+// Only "1" and "0" set the boolean; every other stored value (including an
+// empty one) leaves the default intact. An explicitly empty shortcut node is an
+// empty shortcut, while a missing node keeps the constructed default.
+void TstHotkeys::scanPopupConfigBooleanValues()
+{
+  QStringList const values{ "1", "0", "", "true", "2", "missing" };
+
+  for( int i = 0; i != values.size(); ++i )
+  {
+    QVERIFY( !installConfigFixture( "config/legacy.xml" ).isEmpty() );
+    QVERIFY( selectionAmendPreference( "enableScanPopupHotkey", values[i], i != 5 ) );
+    QCOMPARE( Config::load().preferences.enableScanPopupHotkey, i == 0 );
+  }
+
+  QVERIFY( selectionAmendPreference( "scanPopupHotkey", "" ) );
+
+  auto const empty = Config::load().preferences.scanPopupHotkey;
+  QVERIFY( empty.toKeySequence().isEmpty() );
+
+  QString trigger, reason;
+  QVERIFY( !HotkeySyntax::preferredTrigger( empty, &trigger, &reason ) );
+
+  QVERIFY( selectionAmendPreference( "scanPopupHotkey", "", false ) );
+  QCOMPARE( Config::load().preferences.scanPopupHotkey.toKeySequence().toString( QKeySequence::PortableText ),
+            QString( "Meta+Ctrl+D" ) );
+}
+
+// The source exists exactly while the preference selects it on a platform that
+// supports capture; recreating the popup or using another dialog never connects
+// a second instance, and every teardown stops before it resets the popup.
+void TstHotkeys::sourceFollowsThePreference()
+{
+  qInfo( "source assertions: source preference/lifetime wiring; no runtime MainWindow observation" );
+  QString const source = selectionSourceText( "mainwindow.cc" );
+  QString const header = selectionSourceText( "mainwindow.hh" );
+  QVERIFY( !source.isEmpty() && !header.isEmpty() );
+  QVERIFY( selectionOrdered( header, { "std::unique_ptr< WaylandSelectionSource > selectionSource", "sptr< ScanPopup > scanPopup", "std::unique_ptr<ArticleProfileController> articleProfile" } ) );
+  QString const reconcile = selectionBlock( source, "void MainWindow::reconcileSelectionSource()" );
+  QVERIFY( !reconcile.isEmpty() );
+  QVERIFY( selectionCompact( reconcile ).contains( "boolconstwanted=cfg.preferences.enableScanPopupHotkey&&scanPopupCaptureSupported(kHaveWaylandDataControl,QGuiApplication::platformName());" ) );
+  QString const disabled = selectionBlock( reconcile, "if( !wanted )" ); QVERIFY( !disabled.isEmpty() );
+  QVERIFY( selectionOrdered( disabled, { "++scanPopupRequestId", "selectionSource->stop()", "selectionSource.reset()", "refreshHotkeyStatus()", "return" } ) );
+  QVERIFY( selectionCompact( reconcile ).contains( "if(selectionSource){refreshHotkeyStatus();return;}" ) );
+  QCOMPARE( reconcile.count( "std::make_unique<WaylandSelectionSource>(this)" ), 1 );
+  QVERIFY( selectionOrdered( reconcile, { "std::make_unique<WaylandSelectionSource>(this)", "&WaylandSelectionSource::stateChanged", "&WaylandSelectionSource::capabilityChanged", "&WaylandSelectionSource::captureFinished", "QPointer< WaylandSelectionSource >", "QTimer::singleShot" } ) );
+  QString const deferred = selectionBlock( reconcile, "QTimer::singleShot" );
+  QVERIFY( selectionCompact( deferred ).contains( "if(shuttingDown||!source||source.data()!=selectionSource.get())return;" ) );
+  QVERIFY( selectionOrdered( deferred, { "if( shuttingDown", "source->start()" } ) );
+  QString const install = selectionBlock( source, "void MainWindow::installHotKeys(" );
+  QVERIFY( selectionOrdered( install, { "if( shuttingDown ) return", "reconcileSelectionSource()", "installGate.shouldBind" } ) );
+  QVERIFY( selectionBlock( source, "MainWindow::MainWindow(" ).contains( "installHotKeys()" ) );
+  QVERIFY( selectionBlock( source, "void MainWindow::editPreferences()" ).contains( "installHotKeys( result == QDialog::Accepted" ) );
+  for( QString const & name : QStringList{ "MainWindow::~MainWindow()", "void MainWindow::quitApp()", "void MainWindow::finishShutdown()", "void MainWindow::failStartup(" } )
+  {
+    QString const b = selectionBlock( source, name ); QVERIFY2( !b.isEmpty(), qPrintable( name ) );
+    QVERIFY2( selectionCompact( b ).contains( "if(selectionSource)selectionSource->stop();scanPopup.reset();" ), qPrintable( "source assertion: missing immediate stop/reset in " + name ) );
+  }
+  QVERIFY( selectionOrdered( selectionBlock( source, "MainWindow::~MainWindow()" ), { "shuttingDown = true", "hotkeyBackend.reset()", "selectionSource->stop()" } ) );
+  QString const failure = selectionBlock( selectionBlock( source, "void MainWindow::failStartup(" ), "connect( dialog" );
+  QVERIFY( failure.contains( "selectionSource->stop()" ) );
+  for( QString const & name : QStringList{ "void MainWindow::makeScanPopup()", "void MainWindow::editDictionaries(", "void MainWindow::editPreferences()", "void MainWindow::on_rescanFiles_triggered()" } )
+  {
+    QString const b = selectionBlock( source, name ); QVERIFY2( !b.isEmpty(), qPrintable( name ) );
+    QVERIFY2( !b.contains( "selectionSource->stop()" ) && !b.contains( "selectionSource.reset()" ), qPrintable( "source assertion: recreation reconnects source in " + name ) );
+  }
+}
+void TstHotkeys::scanPopupActivationWiringIsPinned()
+{
+  qInfo( "source assertions: selected-text activation, snapshot and notification wiring" );
+  QString const source = selectionSourceText( "mainwindow.cc" ); QVERIFY( !source.isEmpty() );
+  QCOMPARE( source.count( "\"scan-popup\"" ), 2 );
+  QString const install = selectionBlock( source, "void MainWindow::installHotKeys(" );
+  QVERIFY2( selectionCompact( install ).contains( "if(scanPopupBindingPlanned(QGuiApplication::platformName(),cfg.preferences.enableScanPopupHotkey))add(true,\"scan-popup\",tr(\"Translatetheselectedtext\"),cfg.preferences.scanPopupHotkey);" ), "source assertion: binding predicate/description/key" );
+  QString const branch = selectionBlock( install, "else if( id == \"scan-popup\" && scanPopup )" );
+  QVERIFY2( !branch.isEmpty(), "source assertion: missing activation branch" );
+  QVERIFY2( selectionOrdered( branch, { "scanPopup->winId()", "PlatformWindow::applyActivation", "if( selectionSource )" } ), "source assertion: native handle/token/source order" );
+  QString const withSource = selectionBlock( branch, "if( selectionSource )" );
+  QVERIFY2( selectionOrdered( withSource, { "quint64 const requestId = ++scanPopupRequestId", "selectionSource->requestCapture( requestId )" } ), "source assertion: guarded incremented request" );
+  QVERIFY2( selectionCompact( branch ).contains( "elseif(!scanPopup->translateSelectedText(QApplication::clipboard()->text(QClipboard::Clipboard)))reportNothingToTranslate();" ), "source assertion: clipboard-only branch" );
+  QCOMPARE( source.count( "requestId != scanPopupRequestId" ), 1 );
+  QString const reconcile = selectionBlock( source, "void MainWindow::reconcileSelectionSource()" );
+  QString const completion = selectionBlock( reconcile, "&WaylandSelectionSource::captureFinished" );
+  QVERIFY2( selectionCompact( completion ).contains( "if(shuttingDown||requestId!=scanPopupRequestId||!scanPopup)return;" ), "source assertion: completion guard" );
+  QVERIFY2( selectionCompact( completion ).contains( "WaylandSelection::chooseText(capturedAt>0?selection:QString(),capturedAt,QApplication::clipboard()->text(QClipboard::Clipboard),clipboardChangedAt)" ), "source assertion: suppressed selection and current clipboard at completion" );
+  QVERIFY2( selectionCompact( completion ).contains( "if(!scanPopup->translateSelectedText(text))reportNothingToTranslate();" ), "source assertion: completion translation/empty report" );
+  QCOMPARE( source.count( "&WaylandSelectionSource::capabilityChanged" ), 1 );
+  QVERIFY2( selectionCompact( reconcile ).contains( "&WaylandSelectionSource::capabilityChanged,this,&MainWindow::refreshHotkeyStatus" ), "source assertion: typed capability snapshot refresh" );
+  QVERIFY2( reconcile.contains( "&WaylandSelectionSource::stateChanged" ) && reconcile.contains( "&WaylandSelectionSource::captureFinished" ), "source assertion: creation-block signal connections" );
+  QCOMPARE( source.count( "clipboardStampAdvances(" ), 1 );
+  QString const constructor = selectionBlock( source, "MainWindow::MainWindow(" );
+  QString const changed = selectionBlock( constructor, "&QClipboard::changed" );
+  QVERIFY2( selectionCompact( changed ).contains( "if(WaylandSelection::clipboardStampAdvances(mode==QClipboard::Clipboard))clipboardChangedAt=Monotonic::nowMs();" ), "source assertion: Clipboard-only monotonic stamp" );
+  QVERIFY2( !changed.contains( "QClipboard::Selection" ) && !changed.contains( "QClipboard::FindBuffer" ), "source assertion: no alternate stamp assignment" );
+  QString const status = selectionBlock( source, "void MainWindow::refreshHotkeyStatus()" );
+  for( QString const & field : QStringList{ "selection.state = selectionSource->state()", "selection.reason = selectionSource->reason()", "selection.primarySelectionSeen = selectionSource->primarySelectionSeen()" } )
+    QVERIFY2( status.contains( field ), qPrintable( "source assertion: snapshot " + field ) );
+  QVERIFY2( selectionCompact( status ).contains( "hotkeyBackend&&hotkeyBackend->isConfigureAvailable(),selection)" ), "source assertion: final snapshot argument" );
+  QString const preferences = selectionSourceText( "preferences.hh" ) + selectionSourceText( "preferences.cc" );
+  QVERIFY2( !QRegularExpression( "WaylandSelectionSource\\s*[*&]" ).match( preferences ).hasMatch(), "source assertion: Preferences must hold no source pointer/reference" );
+  QString const popup = selectionBlock( selectionSourceText( "scanpopup.cc" ), "bool ScanPopup::translateSelectedText(" );
+  QVERIFY2( selectionOrdered( popup, { "sanitizeInputPhrase( text )", "if( !phrase.isValid() )", "return false", "if( isVisible() && phrase == inputPhrase )", "return true", "translateWord( text )", "return true" } ), "source assertion: sanitize/invalid/dedupe/translate order" );
+  QVERIFY2( !popup.contains( "showStatusBarMessage" ) && !popup.contains( "engagePopup" ) && !popup.contains( "forcePopup" ), "source assertion: entry point preserves existing translation path" );
+  QString const report = selectionBlock( source, "void MainWindow::reportNothingToTranslate()" );
+  QCOMPARE( report.count( "gdDebug( \"selection-empty\" )" ), 1 );
+  QVERIFY2( selectionOrdered( report, { "gdDebug", "No selected text or clipboard text to translate", "if( isVisible() )", "mainStatusBar->showMessage( message, 3000 )", "else if( trayIcon )", "trayIcon->showMessage( tr( \"GoldenDict\" ), message, QSystemTrayIcon::Information, 3000 )" } ), "source assertion: exact visible-channel ladder" );
+  QVERIFY2( !report.contains( "else\n" ) && !report.contains( "QMessageBox" ) && !report.contains( "scanPopup" ) && !report.contains( "showStatusBarMessage" ), "source assertion: exhausted ladder has no additional visible channel" );
+}
+void TstHotkeys::xcbGuardDoesNotCreateThePopup()
+{
+  QVERIFY( !scanPopupBindingPlanned( "xcb", true ) );
+  bool const oldScan = false, oldClipboard = false;
+  QVERIFY( !oldScan && !oldClipboard && !scanPopupBindingPlanned( "xcb", true ) );
+  qInfo( "source assertions: popup creation expression; no widget construction observed" );
+  QString const body = selectionBlock( selectionSourceText( "mainwindow.cc" ), "void MainWindow::makeScanPopup()" );
+  QVERIFY( !body.isEmpty() );
+  QVERIFY( selectionOrdered( body, { "++scanPopupRequestId", "scanPopup.reset()", "if( !cfg.preferences.enableScanPopup", "new ScanPopup" } ) );
+  QVERIFY( selectionCompact( body ).contains( "if(!cfg.preferences.enableScanPopup&&!cfg.preferences.enableClipboardHotkey&&!scanPopupBindingPlanned(QGuiApplication::platformName(),cfg.preferences.enableScanPopupHotkey))return;" ) );
+  QVERIFY( !body.contains( "!cfg.preferences.enableScanPopupHotkey" ) );
+}
+
+void TstHotkeys::selectionStatusRowRendersSnapshots_data()
+{
+  QTest::addColumn<int>( "state" ); QTest::addColumn<QString>( "reason" );
+  QTest::addColumn<bool>( "seen" ); QTest::addColumn<QString>( "suffix" );
+  using S = WaylandSelectionSource::State;
+  QTest::newRow( "starting" ) << int(S::Starting) << QString() << false << QString( "selection source starting" );
+  QTest::newRow( "available-seen" ) << int(S::Available) << QString() << true << QString( "primary selection supported" );
+  QTest::newRow( "available-unseen" ) << int(S::Available) << QString() << false << QString( "selection not observed yet" );
+  QTest::newRow( "unavailable" ) << int(S::Unavailable) << QString( "manager removed" ) << true << QString( "selection unavailable: manager removed — clipboard is used instead" );
+  QTest::newRow( "unsupported" ) << int(S::Unsupported) << QString() << false << QString( "selection unsupported in this build — clipboard is used instead" );
+}
+void TstHotkeys::selectionStatusRowRendersSnapshots()
+{
+  QFETCH( int, state ); QFETCH( QString, reason ); QFETCH( bool, seen ); QFETCH( QString, suffix );
+  Config::Class cfg; cfg.preferences.enableScanPopupHotkey = true;
+  cfg.preferences.scanPopupHotkey.rawText = "Ctrl+Meta+D";
+  Preferences dialog( nullptr, cfg );
+  auto enabled = dialog.findChild<QCheckBox *>( "enableScanPopupHotkey" );
+  auto editor = dialog.findChild<HotKeyEdit *>( "scanPopupHotkey" );
+  auto label = dialog.findChild<QLabel *>( "scanPopupHotkeyStatus" );
+  QVERIFY( enabled && editor && label );
+  dialog.setHotkeyStatus( "wayland", HotkeyBackend::State::Bound, {}, {}, true );
+  enabled->setChecked( true );
+  SelectionStatus snapshot{ WaylandSelectionSource::State(state), reason, seen };
+  auto render = [&] { dialog.setHotkeyStatus( "wayland", HotkeyBackend::State::Bound, {}, {{"scan-popup", "Portal selected trigger"}}, true, snapshot ); };
+  render(); QCOMPARE( label->text(), QString( "Portal selected trigger · " ) + suffix );
+  QCOMPARE( label->textFormat(), Qt::PlainText );
+  for( char const * name : { "mainWindowHotkeyStatus", "clipboardHotkeyStatus" } )
+  {
+    auto other = dialog.findChild<QLabel *>( name ); QVERIFY( other );
+    QVERIFY( !other->text().contains( " · " ) ); QCOMPARE( other->textFormat(), Qt::PlainText );
+  }
+  auto const before = editor->getHotKey().toKeySequence(); QString const display = editor->text();
+  snapshot = { WaylandSelectionSource::State::Available, {}, false }; render();
+  QCOMPARE( label->text(), QString( "Portal selected trigger · selection not observed yet" ) );
+  snapshot.primarySelectionSeen = true; render();
+  QCOMPARE( label->text(), QString( "Portal selected trigger · primary selection supported" ) );
+  QVERIFY( enabled->isChecked() ); QCOMPARE( editor->text(), display );
+  QCOMPARE( editor->getHotKey().toKeySequence(), before );
+  QCOMPARE( dialog.getPreferences().scanPopupHotkey.rawText, QString( "Ctrl+Meta+D" ) );
+}
+void TstHotkeys::scanPopupRowPlatformMatrix_data()
+{
+  QTest::addColumn<QString>( "platform" ); QTest::addColumn<bool>( "wayland" ); QTest::addColumn<QString>( "label" );
+  QTest::newRow( "xcb" ) << QString( "xcb" ) << false << QString( "Not used on X11 — the Held keys setting on the Scan Popup tab applies" );
+  QTest::newRow( "windows" ) << QString( "windows" ) << false << QString( "Not used outside Wayland sessions" );
+  QTest::newRow( "cocoa" ) << QString( "cocoa" ) << false << QString( "Not used outside Wayland sessions" );
+  QTest::newRow( "offscreen" ) << QString( "offscreen" ) << false << QString( "Not used outside Wayland sessions" );
+  QTest::newRow( "wayland" ) << QString( "wayland" ) << true << QString( "Portal selected trigger · selection unavailable: manager removed — clipboard is used instead" );
+  QTest::newRow( "wayland-egl" ) << QString( "wayland-egl" ) << true << QString( "Portal selected trigger · selection unavailable: manager removed — clipboard is used instead" );
+}
+void TstHotkeys::scanPopupRowPlatformMatrix()
+{
+  QFETCH( QString, platform ); QFETCH( bool, wayland ); QFETCH( QString, label );
+  Config::Class cfg; cfg.preferences.enableScanPopupHotkey = true;
+  cfg.preferences.scanPopupHotkey.rawText = "Ctrl+Meta+D";
+  Config::HotKey const original = cfg.preferences.scanPopupHotkey;
+  Preferences dialog( nullptr, cfg );
+  auto enabled = dialog.findChild<QCheckBox *>( "enableScanPopupHotkey" );
+  auto editor = dialog.findChild<HotKeyEdit *>( "scanPopupHotkey" );
+  auto status = dialog.findChild<QLabel *>( "scanPopupHotkeyStatus" );
+  QVERIFY( enabled && editor && status );
+  SelectionStatus const snapshot{ WaylandSelectionSource::State::Unavailable, "manager removed", true };
+  auto render = [&] { dialog.setHotkeyStatus( platform, HotkeyBackend::State::Bound, {}, {{"scan-popup", "Portal selected trigger"}}, true, snapshot ); };
+  render(); if( wayland ) enabled->setChecked( true ); render();
+  QCOMPARE( enabled->isEnabled(), wayland ); QCOMPARE( enabled->isChecked(), wayland );
+  QCOMPARE( editor->isEnabled(), wayland ); QCOMPARE( status->text(), label );
+  QVERIFY( cfg.preferences.enableScanPopupHotkey );
+  QCOMPARE( cfg.preferences.scanPopupHotkey.rawText, original.rawText );
+  QCOMPARE( cfg.preferences.scanPopupHotkey.toKeySequence(), original.toKeySequence() );
+  QCOMPARE( scanPopupBindingPlanned( platform, true ), wayland );
+  if( xcbSession() && !wayland )
+  {
+    auto const result = dialog.getPreferences(); QVERIFY( result.enableScanPopupHotkey );
+    QCOMPARE( result.scanPopupHotkey.rawText, original.rawText );
+    QCOMPARE( result.scanPopupHotkey.toKeySequence(), original.toKeySequence() );
+    QCOMPARE( result.scanPopupHotkey.key1, original.key1 ); QCOMPARE( result.scanPopupHotkey.key2, original.key2 );
+    QCOMPARE( result.scanPopupHotkey.modifiers, original.modifiers );
+  }
+  qInfo( "source assertions: real-QPA persistence ternaries; logical matrix is renderer evidence" );
+  QString const getter = selectionCompact( selectionBlock( selectionSourceText( "preferences.cc" ), "Config::Preferences Preferences::getPreferences()" ) );
+  QVERIFY( getter.contains( "boolconstwayland=QGuiApplication::platformName().startsWith(QLatin1String(\"wayland\"));" ) );
+  QVERIFY( getter.contains( "p.enableScanPopupHotkey=wayland?ui.enableScanPopupHotkey->isChecked():cfg.preferences.enableScanPopupHotkey;" ) );
+  QVERIFY( getter.contains( "p.scanPopupHotkey=wayland?(scanPopupHotkeyEdited?ui.scanPopupHotkey->getHotKey():cfg.preferences.scanPopupHotkey):cfg.preferences.scanPopupHotkey;" ) );
+}
+void TstHotkeys::scanPopupRowWaylandValuesAndEdits()
+{
+  QString const kwin = QStandardPaths::findExecutable( "kwin_wayland" );
+  QVERIFY2( !kwin.isEmpty(), "required selected-text UI probe needs kwin_wayland" );
+  TestSupport::PrivateSessionBus bus; QString reason; QVERIFY2( bus.start( &reason ), qPrintable( reason ) );
+  QTemporaryDir runtime; QVERIFY( runtime.isValid() );
+  QVERIFY( QFile::setPermissions( runtime.path(), QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner ) );
+  QProcess compositor, child;
+  auto cleanup = qScopeGuard( [&] {
+    for( QProcess * process : { &child, &compositor } ) if( process->state() != QProcess::NotRunning )
+    {
+      process->terminate();
+      if( !process->waitForFinished( 500 ) ) { process->kill(); process->waitForFinished( 1000 ); }
+    }
+  } );
+  auto env = QProcessEnvironment::systemEnvironment(); env.insert( "DBUS_SESSION_BUS_ADDRESS", bus.address() );
+  env.insert( "XDG_RUNTIME_DIR", runtime.path() ); env.insert( "QT_QPA_PLATFORM", "offscreen" );
+  env.insert( "KWIN_COMPOSE", "Q" ); env.insert( "LIBGL_ALWAYS_SOFTWARE", "1" );
+  compositor.setProcessEnvironment( env );
+  compositor.start( kwin, { "--virtual", "--no-kactivities", "--no-global-shortcuts", "--socket", "gd-selection-ui" } );
+  QVERIFY2( QTest::qWaitFor( [&] { return QFile::exists( runtime.filePath( "gd-selection-ui" ) ) || compositor.state() == QProcess::NotRunning; }, 5000 ), "selection UI compositor startup deadline" );
+  QVERIFY2( QFile::exists( runtime.filePath( "gd-selection-ui" ) ), compositor.readAllStandardError().constData() );
+  env.insert( "WAYLAND_DISPLAY", "gd-selection-ui" ); env.insert( "QT_QPA_PLATFORM", "wayland" );
+  env.insert( "GD_SCAN_POPUP_UI_PROBE", "1" ); child.setProcessEnvironment( env );
+  child.start( QCoreApplication::applicationFilePath(), { "scanPopupRowWaylandProbe" } );
+  QVERIFY2( QTest::qWaitFor( [&] { return child.state() == QProcess::NotRunning; }, 15000 ), "selected-text Wayland UI child deadline" );
+  QByteArray const output = child.readAllStandardOutput() + child.readAllStandardError();
+  QCOMPARE( child.exitStatus(), QProcess::NormalExit ); QVERIFY2( child.exitCode() == 0, output.constData() );
+  QVERIFY2( output.contains( "scan-popup-wayland-preferences: PASS" ), output.constData() );
+}
+void TstHotkeys::scanPopupRowWaylandProbe()
+{
+  if( qEnvironmentVariable( "GD_SCAN_POPUP_UI_PROBE" ) != "1" ) return;
+  QVERIFY( QGuiApplication::platformName().startsWith( QLatin1String( "wayland" ) ) );
+  Config::Class cfg; cfg.preferences.enableScanPopupHotkey = true;
+  cfg.preferences.scanPopupHotkey.rawText = "Ctrl+Meta+D";
+  Preferences dialog( nullptr, cfg );
+  auto enabled = dialog.findChild<QCheckBox *>( "enableScanPopupHotkey" );
+  auto editor = dialog.findChild<HotKeyEdit *>( "scanPopupHotkey" ); QVERIFY( enabled && editor );
+  QVERIFY( enabled->isEnabled() && enabled->isChecked() && editor->isEnabled() );
+  QCOMPARE( dialog.getPreferences().scanPopupHotkey.rawText, QString( "Ctrl+Meta+D" ) );
+  enabled->setChecked( false ); QVERIFY( !dialog.getPreferences().enableScanPopupHotkey );
+  QCOMPARE( dialog.getPreferences().scanPopupHotkey.rawText, QString( "Ctrl+Meta+D" ) );
+  enabled->setChecked( true ); QVERIFY( dialog.getPreferences().enableScanPopupHotkey );
+  QTest::keyPress( editor, Qt::Key_Control ); QTest::keyRelease( editor, Qt::Key_Control );
+  QCOMPARE( dialog.getPreferences().scanPopupHotkey.rawText, QString( "Ctrl+Meta+D" ) );
+  QTest::keyClick( editor, Qt::Key_J, Qt::ControlModifier | Qt::AltModifier );
+  auto edited = dialog.getPreferences(); QVERIFY( edited.scanPopupHotkey.rawText.isEmpty() );
+  QCOMPARE( edited.scanPopupHotkey.toKeySequence().toString( QKeySequence::PortableText ), QString( "Ctrl+Alt+J" ) );
+  auto const sequence = editor->getHotKey().toKeySequence(); auto const display = editor->text();
+  for( SelectionStatus const & snapshot : QList<SelectionStatus>{
+         { WaylandSelectionSource::State::Available, {}, false },
+         { WaylandSelectionSource::State::Available, {}, true },
+         { WaylandSelectionSource::State::Unavailable, "manager removed", true } } )
+  {
+    dialog.setHotkeyStatus( "wayland", HotkeyBackend::State::Bound, {}, {{"scan-popup", "Portal selected trigger"}}, true, snapshot );
+    QCOMPARE( editor->getHotKey().toKeySequence(), sequence ); QCOMPARE( editor->text(), display ); QVERIFY( enabled->isChecked() );
+    QVERIFY( dialog.getPreferences().scanPopupHotkey.rawText.isEmpty() );
+  }
+  enabled->setChecked( false );
+  dialog.setHotkeyStatus( "wayland", HotkeyBackend::State::Bound, {}, {}, true, {} );
+  QVERIFY( !enabled->isChecked() ); QVERIFY( !editor->isEnabled() );
+  dialog.reject(); QVERIFY( cfg.preferences.enableScanPopupHotkey );
+  QCOMPARE( cfg.preferences.scanPopupHotkey.rawText, QString( "Ctrl+Meta+D" ) );
+  qInfo( "scan-popup-wayland-preferences: PASS" );
+}
+void TstHotkeys::scanPopupRowBaseStatuses()
+{
+  using B = HotkeyBackend::State;
+  SelectionStatus const snapshot{ WaylandSelectionSource::State::Available, {}, true };
+  QString const base = "Hover lookup and focus restoration are unavailable on Wayland. Clipboard-change scanning and explicit clipboard lookup remain available; global shortcuts use the portal.";
+  Config::Class cfg; cfg.preferences.enableScanPopupHotkey = true;
+  Preferences dialog( nullptr, cfg );
+  auto enabled = dialog.findChild<QCheckBox *>( "enableScanPopupHotkey" );
+  auto editor = dialog.findChild<HotKeyEdit *>( "scanPopupHotkey" );
+  auto label = dialog.findChild<QLabel *>( "scanPopupHotkeyStatus" );
+  auto note = dialog.findChild<QLabel *>( "clipboardCapabilityNote" ); QVERIFY( enabled && editor && label && note );
+  dialog.setHotkeyStatus( "wayland", B::Bound, {}, {}, true, snapshot ); enabled->setChecked( true );
+  dialog.setHotkeyStatus( "wayland", B::Bound, {}, {}, true, snapshot );
+  QCOMPARE( label->text(), QString( "Not assigned by the portal — use Configure shortcuts · primary selection supported" ) );
+  QCOMPARE( note->text(), base + " Selected-text shortcut: primary selection supported." );
+  auto const before = editor->getHotKey().toKeySequence();
+  dialog.setHotkeyStatus( "wayland", B::Denied, "permission refused", {{"scan-popup", "stale"}}, false, snapshot );
+  QCOMPARE( label->text(), QString( "permission refused · primary selection supported" ) );
+  QCOMPARE( editor->getHotKey().toKeySequence(), before ); QVERIFY( enabled->isChecked() );
+  enabled->setChecked( false ); dialog.setHotkeyStatus( "wayland", B::Bound, {}, {}, true, snapshot );
+  QCOMPARE( label->text(), QString( "Disabled" ) );
+  QCOMPARE( note->text(), base + " Selected-text shortcut is disabled." );
+  cfg.preferences.scanPopupHotkey.rawText = "Ctrl+G,Ctrl+H,Ctrl+I";
+  Preferences invalid( nullptr, cfg );
+  auto invalidEnabled = invalid.findChild<QCheckBox *>( "enableScanPopupHotkey" );
+  auto invalidLabel = invalid.findChild<QLabel *>( "scanPopupHotkeyStatus" ); QVERIFY( invalidEnabled && invalidLabel );
+  invalid.setHotkeyStatus( "wayland", B::Bound, {}, {}, true, snapshot ); invalidEnabled->setChecked( true );
+  for( int i = 0; i != 2; ++i )
+  {
+    invalid.setHotkeyStatus( "wayland", B::Bound, {}, {{"scan-popup", "stale"}}, true, snapshot );
+    QCOMPARE( invalidLabel->text(), QString( "Unavailable on Wayland: Only one or two key combinations are supported. · primary selection supported" ) );
+    QVERIFY( !invalidLabel->text().contains( "stale" ) ); QVERIFY( invalidEnabled->isChecked() );
+  }
 }
 
 QTEST_MAIN( TstHotkeys )

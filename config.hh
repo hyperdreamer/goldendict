@@ -313,6 +313,11 @@ struct Preferences
   bool enableClipboardHotkey;
   HotKey clipboardHotkey;
 
+  /// Opt-in selected-text action (§5). It defaults to off and only registers the
+  /// action; it never creates a popup on its own.
+  bool enableScanPopupHotkey;
+  HotKey scanPopupHotkey;
+
   bool enableScanPopup;
   bool startWithScanPopupOn;
   bool enableScanPopupModifiers;

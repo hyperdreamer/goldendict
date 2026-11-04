@@ -802,6 +802,26 @@ seconds, which is specified here.</string>
         </layout>
        </item>
        <item>
+        <widget class="QCheckBox" name="enableScanPopupHotkey">
+         <property name="text"><string>Use the following hotkey to translate the selected text:</string></property>
+        </widget>
+       </item>
+       <item>
+        <layout class="QHBoxLayout" name="horizontalLayout_scanPopupHotkey">
+         <item>
+          <spacer name="horizontalSpacer_scanPopupHotkey">
+           <property name="orientation"><enum>Qt::Horizontal</enum></property>
+           <property name="sizeHint" stdset="0"><size><width>40</width><height>20</height></size></property>
+          </spacer>
+         </item>
+         <item>
+          <widget class="HotKeyEdit" name="scanPopupHotkey">
+           <property name="enabled"><bool>false</bool></property>
+          </widget>
+         </item>
+        </layout>
+       </item>
+       <item>
         <spacer name="verticalSpacer_13">
          <property name="orientation">
           <enum>Qt::Vertical</enum>
@@ -843,6 +863,12 @@ seconds, which is specified here.</string>
         <widget class="QLabel" name="clipboardHotkeyStatus">
          <property name="wordWrap"><bool>true</bool></property>
          <property name="text"><string>Clipboard shortcut unavailable</string></property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QLabel" name="scanPopupHotkeyStatus">
+         <property name="wordWrap"><bool>true</bool></property>
+         <property name="text"><string>Selected text shortcut unavailable</string></property>
         </widget>
        </item>
        <item>
