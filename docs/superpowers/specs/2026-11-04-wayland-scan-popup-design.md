@@ -1,9 +1,13 @@
 # Wayland scan popup: selected-text shortcut
 
-Status: design revision 6, for review. Run `pm-run-20261104-005240-d7e4068b`, topic `scan-popup`.
+Status: design revision 7, for review. Run `pm-run-20261104-005240-d7e4068b`, topic `scan-popup`.
 Review history: R1 → 27 findings (F1–F27, 3 blockers); R2 → 12 (G1–G12, 2 blockers); R3 → 12 (H1–H12,
-2 blockers); R4 → 11 (I1–I11, no blockers); R5 → 5 (no blockers, I6 not resolved). This revision
-resolves the last five.
+2 blockers); R4 → 11 (I1–I11, no blockers); R5 → 5 (I6 unresolved); R6 → 2 (test seams only, all five
+R5 items resolved). This revision closes those two.
+
+**Scope limit of this document.** It specifies a design, not a test implementation. Where a behaviour
+lives in a translation unit that no suite links (`MainWindow`), the claim is pinned by a *source
+assertion* and stated as such; no suite is claimed to prove behaviour it cannot observe.
 
 ## 1. Decision record
 
@@ -256,6 +260,11 @@ namespace WaylandSelection {
   /// UTF-8 decode with replacement of invalid sequences; U+0000 is removed,
   /// because the phrase sanitiser does not remove it (F15).
   QString decodePayload( QByteArray const & raw );
+
+  /// Whether a clipboard signal advances the clipboard stamp (I1). Pure, and the
+  /// only place the Clipboard-mode rule lives: MainWindow calls it from its
+  /// QClipboard::changed connection, and the unit suite tests it directly.
+  bool clipboardStampAdvances( bool modeIsClipboard );
 
   /// Recency rule of §5.3 (H1). `capturedAt` / `clipboardChangedAt` are monotonic
   /// millisecond stamps; a zero stamp means "never". Precedence: a non-empty
@@ -724,9 +733,10 @@ Cases:
 * `chooseTextUsesRecency` — selection newer than the clipboard wins; a clipboard change after the
   capture wins; equal stamps give the selection; a whitespace-only selection falls back; a never-changed
   clipboard (`0`) always yields the selection; both empty yields empty (H1).
-* `clipboardStampIgnoresNonClipboardModes` — a `Selection` or `FindBuffer` change does not advance the
-  clipboard stamp (I1). The receipt-time half of I1 needs the real event path and is asserted by the
-  live script (10.4), not here.
+* `clipboardStampIgnoresNonClipboardModes` — the pure `clipboardStampAdvances()` returns true only for
+  `Clipboard` mode, so a `Selection` or `FindBuffer` change cannot advance the stamp; the production
+  call site is pinned by the source assertion in 10.2 (I1). The receipt-time half of I1 needs the real
+  event path and is asserted by the live script (10.4), not here.
 * `mimeAttemptsAdvanceAndExhaust` — `pendingOffer()` with four advertised types, `beginMimeAttempt()`
   + `currentMimeType()` + `mimeAttemptFailed()` walk the preference order and return false after the
   last acceptable type; a retired offer refuses immediately (H6).
@@ -774,7 +784,9 @@ source assertion in 10.2, because `MainWindow` is not linked by any suite.
   `"scan-popup"` literals in `mainwindow.cc`; the activation branch calls `winId()`, then
   `applyActivation()`, then either `requestCapture()` **guarded by a `selectionSource` null check** or
   the clipboard-only `translateSelectedText()` (I6); exactly one `requestId != scanPopupRequestId`
-  stale-id guard (I3); and the `makeScanPopup()` guard mentions `scanPopupBindingPlanned`.
+  stale-id guard (I3); exactly one `connect` of `capabilityChanged()` to `refreshHotkeyStatus()`
+  (G7); exactly one call to `clipboardStampAdvances()` in the `QClipboard::changed` handler (I1); and
+  the `makeScanPopup()` guard mentions `scanPopupBindingPlanned`.
 * `xcbGuardDoesNotCreateThePopup` — a source/behaviour assertion that the third guard term is the
   platform predicate, not the bare preference (F11).
 
@@ -782,10 +794,12 @@ source assertion in 10.2, because `MainWindow` is not linked by any suite.
 
 `tst_hotkeys` drives `Preferences::setHotkeyStatus()` directly with each `WaylandSelectionSource::State`
 and asserts the exact rendered label for the third row — `Starting`, `Available` with and without
-`primarySelectionSeen`, `Unavailable` with a reason, `Unsupported` — plus a `capabilityChanged()`
-re-render (F8, F17, G7). The platform matrix is asserted over `xcb`, `windows`, `cocoa` and `wayland`,
-so the disabled row and the preserved values are proven on every non-Wayland platform, not only xcb
-(I9).
+`primarySelectionSeen`, `Unavailable` with a reason, `Unsupported`. Calling the renderer twice with two
+snapshots proves the renderer; the *connection* from `capabilityChanged()` to `refreshHotkeyStatus()`
+lives in `MainWindow`, which no suite links, so it is pinned by the source assertion in 10.2 and
+claimed as nothing more (G7). The platform matrix is asserted over `xcb`, `windows`, `cocoa` and
+`wayland`, so the disabled row and the preserved values are proven on every non-Wayland platform, not
+only xcb (I9).
 
 ### 10.4 Live protocol gate (G9)
 
@@ -808,7 +822,10 @@ selection from a helper client, and asserts:
   than the clipboard stamp, so the activation chooses the clipboard;
 * **MIME retry (I2):** a helper that advertises two acceptable types and refuses the first proves the
   second is attempted; a helper that sends a partial payload and closes nothing proves the offer is
-  retired at the deadline rather than retried;
+  retired at the idle deadline rather than retried;
+* **absolute deadline (I2):** a helper that keeps writing a byte every 100 ms — never idle long enough
+  to hit the 250 ms timeout — proves the transfer is retired at the 2 s absolute deadline. Without
+  this case, deleting the absolute-deadline check would leave every other assertion green;
 * **overlapping requests (I3):** two `requestCapture()` calls during one promoted read answer both
   ids — the superseded one with `capturedAt == 0`, the second on completion — and a completion after
   `stop()` is ignored rather than delivered.
