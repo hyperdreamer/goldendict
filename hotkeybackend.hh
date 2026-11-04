@@ -25,8 +25,25 @@
 
 #include "config.hh"
 
+inline bool isKnownPortalBindingId( QString const & id )
+{
+  return id == QLatin1String( "main-window" )
+      || id == QLatin1String( "clipboard-lookup" )
+      || id == QLatin1String( "scan-popup" );
+}
+inline bool scanPopupBindingPlanned( QString const & platformName,
+                                     bool preferenceEnabled ) noexcept
+{
+  return preferenceEnabled && platformName.startsWith( QLatin1String( "wayland" ) );
+}
+inline bool scanPopupCaptureSupported( bool buildSupportsSelection,
+                                       QString const & platformName ) noexcept
+{
+  return buildSupportsSelection && platformName.startsWith( QLatin1String( "wayland" ) );
+}
+
 /// One shortcut requested from a backend. `id` is a stable application action ID
-/// ("main-window", "clipboard-lookup"), `description` is localized display text
+/// ("main-window", "clipboard-lookup", "scan-popup"), `description` is localized display text
 /// for the portal dialog, and `sequence` is the XDG preferred_trigger produced by
 /// HotkeySyntax::preferredTrigger.
 struct HotkeyBinding

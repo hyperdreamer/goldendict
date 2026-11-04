@@ -4,6 +4,7 @@
 #include "config.hh"
 #include "folding.hh"
 #include "hotkeysyntax.hh"
+#include "hotkeybackend.hh"
 #include "wstring_qt.hh"
 #include <QDir>
 #include <QFile>
@@ -171,14 +172,6 @@ HotKey loadHotKey( QString const & storedText )
 QString hotKeyStorageText( HotKey const & key )
 {
   return key.rawText.isEmpty() ? HotkeySyntax::serialize( key ) : key.rawText;
-}
-
-/// Stable application action IDs that a platform backend may bind and that the
-/// configuration may persist. Anything else is a historical/foreign display
-/// record: ignored on load, never bound and never an activation source.
-bool isKnownPortalBindingId( QString const & id )
-{
-  return id == QLatin1String( "main-window" ) || id == QLatin1String( "clipboard-lookup" );
 }
 
 /// Loads <hotkeys>/<portalBindings>. A missing section is an empty record set.

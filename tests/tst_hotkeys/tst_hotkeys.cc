@@ -40,6 +40,7 @@
 #include <QKeySequence>
 #include <QProcess>
 #include <QProcessEnvironment>
+#include <QRegularExpression>
 #include <QStandardPaths>
 #include <QDBusConnection>
 #include <QDBusConnectionInterface>
@@ -388,6 +389,58 @@ bool fakeKey( Display * display, KeySym keySym, bool press )
 }
 #endif
 
+QString selectionSourceText( char const * path )
+{
+  return QString::fromUtf8( readFileBytes( QDir( TestSupport::repositoryRoot() ).filePath( QLatin1String( path ) ) ) );
+}
+QString selectionCompact( QString text )
+{
+  text.remove( QRegularExpression( QStringLiteral( "\\s+" ) ) );
+  return text;
+}
+// Extract a balanced body, ignoring braces in quoted strings and comments.
+// Empty means anchor/opening/closing brace missing; every caller asserts nonempty.
+QString selectionBlock( QString const & text, QString const & anchor )
+{
+  qsizetype const at = text.indexOf( anchor );
+  if( at < 0 ) return {};
+  qsizetype const first = text.indexOf( '{', at + anchor.size() );
+  if( first < 0 ) return {};
+  int depth = 0;
+  QChar quote;
+  bool line = false, block = false, escape = false;
+  for( qsizetype i = first; i < text.size(); ++i )
+  {
+    QChar const c = text[i];
+    QChar const next = i + 1 < text.size() ? text[i+1] : QChar{};
+    if( line ) { if( c == '\n' ) line = false; continue; }
+    if( block ) { if( c == '*' && next == '/' ) { block = false; ++i; } continue; }
+    if( !quote.isNull() )
+    {
+      if( escape ) escape = false;
+      else if( c == '\\' ) escape = true;
+      else if( c == quote ) quote = QChar{};
+      continue;
+    }
+    if( c == '/' && next == '/' ) { line = true; ++i; continue; }
+    if( c == '/' && next == '*' ) { block = true; ++i; continue; }
+    if( c == '"' || c == '\'' ) { quote = c; continue; }
+    if( c == '{' ) ++depth;
+    else if( c == '}' && --depth == 0 ) return text.mid( first + 1, i - first - 1 );
+  }
+  return {};
+}
+bool selectionOrdered( QString const & text, QStringList const & needles )
+{
+  qsizetype previous = -1;
+  for( QString const & needle : needles )
+  {
+    previous = text.indexOf( needle, previous + 1 );
+    if( previous < 0 ) return false;
+  }
+  return true;
+}
+
 } // namespace
 
 class TstHotkeys : public QObject
@@ -469,6 +522,11 @@ private slots:
   void preferencesReportHotkeyCapabilities();
   void preferencesExplainRendererParity();
   void preferencesKeepAudioVariant();
+
+  // Shared portal binding contracts published for the selected-text action.
+  void scanPopupBindingIsPortalOnly();
+  void portalIdPredicateAcceptsThreeIds();
+  void threeBindingsStayBound();
 
 private slots:
   void wireBarrier( uint marker ) { seenMarker = marker; }
@@ -2839,6 +2897,84 @@ void TstHotkeys::preferencesKeepAudioVariant()
   QVERIFY( external->isChecked() );
   QCOMPARE( dialog.getPreferences().internalPlayerBackend.uiName(), QStringLiteral( "Legacy custom backend" ) );
 #endif
+}
+
+void TstHotkeys::scanPopupBindingIsPortalOnly()
+{
+  for( QString const & platform : QStringList{ "xcb", "wayland", "wayland-egl", "offscreen", "windows", "cocoa" } )
+  {
+    bool const wayland = platform == "wayland" || platform == "wayland-egl";
+    for( bool enabled : { false, true } )
+      QCOMPARE( scanPopupBindingPlanned( platform, enabled ), enabled && wayland );
+    for( bool build : { false, true } )
+      QCOMPARE( scanPopupCaptureSupported( build, platform ), build && wayland );
+  }
+}
+void TstHotkeys::portalIdPredicateAcceptsThreeIds()
+{
+  for( QString const & id : QStringList{ "main-window", "clipboard-lookup", "scan-popup" } )
+    QVERIFY( isKnownPortalBindingId( id ) );
+  QVERIFY( !isKnownPortalBindingId( {} ) ); QVERIFY( !isKnownPortalBindingId( "foreign-action" ) );
+  qInfo( "source assertions: shared portal ID predicate and call sites" );
+  QString const header = selectionSourceText( "hotkeybackend.hh" );
+  QString const config = selectionSourceText( "config.cc" );
+  QString const portal = selectionSourceText( "portalhotkeys.cc" );
+  QVERIFY( !header.isEmpty() && !config.isEmpty() && !portal.isEmpty() );
+  QCOMPARE( header.count( "inline bool isKnownPortalBindingId(" ), 1 );
+  QString const predicate = selectionBlock( header, "inline bool isKnownPortalBindingId(" );
+  for( QString const & id : QStringList{ "main-window", "clipboard-lookup", "scan-popup" } )
+    QVERIFY2( predicate.contains( '"' + id + '"' ), qPrintable( "source assertion: missing ID " + id ) );
+  QRegularExpression const definition( "\\bbool\\s+(?:isKnownPortalBindingId|knownBindingId)\\s*\\(" );
+  QVERIFY2( !definition.match( config ).hasMatch(), "source assertion: config retains a predicate definition" );
+  QVERIFY2( !definition.match( portal ).hasMatch(), "source assertion: portal retains a predicate definition" );
+  QVERIFY( selectionBlock( config, "loadPortalBindings(" ).contains( "isKnownPortalBindingId( id )" ) );
+  QVERIFY( selectionBlock( config, "void save( Class const & c )" ).contains( "isKnownPortalBindingId( display.id )" ) );
+  QString const generation = selectionBlock( portal, "void PortalBackend::beginGeneration(" );
+  QVERIFY( !generation.isEmpty() );
+  QVERIFY( selectionCompact( generation ).contains( "isKnownPortalBindingId(binding.id)" ) );
+  QVERIFY( !generation.contains( "knownBindingId(" ) );
+}
+void TstHotkeys::threeBindingsStayBound()
+{
+  using State = HotkeyBackend::State;
+  QStringList const all{ "main-window", "clipboard-lookup", "scan-popup" };
+  QVector<HotkeyBinding> const desired{
+    { "main-window", "Main", "CTRL+ALT+g" },
+    { "clipboard-lookup", "Clipboard", "CTRL+ALT+h" },
+    { "scan-popup", "Translate the selected text", "CTRL+LOGO+d" }
+  };
+  for( QStringList const & returned : QList<QStringList>{ all, { "main-window", "scan-popup" } } )
+  {
+    TestSupport::PrivateSessionBus bus; QString reason;
+    QVERIFY2( bus.start( &reason ), qPrintable( reason ) );
+    TestSupport::FakePortal portal;
+    QVERIFY2( portal.start( bus.fixtureConnection(), 2 ), qPrintable( portal.errorString() ) );
+    portal.setListShortcuts( {} );
+    portal.setBoundIds( returned );
+    QVector<PortalBindingDisplay> reported;
+    PortalBackend backend( bus.connection() );
+    QSignalSpy states( &backend, &HotkeyBackend::stateChanged );
+    connect( &backend, &HotkeyBackend::bindingsChanged, this,
+             [&]( QVector<PortalBindingDisplay> const & value ) { reported = value; } );
+    backend.bind( desired );
+    State const expected = returned.size() == 3 ? State::Bound : State::Partial;
+    QVERIFY2( QTest::qWaitFor( [&] { return backend.state() == expected; }, 1500 ), "three-ID portal bind did not settle" );
+    for( auto const & event : states ) QVERIFY( qvariant_cast<State>( event[0] ) != State::Unavailable );
+    int requests = 0;
+    for( auto const & call : portal.calls() ) if( call.member == "BindShortcuts" )
+    {
+      ++requests; QCOMPARE( call.shortcutIds, all );
+      QSet<QString> unique; for( auto const & id : call.shortcutIds ) unique.insert( id );
+      QCOMPARE( unique.size(), 3 );
+      QCOMPARE( call.shortcuts.size(), 3 );
+      for( int i = 0; i != 3; ++i )
+        QCOMPARE( call.shortcuts[i].properties.value( "preferred_trigger" ).toString(), desired[i].sequence );
+    }
+    QCOMPARE( requests, 1 ); QVERIFY( portal.protocolViolations().isEmpty() );
+    QStringList reportedIds; for( auto const & entry : reported ) reportedIds.append( entry.id );
+    QStringList sortedReturned = returned; reportedIds.sort(); sortedReturned.sort();
+    QCOMPARE( reportedIds, sortedReturned );
+  }
 }
 
 QTEST_MAIN( TstHotkeys )
