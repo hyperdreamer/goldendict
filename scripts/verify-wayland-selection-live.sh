@@ -24,6 +24,8 @@ TARGET = selection-live
 CONFIG += c++17 console link_pkgconfig
 QT = core gui testlib
 PKGCONFIG += wayland-client
+# Observe physical release and force a setup failure in this test executable.
+QMAKE_LFLAGS += -Wl,--wrap=wl_display_disconnect -Wl,--wrap=wl_display_get_fd
 DEFINES += HAVE_WAYLAND_DATA_CONTROL
 INCLUDEPATH += $$GD_REPO_ROOT $$GD_REPO_ROOT/protocols/ext-data-control-v1
 SOURCES += $$GD_REPO_ROOT/waylandselection.cc \
@@ -60,8 +62,25 @@ cat > "$tmp/selection-live.cc" <<'GD_CPP'
 #include <functional>
 #include <memory>
 #include <unistd.h>
+#include <utility>
 #include <vector>
 using WaylandSelection::MaxPayloadBytes;
+// These references come from the linked production object. Qt's and the
+// helper child's own Wayland connections cannot change the runner's counter.
+static int displayDisconnects = 0;
+static bool failNextDisplayFd = false;
+extern "C" void __real_wl_display_disconnect( wl_display * );
+extern "C" void __wrap_wl_display_disconnect( wl_display * display )
+{
+  ++displayDisconnects;
+  __real_wl_display_disconnect( display );
+}
+extern "C" int __real_wl_display_get_fd( wl_display * );
+extern "C" int __wrap_wl_display_get_fd( wl_display * display )
+{
+  if( std::exchange( failNextDisplayFd, false ) ) { errno = EIO; return -1; }
+  return __real_wl_display_get_fd( display );
+}
 static QString const Utf8 = "text/plain;charset=utf-8";
 static QString const Plain = "text/plain";
 static void jsonOut( QJsonObject const & object )
@@ -462,11 +481,32 @@ public:
     REQUIRE(reset());REQUIRE(set(13,text("held",-1)));REQUIRE(wait([&]{return source->hasPendingCapture();}));source->requestCapture(301);
     REQUIRE(wait([&]{return receives(13).size()==1&&event(13,"write");}));
     int const captured=captures();auto const frozen=source->state();QString const reason=source->reason();
-    source->stop();source->stop();REQUIRE(!source->hasPendingCapture());
+    int const disconnectsBeforeStop=displayDisconnects;
+    source->stop();
+    // No wait, helper acknowledgement or event processing before observation.
+    REQUIRE(displayDisconnects==disconnectsBeforeStop+1);
+    source->stop();REQUIRE(displayDisconnects==disconnectsBeforeStop+1);
+    REQUIRE(!source->hasPendingCapture());
     REQUIRE(ack(send({{"command","release"},{"serial",13}})));REQUIRE(until(Monotonic::nowMs()+400));
     REQUIRE(forId(301).isEmpty()&&captures()==captured);source->start();source->requestCapture(302);
     REQUIRE(until(Monotonic::nowMs()+50));REQUIRE(forId(302).isEmpty());REQUIRE(receives(13).size()==1);
     REQUIRE(source->state()==frozen&&source->reason()==reason);return true;
+  }
+  bool failedStartReleasesSynchronously()
+  {
+    REQUIRE(reset(false));
+    int const disconnectsBeforeFailedStart=displayDisconnects;
+    failNextDisplayFd=true;
+    auto restoreInjection=qScopeGuard([]{failNextDisplayFd=false;});
+    source->start();
+    // The real connection was acquired before the injected fd lookup failure.
+    // Check its release immediately on return, before any event processing.
+    REQUIRE(displayDisconnects==disconnectsBeforeFailedStart+1);
+    REQUIRE(!failNextDisplayFd);
+    REQUIRE(source->state()==WaylandSelectionSource::State::Unavailable);
+    REQUIRE(source->reason()=="Wayland display error");
+    source->stop();source->stop();
+    REQUIRE(displayDisconnects==disconnectsBeforeFailedStart+1);return true;
   }
 };
 static Live * observed=nullptr;
@@ -501,15 +541,20 @@ int main(int argc,char **argv)
     {"absoluteDeadlineSurvivesProgress",&Live::absoluteDeadlineSurvivesProgress},
     {"overlappingRequestsReuseTransfer",&Live::overlappingRequestsReuseTransfer},
     {"activationDeadlineSuppressesCache",&Live::activationDeadlineSuppressesCache},
-    {"stopSuppressesLateCompletion",&Live::stopSuppressesLateCompletion}
+    {"stopSuppressesLateCompletion",&Live::stopSuppressesLateCompletion},
+    {"failedStartReleasesSynchronously",&Live::failedStartReleasesSynchronously}
   };
+  QString const selected=qEnvironmentVariable("GD_SELECTION_LIVE_CASE");
+  int count=0;
   if(!runner.init()){std::fprintf(stderr,"wayland-selection-live: FAIL sourceBecomesAvailable\n");return 1;}
   for(auto const & test:cases)
   {
+    if(!selected.isEmpty()&&selected!=QLatin1String(test.name))continue;
     if(!(runner.*test.run)()){std::fprintf(stderr,"wayland-selection-live: FAIL %s\n",test.name);return 1;}
-    std::printf("%s: PASS\n",test.name);std::fflush(stdout);
+    ++count;std::printf("%s: PASS\n",test.name);std::fflush(stdout);
   }
-  std::puts("wayland-selection-live: PASS (13 cases)");return 0;
+  if(!count){std::fprintf(stderr,"wayland-selection-live: FAIL unknown case\n");return 1;}
+  std::printf("wayland-selection-live: PASS (%d cases)\n",count);return 0;
 }
 GD_CPP
 if ! (cd "$tmp" && qmake6 selection-live.pro "GD_REPO_ROOT=$root" && make -j2) > "$tmp/build.log" 2>&1; then
