@@ -1,21 +1,19 @@
 # Wayland scan popup: selected-text shortcut
 
-Status: design revision 3, for review. Run `pm-run-20261104-005240-d7e4068b`, topic `scan-popup`.
-Revision 1 was returned with 27 findings (F1–F27, 3 blockers); revision 2 with 12 (G1–G12, 2 blockers,
-plus 8 partial resolutions). This revision resolves both sets and tags each change `(F<n>)` or
-`(G<n>)`.
+Status: design revision 4, for review. Run `pm-run-20261104-005240-d7e4068b`, topic `scan-popup`.
+Review history: revision 1 → 27 findings (F1–F27, 3 blockers); revision 2 → 12 (G1–G12, 2 blockers);
+revision 3 → 12 (H1–H12, 2 blockers, 6 partials). This revision resolves all three sets.
 
 ## 1. Decision record
 
 | decision | choice | reason |
 | --- | --- | --- |
 | trigger on Wayland | **shortcut only** | The reporter wants X11's *checked* mode — no popup without keys — and accepts a discrete shortcut in place of a held chord. |
-| selection source | **own client for `ext_data_control_manager_v1`** | The protocol KWin 6.8 actually advertises; no helper process and no new service dependency, only one optional shared-library link (`libwayland-client`, already present in any Wayland session). (F24: "no new dependency" was wrong; this is the corrected claim.) |
+| selection source | **own client for `ext_data_control_manager_v1`** | The protocol KWin 6.8 actually advertises; no helper process and no new service dependency, only one optional shared-library link (`libwayland-client`, already present in any Wayland session). (F24) |
 | UI placement | **(a)** third row in the existing Hotkeys group | One list of shortcuts, one status block, reuses the existing per-shortcut status line. |
 
 `HotkeySyntax::preferredTrigger()` rejects a modifier-only binding (`hotkeysyntax.cc:205`, "The hotkey
-has no key, only modifiers." — corrected reference, F20), so a held `Ctrl+Win` chord can never become a
-portal shortcut.
+has no key, only modifiers."), so a held `Ctrl+Win` chord can never become a portal shortcut. (F20)
 
 **Default shortcut (F1).** `QKeySequence( "Ctrl+Win+D" )` is not a valid sequence: Qt 6.12 parses
 `Win` to `Qt::Key_unknown` (measured: `count=1, key=33554431, modifiers=0x0`, both string forms
@@ -41,7 +39,7 @@ On Wayland every one of those steps is absent:
 * `ScanPopup::clipboardChanged()` opens with a Wayland-only guard (`scanpopup.cc:505`): unless
   clipboard watching is on and the mode is `Clipboard`, it returns. The `Selection` branch is
   additionally `xcb`-only (`scanpopup.cc:517`), and `delayShow()` is inside `#ifdef HAVE_X11`
-  (`scanpopup.cc:496`). (F20: these are the corrected references.)
+  (`scanpopup.cc:496`). (F20)
 * the only `emit hovered()` is inside `Q_OS_WIN32` (`mouseover.cc:362`), and `mouseHovered()` returns
   early on Wayland (`scanpopup.cc:532`).
 * `docs/superpowers/specs/2026-10-24-qt6-migration-spec.md` §9 puts "Wayland InputCapture hover
@@ -55,13 +53,14 @@ session was available on this host. (F19)
 
 ## 3. Goals
 
-1. A global shortcut on Wayland that opens the scan popup with the text most recently selected in any
-   other application.
+1. A global shortcut on Wayland that opens the scan popup with the **current primary selection** —
+   whichever client set it, GoldenDict included (H8).
 2. Zero change to X11 runtime behaviour — same code path, no new binding, and no `ScanPopup` object
    created that X11 would not have created before. The Hotkeys tab gains one disabled row (§7.4).
 3. Honest degradation: when the compositor cannot serve the primary selection, the status line says
-   so, the shortcut falls back to the clipboard, and an empty result is reported where the user can
-   see it.
+   so, the shortcut falls back to the clipboard, and an empty result is reported through the first
+   available channel. When the main window is hidden **and** no tray icon exists there is no visible
+   channel; the event is then logged only, and this is the stated limit rather than a promise (H5).
 
 ## 4. Non-goals
 
@@ -78,15 +77,20 @@ session was available on this host. (F19)
    is true — a real function (§6.6) over one consistently spelled capability constant, not an inline
    `#ifdef` and not an undefined macro (G1). It is false on `xcb`, so the RECORD backend never sees the id.
 2. Activating it asks the source for the current selection (`requestCapture()`), which promotes a
-   pending read instead of using a stale cache, and answers within 300 ms (§6.6). If the selection is
-   empty the clipboard text is used. If both are empty, no window opens and the message uses the
-   visible-channel ladder of §6.6.
-3. `lastText()` is sticky: it survives the selection being unset, so the user may select, click
-   elsewhere, then press the shortcut. It is replaced by a newer successful read, and by a newer
-   *failed* capture only in the sense that the failure leaves it untouched. The source does not
-   attribute an offer to an owning application: the value is the current primary selection, whichever
-   client set it, including GoldenDict's own article view (G10).
-4. The phrase is raised through the existing `translateWord()` path, so sanitising, input-length
+   pending read instead of using a stale cache, and answers within 300 ms (§6.6).
+3. **Which text wins (H1).** Selection and clipboard are independent on Wayland: copying does not
+   change the primary selection. The activation therefore compares *timestamps*, not emptiness: the
+   selection is used when it is non-empty **and** was captured no earlier than the clipboard's last
+   change; otherwise the clipboard; otherwise the selection; otherwise nothing. Ties go to the
+   selection.
+4. **A stale cache is never used as if it were current.** `lastText()` is sticky — it survives the
+   selection being unset, so select-click-away-then-shortcut still works — but an activation answered
+   from the cache obeys rule 3. If a promoted read **times out**, the cached selection is suppressed
+   for that activation: the answer is the clipboard, or nothing, logged as `selection-timeout`. An
+   older capture than the one the user just made is never preferred.
+5. The source does not attribute an offer to an owning application: the value is the current primary
+   selection, whichever client set it, including GoldenDict's own article view (G10).
+6. The phrase is raised through the existing `translateWord()` path, so sanitising, input-length
    limits, history and group selection are unchanged. Two behaviours are **not** inherited silently:
    * the same-phrase dedupe lives in `handleInputWord()` (`scanpopup.cc:540`), not in
      `translateWord()`, so the new entry point performs the same check itself before translating
@@ -94,7 +98,7 @@ session was available on this host. (F19)
    * `scanToMainWindow` is honoured: when it is set, `engagePopup()` sends the phrase to the main
      window instead of showing the popup (`scanpopup.cc:596`). The shortcut keeps that behaviour and
      the contract is "open the popup **unless** 'send to main window' is enabled" (F25).
-5. The shortcut exists on Wayland only. On `xcb` the preferences row is disabled and the stored values
+7. The shortcut exists on Wayland only. On `xcb` the preferences row is disabled and the stored values
    are preserved unchanged (§7.4).
 
 ## 6. Architecture
@@ -169,7 +173,23 @@ public slots:
 signals:
   void stateChanged( State state, QString const & reason );
   void capabilityChanged();        ///< primarySelectionSeen changed while Available (G7)
-  void captureFinished( quint64 requestId, QString const & text );  ///< always answered
+  /// Always answered within the bound. `capturedAt` is the monotonic stamp of the
+  /// capture that backs `text`, or 0 when no capture backs it (nothing ever
+  /// captured, or a promoted read timed out and the cache is suppressed). The
+  /// caller applies the recency rule of §5.3 with it.
+  void captureFinished( quint64 requestId, QString const & text, qint64 capturedAt );
+};
+```
+
+`Preferences` never holds a pointer to the source; the window pushes a **snapshot** on every change
+(H4):
+
+```cpp
+struct SelectionStatus
+{
+  WaylandSelectionSource::State state = WaylandSelectionSource::State::Unsupported;
+  QString reason;                  // non-empty iff Unavailable
+  bool primarySelectionSeen = false;
 };
 ```
 
@@ -220,8 +240,12 @@ namespace WaylandSelection {
   /// because the phrase sanitiser does not remove it (F15).
   QString decodePayload( QByteArray const & raw );
 
-  /// The selection wins when it is non-empty after trimming; otherwise the clipboard.
-  QString chooseText( QString const & selection, QString const & clipboard );
+  /// Recency rule of §5.3 (H1). `capturedAt` / `clipboardChangedAt` are monotonic
+  /// millisecond stamps; a zero stamp means "never". Precedence: a non-empty
+  /// selection no older than the clipboard change, then the clipboard, then a
+  /// non-empty selection, then empty.
+  QString chooseText( QString const & selection, qint64 capturedAt,
+                      QString const & clipboard, qint64 clipboardChangedAt );
 
   /// What an activation does while a capture is still pending (G5/G9).
   enum class ActivationPlan { UseCached, AwaitPending };
@@ -240,11 +264,18 @@ namespace WaylandSelection {
   class OfferState
   {
   public:
-    void pendingOffer( quint64 offerId );          ///< data_offer
+    /// data_offer carries the offer id and the MIME types it advertised.
+    void pendingOffer( quint64 offerId, QStringList const & mimeTypes );
     ChannelOffer takeForPrimary();                 ///< primary_selection (null clears)
     ChannelOffer discardForClipboard();            ///< selection: destroy, never read
-    bool beginMimeAttempt();                       ///< false after retirement or last failure
-    ReadToken beginRead();                         ///< reserve a token for the accepted offer
+
+    /// Walks the advertised list in preference order. False when the offer is
+    /// retired or every acceptable MIME type has already been attempted (H6).
+    bool beginMimeAttempt();
+    QString currentMimeType() const;               ///< the type the next read must request
+    void mimeAttemptFailed();                      ///< advance to the next acceptable type
+
+    ReadToken beginRead();                         ///< reserve a token for the current attempt
     bool accepts( ReadToken token ) const;         ///< false for retired tokens
     void retire();                                 ///< supersede: no token is accepted any more
     void completed( ReadToken token );             ///< token consumed, state settles
@@ -278,17 +309,25 @@ namespace WaylandSelection {
   held and read 200 ms after the last selection event, mirroring X11's `delayTimer`. A newer event
   replaces the held offer, so a drag-selection burst produces one transfer. `requestCapture()`
   promotes a held offer immediately (G5).
-* **Pipe ownership and completion (G2, F6).** The pipe is created with
-  `pipe2( O_CLOEXEC | O_NONBLOCK )`. The **write** end is passed to
+* **Pipe ownership and completion (G2, F6, H3).** The pipe is created with `pipe2( O_CLOEXEC )`; only
+  the **read** end is switched to non-blocking with `fcntl( readEnd, F_SETFL, O_NONBLOCK )`. The write
+  end stays blocking, because the compositor's writer must never see `EAGAIN`. The **write** end is passed to
   `ext_data_control_offer_v1.receive()` and then **closed by the client immediately after the
   request** — libwayland has already duplicated it into the outgoing message, and keeping our copy
   open would prevent the EOF that defines completion. The **read** end is non-blocking and owned by
   the source, driven by a `QSocketNotifier`.
-  Completion is **EOF or `MaxPayloadBytes`**, never the first short `read()`. Bytes are appended to
+  Completion is **EOF or `MaxPayloadBytes` + 1 byte**, never the first short `read()`. Reading one
+  byte past the cap distinguishes a payload exactly at the limit from a truncated one, so
+  `truncated()` is true only when that extra byte is observed (H10). Bytes are appended to
   `PayloadAccumulator`; `read() < 0 && errno == EAGAIN` means wait; `EINTR` retries; any other error
   drops the capture. On completion, timeout or retirement the read end is closed and the notifier
   removed. Two bounds apply: an idle timeout of 250 ms since the last successful read, and an
   **absolute transfer deadline of 2 s** from the `receive()` request.
+* **Flush before waiting (H2).** Every outgoing request batch — the initial registry `sync`,
+  `ext_data_control_manager_v1.get_data_device()`, `receive()` and `destroy()` — is followed
+  immediately by `wl_display_flush( display )`. On `-1/EAGAIN` the writable notifier is armed and kept
+  armed until a flush succeeds; the code then waits for the read notifier. Without this step a batch
+  queued while the display is otherwise idle produces no incoming event, and the handshake stalls.
 * **Event loop (F5, G3).** The display fd is driven by a read notifier with this exact branch table:
   1. `wl_display_prepare_read( display )`; if it returns `-1` and `errno == EAGAIN`,
      `wl_display_dispatch_pending( display )` and skip the read;
@@ -301,6 +340,10 @@ namespace WaylandSelection {
   5. `wl_display_cancel_read( display )` on any path where the readiness was consumed elsewhere;
   6. any `-1` with `wl_display_get_error( display ) != 0` ends the watcher.
   There is no `wl_display_roundtrip()` anywhere.
+* **Capture is opt-in (H12).** The source is started only while
+  `preferences.enableScanPopupHotkey` is true; disabling the shortcut stops the source and no
+  selection is monitored. `MainWindow` reconciles the source with the preference at startup and after
+  the Preferences dialog is accepted, in the same place it re-installs the hotkeys.
 * **No ownership detection (G10).** The protocol carries no owner identity, and a focus test at
   dispatch time is not proof of ownership because the event may be delivered after focus changed.
   The contract is therefore the current **primary selection, whatever set it**, including a selection
@@ -356,15 +399,26 @@ if( scanPopupBindingPlanned( kHaveWaylandDataControl,
   add( true, "scan-popup", tr( "Translate the selected text" ), cfg.preferences.scanPopupHotkey );
 ```
 
-**Id allowlists (F2).** The id must be added in *both* hard-coded places, or the feature breaks the
-existing shortcuts:
+**One id predicate (F2, H11).** There are two hard-coded predicate copies today —
+`knownBindingId()` (`portalhotkeys.cc:84`) and `isKnownPortalBindingId()` (`config.cc:181`) — and an id
+missing from either breaks something: from the first, `beginGeneration()` sets the whole backend to
+`Unavailable, "No valid portal bindings were requested"` and the existing shortcuts die on Wayland;
+from the second, a stored `scan-popup` `PortalBindingDisplay` is dropped on load and the row shows
+"not assigned" after a restart. Both are translation-unit-local today, so neither is testable.
 
-* `knownBindingId()` (`portalhotkeys.cc:84`) — otherwise `beginGeneration()` sets the whole backend to
-  `Unavailable, "No valid portal bindings were requested"` and the main-window and clipboard
-  shortcuts stop working on Wayland;
-* `isKnownPortalBindingId()` (`config.cc:181`) — otherwise the stored `scan-popup` `PortalBindingDisplay`
-  is silently dropped on load and the row shows "not assigned" after a restart;
-* the contract comment in `hotkeybackend.hh:28-31` naming the stable ids.
+The fix is structural: declare **one** inline predicate in `hotkeybackend.hh` and make both copies call
+it —
+
+```cpp
+inline bool isKnownPortalBindingId( QString const & id )
+{ return id == QLatin1String( "main-window" )
+      || id == QLatin1String( "clipboard-lookup" )
+      || id == QLatin1String( "scan-popup" ); }
+```
+
+`portalhotkeys.cc` deletes its copy and `config.cc` uses this one. The contract comment at
+`hotkeybackend.hh:28-31` names all three ids. The test suite then tests the single function, and a
+source assertion proves both call sites use it (no second copy can reappear).
 
 **Activation (F9, G5).** A freshly constructed `ScanPopup` has no native handle, and
 `applyActivation()` returns `NoHandle` without installing the token when `windowHandle()` is null
@@ -383,13 +437,23 @@ else if( id == "scan-popup" && scanPopup )
 
 // connected once, in the constructor
 connect( selectionSource.get(), &WaylandSelectionSource::captureFinished,
-         this, [this]( quint64 requestId, QString const & text )
+         this, [this]( quint64 requestId, QString const & selection, qint64 capturedAt )
 {
   if( shuttingDown || requestId != scanPopupRequestId || !scanPopup ) return;
+  // capturedAt == 0 means the promoted read timed out: the cached selection is
+  // suppressed, because an older capture than the one the user just made must not
+  // be preferred (H1).
+  QString const text = WaylandSelection::chooseText(
+      capturedAt > 0 ? selection : QString(), capturedAt,
+      QApplication::clipboard()->text( QClipboard::Clipboard ), clipboardChangedAt );
   if( !scanPopup->translateSelectedText( text ) )
     reportNothingToTranslate();
 } );
 ```
+
+`clipboardChangedAt` is a `MainWindow` member updated by a `QClipboard::changed` connection installed in
+the constructor (0 until the first change in this run, which makes a stored selection win over a
+clipboard nobody touched).
 
 `requestCapture()` always answers within 300 ms: immediately with `lastText()` when nothing is
 pending, or on completion of the promoted read, falling back to `lastText()` at the deadline. Stale
@@ -416,9 +480,13 @@ if( !cfg.preferences.enableScanPopup &&
   return;
 ```
 
-**Lifecycle (F27, G12).** `MainWindow` owns the source as a `std::unique_ptr` member declared **before**
-`scanPopup` and `articleProfile`, so it outlives both. `start()` is scheduled on the first event-loop
-turn with `QTimer::singleShot( 0, this, ... )` guarded by `shuttingDown`. `stop()` is called **before
+**Lifecycle (F27, G12, H12).** `MainWindow` owns the source as a `std::unique_ptr` member declared
+**before** `scanPopup` and `articleProfile`, so it outlives both. It is created only when
+`kHaveWaylandDataControl` and the platform is Wayland. `start()` is scheduled on the first event-loop
+turn with `QTimer::singleShot( 0, this, ... )` guarded by `shuttingDown`, and only when
+`cfg.preferences.enableScanPopupHotkey` is true; `stop()` runs when that preference is cleared. The
+reconciliation happens in the same method that re-installs the hotkeys, so accepting the Preferences
+dialog starts or stops monitoring immediately. `stop()` is called **before
 the popup reset** at every teardown site:
 
 * `~MainWindow` (`mainwindow.cc:1026-1031`),
@@ -433,10 +501,8 @@ The dictionary-reset sites that recreate the popup (`mainwindow.cc:2143`, `2224`
 ### 6.7 Popup entry point (F10, F16)
 
 ```cpp
-bool ScanPopup::translateSelectedText( QString const & selectionText )
+bool ScanPopup::translateSelectedText( QString const & text )
 {
-  QString const text = WaylandSelection::chooseText(
-      selectionText, QApplication::clipboard()->text( QClipboard::Clipboard ) );
   Config::InputPhrase const phrase = cfg.preferences.sanitizeInputPhrase( text );
   if( !phrase.isValid() )
     return false;                       // caller reports it through the ladder above
@@ -446,6 +512,9 @@ bool ScanPopup::translateSelectedText( QString const & selectionText )
   return true;
 }
 ```
+
+The recency decision lives in `MainWindow`, which owns both the source and the clipboard-change
+timestamp; `ScanPopup` only sanitises, de-duplicates and translates.
 
 It returns a bool instead of emitting a status message, because the popup's
 `showStatusBarMessage()` writes to the popup's own status bar (`scanpopup.cc:1154`), which does not
@@ -496,9 +565,10 @@ connects both to the same re-render.
 
 ### 7.3 Implementation of the row (F8)
 
-`Preferences::setHotkeyStatus()` gains two parameters: `WaylandSelectionSource::State` and
-`QString const & selectionReason` (defaulted, so existing callers compile). Its local `display` lambda
-becomes id-driven instead of the current two-way ternary:
+`Preferences::setHotkeyStatus()` gains one `SelectionStatus const &` parameter (§6.2), defaulted so
+existing callers compile; it carries state, reason **and** `primarySelectionSeen`, which the renderer
+needs but cannot query (H4). Its local `display` lambda becomes id-driven instead of the current
+two-way ternary:
 
 ```cpp
 struct Row { QString id; HotKeyEdit * editor; QCheckBox * enabled; QLabel * label;
@@ -513,6 +583,10 @@ Row const rows[] = {
 A third `QLabel scanPopupHotkeyStatus` is added to `preferences.ui` beside the existing two, plus an
 auto-connected `on_enableScanPopupHotkey_toggled( bool )` slot (the existing pair at
 `preferences.cc:743-751` follow that naming, so the editor's enable state follows the checkbox).
+
+`MainWindow::refreshHotkeyStatus()` — already called on `bindingsChanged` and `stateChanged` — is also
+called from `capabilityChanged()` and passes the snapshot, so an open Preferences dialog repaints when
+the selection source becomes readable, fails, or starts/stops with the preference (G7, H4).
 
 ### 7.4 X11 state for the third row (F17)
 
@@ -551,8 +625,9 @@ existing `eventFilter` (`preferences.cc:600-613`) exactly as the other two are.
    ignored.
 3. **Activation.** Portal emits `Activated("scan-popup", token)`. The popup's native handle is
    materialised, the token applied, then `requestCapture( requestId )` is issued.
-4. **Answer.** `captureFinished( requestId, text )` arrives within 300 ms — promoted read or cached
-   value — and `translateSelectedText( text )` runs.
+4. **Answer.** `captureFinished( requestId, text, capturedAt )` arrives within 300 ms — promoted read,
+   cached value, or timeout with `capturedAt == 0` — and `MainWindow` applies the recency rule before
+   `translateSelectedText( text )`.
 5. **Raise.** `translateWord()` → `engagePopup()` → `show()`; focus is requested through the token and
    may be declined. If `scanToMainWindow` is set the phrase goes to the main window instead.
 
@@ -574,9 +649,9 @@ existing `eventFilter` (`preferences.cc:600-613`) exactly as the other two are.
 | invalid UTF-8 / embedded NUL | replaced / stripped, then sanitised; an invalid phrase opens nothing |
 | protocol error confined to the private connection | stop, one `Unavailable`, app keeps running |
 | compositor restart | the private connection and Qt's own Wayland connection die together; Qt terminates the process. The old "app keeps running" claim is withdrawn (F21) |
-| activation with no pending capture | answered immediately from `lastText()` |
-| activation while a capture is pending | the read is promoted and answered on completion, bounded at 300 ms, then `lastText()` (G5) |
-| empty selection and empty clipboard | nothing opens; the message uses the visible-channel ladder of §6.6 (main window status bar → tray message → logged only) (G6) |
+| activation with no pending capture | answered immediately from `lastText()` with `capturedAt` = that capture's stamp (0 if the cache is empty); the recency rule then decides selection vs clipboard (H1) |
+| activation while a capture is pending | the read is promoted and answered on completion, bounded at 300 ms; on timeout the answer is clipboard-only with `capturedAt = 0`, logged `selection-timeout` (G5, H1) |
+| empty selection and empty clipboard | nothing opens; the message uses the first available channel — main window status bar, else tray message, else log only (G6, H5) |
 
 ## 10. Testing
 
@@ -595,7 +670,14 @@ Cases:
   `MaxPayloadBytes` and latches `truncated()`; the boundary byte counts, a single oversized chunk, and
   a chunk that exactly fills the cap (F6/G8).
 * `decodeReplacesInvalidUtf8`, `decodeStripsNul` — NUL is removed, not preserved (F15).
-* `chooseTextPrefersSelection` — selection wins; whitespace-only selection falls back; both empty.
+* `chooseTextUsesRecency` — selection newer than the clipboard wins; a clipboard change after the
+  capture wins; equal stamps give the selection; a whitespace-only selection falls back; a never-changed
+  clipboard (`0`) always yields the selection; both empty yields empty (H1).
+* `mimeAttemptsAdvanceAndExhaust` — `pendingOffer()` with four advertised types, `beginMimeAttempt()`
+  + `currentMimeType()` + `mimeAttemptFailed()` walk the preference order and return false after the
+  last acceptable type; a retired offer refuses immediately (H6).
+* `payloadAtCapIsNotTruncated` / `payloadOverCapIsTruncated` — exactly `MaxPayloadBytes` versus
+  `MaxPayloadBytes + 1`, proving the one-byte probe (H10).
 * `offerSupersessionRetiresToken` — a read token for offer A is rejected after offer B arrives (F4b).
 * `clipboardOfferIsDiscarded` — the `selection` channel never yields a read (F4d).
 * `retiredOfferIsNeverReused` — `beginMimeAttempt()` returns false after retirement, and after the
@@ -609,8 +691,15 @@ Cases:
 
 * `scanPopupBindingIsPortalOnly` — the real `scanPopupBindingPlanned()` over `xcb`, `wayland`,
   `wayland-egl`, `offscreen`, the preference on/off, and `buildSupportsSelection` false (F18).
-* `portalIdAllowlistsAgree` — a table test proving `knownBindingId()` and `isKnownPortalBindingId()`
-  accept exactly the same three ids, so F2 cannot regress one without the other.
+* `portalIdPredicateAcceptsThreeIds` — the single shared `isKnownPortalBindingId()` over the three ids
+  and a rejection case, plus a source assertion that neither `portalhotkeys.cc` nor `config.cc` keeps a
+  second copy (F2, H11).
+* `capabilityConstantMatchesBuild` — the suite compiles `HAVE_WAYLAND_DATA_CONTROL` under the same
+  pkg-config condition as `goldendict.pro`, and asserts `kHaveWaylandDataControl` is exactly that
+  value; a source assertion checks that `goldendict.pro` guards the define with the `wayland-client`
+  probe (G1, H7).
+* `sourceFollowsThePreference` — a source/behaviour assertion that the startup path starts the source
+  only when `enableScanPopupHotkey` is true and that clearing the preference stops it (H12).
 * `defaultScanPopupHotkeyIsBindable` — `preferredTrigger( default ) == "CTRL+LOGO+d"` and
   `hotKeyStorageText( default )` is non-empty. This is the regression test for F1.
 * `threeBindingsStayBound` — `beginGeneration()` with all three ids stays `Bound`/`Partial`, not
@@ -663,10 +752,13 @@ truncated=<0|1>`, `selection-ignored reason=<no-text-mime|stale-token|timeout>`.
 
 ### 10.5 Acceptance on the reporter's session
 
-Select a word in any application, press the shortcut, confirm the popup shows that word; press it
-again after copying something else with no new selection, confirm the clipboard fallback; press it
-with neither, confirm the message lands in the first visible channel (main window status bar, or the
-tray message when the main window is hidden).
+1. Select a word in another application, press the shortcut → the popup shows that word.
+2. Copy a different word (leaving the old selection untouched), press the shortcut → the popup shows
+   the **copied** word, because the clipboard change is newer (H1).
+3. Press the shortcut immediately after selecting a new word → the new word, never the previous one
+   (promoted capture).
+4. With neither a selection nor clipboard text, press the shortcut → the message lands in the first
+   available channel: main window status bar, else tray message, else the log only.
 
 ## 11. Deferred coverage
 
