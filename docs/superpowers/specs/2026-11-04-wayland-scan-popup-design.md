@@ -1,9 +1,9 @@
 # Wayland scan popup: selected-text shortcut
 
-Status: design revision 5, for review. Run `pm-run-20261104-005240-d7e4068b`, topic `scan-popup`.
-Review history: revision 1 → 27 findings (F1–F27, 3 blockers); revision 2 → 12 (G1–G12, 2 blockers);
-revision 3 → 12 (H1–H12, 2 blockers); revision 4 → 11 (I1–I11, **no blockers**). This revision resolves
-the I set and the remaining partials.
+Status: design revision 6, for review. Run `pm-run-20261104-005240-d7e4068b`, topic `scan-popup`.
+Review history: R1 → 27 findings (F1–F27, 3 blockers); R2 → 12 (G1–G12, 2 blockers); R3 → 12 (H1–H12,
+2 blockers); R4 → 11 (I1–I11, no blockers); R5 → 5 (no blockers, I6 not resolved). This revision
+resolves the last five.
 
 ## 1. Decision record
 
@@ -87,8 +87,10 @@ session was available on this host. (F19)
    change the primary selection. The activation compares *timestamps*, not emptiness: the selection is
    used when it is non-empty **and** was captured no earlier than the clipboard's last change;
    otherwise the clipboard; otherwise the selection; otherwise nothing. Ties go to the selection.
-   Both stamps come from one clock with one epoch — `QElapsedTimer::msecsSinceReference()`, monotonic
-   and process-wide — and the selection stamp is taken when the `primary_selection` **event arrives**,
+   Both stamps come from one clock with one epoch — a `std::chrono::steady_clock` wrapper,
+   `Monotonic::nowMs()`, which is a plain static function and therefore callable exactly as written
+   (`QElapsedTimer::msecsSinceReference()` is an instance method and is not used) — and the selection
+   stamp is taken when the `primary_selection` **event arrives**,
    not when its transfer finishes: otherwise a copy made during the 200 ms debounce, or a slow
    transfer, could make the older selection look newer. The clipboard stamp is updated only for
    `QClipboard::Clipboard` mode; `Selection` and `FindBuffer` changes never touch it (the existing
@@ -176,8 +178,10 @@ public slots:
   void stop();    ///< idempotent; releases device, offers, seat, manager, connection
 
   /// Answer where the current selection is, bounded (G5, I3).
-  /// - one request is in flight at a time; a second id supersedes the first, and
-  ///   the superseded id is answered immediately with capturedAt == 0;
+  /// - one request is in flight at a time; a second id **reuses the active
+  ///   transfer** (the pipe is not cancelled and restarted), replaces the
+  ///   interested id, and answers the superseded id immediately with
+  ///   capturedAt == 0; the new 300 ms deadline starts at the new call;
   /// - a pending capture is promoted (the debounce is skipped);
   /// - each request has its own 300 ms deadline measured from its own call;
   /// - nothing pending is answered at once from the cache with its stamp.
@@ -334,15 +338,18 @@ namespace WaylandSelection {
   byte past the cap distinguishes a payload exactly at the limit from a truncated one, so
   `truncated()` is true only when that extra byte is observed (H10). Bytes are appended to
   `PayloadAccumulator`; `read() < 0 && errno == EAGAIN` means wait; `EINTR` retries.
-* **Which failures retry, and which do not (I2).** The source tries the acceptable MIME types in
-  preference order, and only these failures advance to the next type:
-  * `receive()` returned an error, or the pipe produced **zero bytes** before the idle timeout;
+* **Which failures retry, and which do not (I2).** `receive()` is a **one-way request**: it returns
+  void, and a broken transfer shows up as a protocol error or as a pipe that never delivers — never as
+  a return value to branch on. The source tries the acceptable MIME types in preference order, and only
+  these failures advance to the next type:
+  * the pipe produced **zero bytes** before the 250 ms idle timeout;
   * the read failed with an error other than `EINTR`/`EAGAIN` **before any byte was appended**.
   A failure after at least one byte (a mid-stream error, or a timeout with a partial payload) **drops
   the capture and retires the offer** — a truncated word is not a usable phrase. When the last
   acceptable type fails, the offer is retired. The 2 s absolute deadline is shared: it starts at the
   first attempt and is not reset per MIME type, so a compositor that accepts every request but never
-  answers cannot extend the transfer indefinitely. On completion, timeout or retirement the read end is closed and the notifier
+  answers cannot extend the transfer indefinitely. Reaching that deadline retires the offer whatever
+  the byte count. On completion, timeout or retirement the read end is closed and the notifier
   removed. Two bounds apply: an idle timeout of 250 ms since the last successful read, and an
   **absolute transfer deadline of 2 s** from the `receive()` request.
 * **Flush before waiting (H2).** Every outgoing request batch — the initial registry `sync`,
@@ -462,8 +469,14 @@ else if( id == "scan-popup" && scanPopup )
 {
   scanPopup->winId();                        // native handle exists before the token
   PlatformWindow::applyActivation( scanPopup.get(), token );
-  quint64 const requestId = ++scanPopupRequestId;   // member, monotonic
-  selectionSource->requestCapture( requestId );
+  if( selectionSource )                      // capture supported on this build/session
+  {
+    quint64 const requestId = ++scanPopupRequestId;   // member, monotonic
+    selectionSource->requestCapture( requestId );
+  }
+  else if( !scanPopup->translateSelectedText(          // no source: clipboard only
+             QApplication::clipboard()->text( QClipboard::Clipboard ) ) )
+    reportNothingToTranslate();
 }
 
 // connected once, in the constructor
@@ -677,8 +690,9 @@ existing `eventFilter` (`preferences.cc:600-613`) exactly as the other two are.
 | manager bound, no `primary_selection` ever | `Available` with `primarySelectionSeen == false`; row says "not observed yet" |
 | device `finished` | destroy device and offers, `Unavailable("device finished")`, cached text kept |
 | offer without a text MIME | offer destroyed, cached text untouched, logged |
-| read idle timeout (250 ms since the last byte) | read end closed, payload dropped, offer destroyed, cached text untouched |
-| absolute transfer deadline (2 s from `receive()`) | same as the idle timeout (G2) |
+| idle timeout, zero bytes read | read end closed, the next acceptable MIME type is tried (I2) |
+| idle timeout, partial payload | read end closed, payload dropped, **offer retired**, cached text untouched (I2) |
+| absolute transfer deadline (2 s from the first attempt) | read end closed, offer retired, cached text untouched, whatever the byte count (G2, I2) |
 | payload over 1 MiB | read stops at the cap, payload marked truncated, decoded and sanitised |
 | invalid UTF-8 / embedded NUL | replaced / stripped, then sanitised; an invalid phrase opens nothing |
 | protocol error confined to the private connection | stop, one `Unavailable`, app keeps running |
@@ -710,17 +724,14 @@ Cases:
 * `chooseTextUsesRecency` — selection newer than the clipboard wins; a clipboard change after the
   capture wins; equal stamps give the selection; a whitespace-only selection falls back; a never-changed
   clipboard (`0`) always yields the selection; both empty yields empty (H1).
-* `selectionStampIsReceiptTime` — the stamp is taken when the `primary_selection` event arrives, not
-  when the transfer completes: a copy that lands during the debounce or a slow transfer does not let
-  the older selection win (I1).
 * `clipboardStampIgnoresNonClipboardModes` — a `Selection` or `FindBuffer` change does not advance the
-  clipboard stamp (I1).
+  clipboard stamp (I1). The receipt-time half of I1 needs the real event path and is asserted by the
+  live script (10.4), not here.
 * `mimeAttemptsAdvanceAndExhaust` — `pendingOffer()` with four advertised types, `beginMimeAttempt()`
   + `currentMimeType()` + `mimeAttemptFailed()` walk the preference order and return false after the
   last acceptable type; a retired offer refuses immediately (H6).
-* `mimeRetryPolicy` — a zero-byte failure advances to the next acceptable type and a second attempt
-  can succeed; a failure after the first byte, or a timeout with a partial payload, retires the offer
-  instead of retrying; the 2 s absolute deadline is shared across attempts and not reset (I2).
+The MIME retry policy of §6.4 (I2) needs pipes, timers and a real offer, so it is asserted by the live
+script (10.4) and pinned mechanically by `mimeAttemptsAdvanceAndExhaust` above — not simulated here.
 * `payloadAtCapIsNotTruncated` / `payloadOverCapIsTruncated` — exactly `MaxPayloadBytes` versus
   `MaxPayloadBytes + 1`, proving the one-byte probe (H10).
 * `offerSupersessionRetiresToken` — a read token for offer A is rejected after offer B arrives (F4b).
@@ -731,14 +742,16 @@ Cases:
   capture and starts no read (F4).
 * `activationPlanPromotesPendingCapture` — `planActivation()` returns `AwaitPending` while a capture
   is pending and `UseCached` otherwise (G5/G9).
-* `overlappingRequestsAnswerBothIds` — a second `requestCapture()` supersedes the first, the
-  superseded id is answered immediately with `capturedAt == 0`, each deadline is measured from its own
-  call, and a completion for a superseded id is ignored by the caller's stale-id guard (I3).
+Overlapping requests (I3) are asserted by the live script, which links the real source and can drive
+`requestCapture()` twice. The caller-side guard — `requestId != scanPopupRequestId` — is pinned by a
+source assertion in 10.2, because `MainWindow` is not linked by any suite.
 
 ### 10.2 Extended `tests/tst_hotkeys`
 
-* `scanPopupBindingIsPortalOnly` — the real `scanPopupBindingPlanned()` over `xcb`, `wayland`,
-  `wayland-egl`, `offscreen`, the preference on/off, and `buildSupportsSelection` false (F18).
+* `scanPopupBindingIsPortalOnly` — the two-argument `scanPopupBindingPlanned()` over `xcb`, `wayland`,
+  `wayland-egl`, `offscreen` and the preference on/off, plus the separate
+  `scanPopupCaptureSupported()` matrix over `buildSupportsSelection` true/false for the same platform
+  names (F18, I6).
 * `portalIdPredicateAcceptsThreeIds` — the single shared `isKnownPortalBindingId()` over the three ids
   and a rejection case, plus a source assertion that neither `portalhotkeys.cc` nor `config.cc` keeps a
   second copy (F2, H11).
@@ -758,9 +771,10 @@ Cases:
 * `legacyConfigDefaultsScanPopupHotkeyOff` — a fixture without the two keys loads with `false` (the
   opt-in default) and the `Meta+Ctrl+D` key (F22, I5).
 * Source assertions, same convention as `mainWindowUsesTheSharedInstallGate`: exactly two
-  `"scan-popup"` literals in `mainwindow.cc`, the activation branch calls `winId()` then
-  `applyActivation()` then `translateSelectedText()`, and the `makeScanPopup()` guard mentions
-  `scanPopupBindingPlanned`.
+  `"scan-popup"` literals in `mainwindow.cc`; the activation branch calls `winId()`, then
+  `applyActivation()`, then either `requestCapture()` **guarded by a `selectionSource` null check** or
+  the clipboard-only `translateSelectedText()` (I6); exactly one `requestId != scanPopupRequestId`
+  stale-id guard (I3); and the `makeScanPopup()` guard mentions `scanPopupBindingPlanned`.
 * `xcbGuardDoesNotCreateThePopup` — a source/behaviour assertion that the third guard term is the
   platform predicate, not the bare preference (F11).
 
@@ -768,8 +782,10 @@ Cases:
 
 `tst_hotkeys` drives `Preferences::setHotkeyStatus()` directly with each `WaylandSelectionSource::State`
 and asserts the exact rendered label for the third row — `Starting`, `Available` with and without
-`primarySelectionSeen`, `Unavailable` with a reason, `Unsupported`, and the disabled xcb text — plus a
-`capabilityChanged()` re-render (F8, F17, G7).
+`primarySelectionSeen`, `Unavailable` with a reason, `Unsupported` — plus a `capabilityChanged()`
+re-render (F8, F17, G7). The platform matrix is asserted over `xcb`, `windows`, `cocoa` and `wayland`,
+so the disabled row and the preserved values are proven on every non-Wayland platform, not only xcb
+(I9).
 
 ### 10.4 Live protocol gate (G9)
 
@@ -787,7 +803,15 @@ selection from a helper client, and asserts:
   a single short read);
 * a burst of ten rapid selections produces exactly one read (the debounce);
 * a payload larger than `MaxPayloadBytes` is captured truncated, not dropped;
-* a superseded selection never overwrites the newer capture (token retirement).
+* a superseded selection never overwrites the newer capture (token retirement);
+* **receipt-time stamps (I1):** setting a copy during the debounce leaves the selection stamp older
+  than the clipboard stamp, so the activation chooses the clipboard;
+* **MIME retry (I2):** a helper that advertises two acceptable types and refuses the first proves the
+  second is attempted; a helper that sends a partial payload and closes nothing proves the offer is
+  retired at the deadline rather than retried;
+* **overlapping requests (I3):** two `requestCapture()` calls during one promoted read answer both
+  ids — the superseded one with `capturedAt == 0`, the second on completion — and a completion after
+  `stop()` is ignored rather than delivered.
 
 The activation path is proven separately and does not need the compositor: `planActivation()` is unit
 tested (10.1), the wiring is pinned by the source assertions and `threeBindingsStayBound` (10.2/10.3),
