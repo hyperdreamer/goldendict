@@ -414,6 +414,7 @@ HEADERS += folding.hh \
     hotkeybackend.hh \
     hotkeysyntax.hh \
     portalhotkeys.hh \
+    waylandselectionlogic.hh \
     platformwindow.hh
 
 FORMS += groups.ui \
@@ -558,6 +559,7 @@ SOURCES += folding.cc \
     hotkeybackend.cc \
     hotkeysyntax.cc \
     portalhotkeys.cc \
+    waylandselectionlogic.cc \
     platformwindow.cc
 
 win32 {
@@ -755,9 +757,8 @@ tests-makefile.commands = $$QMAKE_QMAKE $$PWD/tests/tests.pro -o $$PWD/tests/$$C
 tests-build.target = tests-build
 tests-build.depends = tests-makefile
 # The suites are independent projects with private object directories, so the
-# build half runs in parallel: a serial cold build of all 18 suites does not fit
-# the gate's own 900 s budget (measured: 900 s built 3 of 18 suites). The run
-# half stays serial for deterministic test execution.
+# build half runs in parallel for all 20 suites. The run half stays serial for
+# deterministic test execution within the gate's wall-clock budget.
 tests-build.commands = $(GD_TEST_WRAPPER) $(MAKE) -C $$PWD/tests -f $$CHECK_MAKEFILE -j$(shell nproc)
 
 tests-run.target = tests-run
