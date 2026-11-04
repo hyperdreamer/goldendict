@@ -442,6 +442,22 @@ QString selectionBlock( QString const & text, QString const & anchor )
   }
   return {};
 }
+// Unlike selectionBlock(), this requires the body to start immediately after
+// the condition and also handles an unbraced action such as EINTR's continue.
+QString selectionBranch( QString const & text, QString const & condition )
+{
+  qsizetype const at = text.indexOf( condition );
+  if( at < 0 ) return {};
+  qsizetype first = at + condition.size();
+  while( first < text.size() && text[first].isSpace() ) ++first;
+  if( first == text.size() ) return {};
+  if( text[first] == '{' ) return selectionBlock( text.mid( first ), "{" );
+  qsizetype const end = text.indexOf( ';', first );
+  if( end < 0 ) return {};
+  QString const action = text.mid( first, end - first + 1 );
+  if( action.contains( '{' ) || action.contains( '}' ) ) return {};
+  return action;
+}
 bool selectionOrdered( QString const & text, QStringList const & needles )
 {
   qsizetype previous = -1;
@@ -3114,32 +3130,120 @@ void TstHotkeys::scanPopupSourceLoopContractIsPinned()
   QVERIFY( selectionOrdered( readFailure, { "offersState.mimeAttemptFailed()", "closeRead()", "startMimeAttempt()" } ) );
   QVERIFY( selectionCompact( drain ).contains( "elsedropCapture(false);" ) );
   QString const timeout = method( "void checkTransferDeadline(" );
-  QVERIFY( selectionOrdered( timeout, { "now >= transferDeadline", "now >= lastProgressAt + IdleTimeoutMs", "bytesObserved == 0", "mimeAttemptFailed()", "startMimeAttempt()" } ) );
+  QVERIFY2( selectionCompact( timeout ).startsWith( "assertThread();if(ownerStopped)return;" ),
+            "deadline owner-stopped path must return silently before token checks" );
+  QString const rejectedDeadline = selectionBranch( timeout, "if( !offersState.accepts( token ) )" );
+  QVERIFY2( rejectedDeadline.contains( "\"selection-ignored reason=stale-token\"" ) &&
+              selectionCompact( rejectedDeadline ) == selectionCompact( "gdDebug( \"selection-ignored reason=stale-token\" ); return;" ) &&
+              selectionCompact( timeout ).startsWith( "assertThread();if(ownerStopped)return;if(!offersState.accepts(token)){" ),
+            "deadline stale-token path must log selection-ignored reason=stale-token and return without state changes" );
+  QVERIFY( selectionOrdered( timeout, { "if( ownerStopped )", "if( !offersState.accepts( token ) )", "qint64 const now", "now >= transferDeadline", "now >= lastProgressAt + IdleTimeoutMs", "bytesObserved == 0", "mimeAttemptFailed()", "startMimeAttempt()" } ) );
   QString const success = method( "void complete(" );
   QVERIFY( selectionOrdered( success, { "offersState.accepts( token )", "checkTransferDeadline( token )", "offersState.accepts( token )", "cache = decodePayload", "cacheStamp =", "offersState.completed( token )", "closeRead()", "destroyOffer", "flushRequests()", "expireInterest()", "answerInterest" } ) );
   QString const retire = method( "void retirePrimary()" );
   QVERIFY( selectionOrdered( retire, { "offersState.retire()", "debounce.stop()", "closeRead()", "destroyOffer" } ) );
+  // These branches cannot be forced by the live compositor harness. Compare
+  // complete extracted actions, including their returns, so an unreachable or
+  // differently guarded token cannot satisfy the contract.
+  auto sameAction = []( QString actual, QString expected ) {
+    QRegularExpression const comments( "//[^\\n]*|/\\*[\\s\\S]*?\\*/" );
+    actual.remove( comments ); expected.remove( comments );
+    return selectionCompact( actual ) == selectionCompact( expected );
+  };
+  QString const rearmRead = "if( flushRequests() && live() ) displayRead->setEnabled( true );";
   QString const readable = method( "void dispatchDisplayReadable()" );
-  QString const prepareFailure = selectionBlock( readable, "if( wl_display_prepare_read( c->display ) != 0 )" );
-  QVERIFY( !prepareFailure.isEmpty() );
-  QVERIFY( prepareFailure.contains( "dispatchPending( c, generation )" ) );
-  QVERIFY( !prepareFailure.contains( "wl_display_read_events" ) );
-  QVERIFY( selectionCompact( prepareFailure ).endsWith( "return;" ) );
-  QVERIFY( prepareFailure.contains( "if( flushRequests() && live() ) displayRead->setEnabled( true );" ) );
-  QString const pollNotReady = selectionBlock( readable, "if( ::poll(" );
-  QVERIFY( !pollNotReady.isEmpty() && !pollNotReady.contains( "wl_display_read_events" ) );
-  QVERIFY( selectionOrdered( pollNotReady, { "wl_display_cancel_read", "c->prepared = false", "flushRequests()", "displayRead->setEnabled( true )", "return" } ) );
-  QVERIFY( readable.trimmed().endsWith( "if( flushRequests() && live() ) displayRead->setEnabled( true );" ) );
-  QVERIFY( selectionOrdered( readable, { "displayRead->setEnabled( false )", "wl_display_prepare_read", "c->prepared = true",
-                                         "poll(", "wl_display_cancel_read", "++c->dispatchDepth", "wl_display_read_events", "--c->dispatchDepth", "c->prepared = false", "c->retired || c->generation != generation", "dispatchPending" } ) );
+  QString const prepareFailure = selectionBranch( readable, "if( wl_display_prepare_read( c->display ) != 0 )" );
+  QVERIFY2( sameAction( prepareFailure,
+                        "if( wl_display_get_error( c->display ) ) { fail( \"Wayland display error\" ); return; }"
+                        "if( !dispatchPending( c, generation ) ) return;" + rearmRead + "return;" ),
+            "prepare-read failure must fail on display error or dispatch once, flush/rearm only while live, and return without reading" );
+  QString const pollNotReady = selectionBranch( readable, "if( ::poll( &ready, 1, 0 ) <= 0 || !( ready.revents & ( POLLIN | POLLHUP | POLLERR ) ) )" );
+  QVERIFY2( sameAction( pollNotReady, "wl_display_cancel_read( c->display ); c->prepared = false;" + rearmRead + "return;" ),
+            "poll-not-ready path must cancel the prepared read, clear prepared, flush/rearm only while live, and return without reading" );
+  QVERIFY2( sameAction( readable.left( readable.indexOf( "if( wl_display_prepare_read" ) ),
+                        "assertThread(); if( !live() ) return; auto const c = connection;"
+                        "quint64 const generation = c->generation; displayRead->setEnabled( false );" ),
+            "readable path must guard liveness and disable the reader before preparing" );
+  QVERIFY2( sameAction( readable.mid( readable.indexOf( "c->prepared = true" ),
+                                      readable.indexOf( "if( ::poll(" ) - readable.indexOf( "c->prepared = true" ) ),
+                        "c->prepared = true; pollfd ready{ c->fd, POLLIN, 0 };" ),
+            "successful prepare must mark the read prepared and poll without an intervening return" );
+  qsizetype const readAt = readable.indexOf( "++c->dispatchDepth" );
+  QVERIFY( readAt >= 0 );
+  QString const consumed = readable.mid( readAt );
+  QVERIFY2( sameAction( consumed.left( consumed.indexOf( "if( c->retired" ) ),
+                        "++c->dispatchDepth; int const result = wl_display_read_events( c->display );"
+                        "--c->dispatchDepth; c->prepared = false;" ),
+            "read-events must consume the prepared read and clear prepared without canceling it" );
+  QVERIFY2( sameAction( selectionBranch( consumed, "if( c->retired || c->generation != generation )" ),
+                        "c->destroyConnection(); return;" ),
+            "consumed-read retirement must destroy the connection and return before further dispatch" );
+  QVERIFY2( sameAction( selectionBranch( consumed, "if( result < 0 || wl_display_get_error( c->display ) )" ),
+                        "fail( \"Wayland display error\" ); return;" ),
+            "consumed-read error must fail and return without canceling or dispatching" );
+  QVERIFY2( sameAction( consumed.mid( consumed.indexOf( "if( !dispatchPending" ) ),
+                        "if( !dispatchPending( c, generation ) ) return;" + rearmRead ),
+            "consumed-read success must stop on dispatch failure and flush/rearm only while live without canceling" );
+  QVERIFY2( sameAction( consumed,
+                        "++c->dispatchDepth; int const result = wl_display_read_events( c->display );"
+                        "--c->dispatchDepth; c->prepared = false;"
+                        "if( c->retired || c->generation != generation ) { c->destroyConnection(); return; }"
+                        "if( result < 0 || wl_display_get_error( c->display ) ) { fail( \"Wayland display error\" ); return; }"
+                        "if( !dispatchPending( c, generation ) ) return;" + rearmRead ),
+            "consumed-read paths must remain contiguous without extra cancellation, state changes, or early returns" );
+  QVERIFY2( sameAction( readable,
+                        "assertThread(); if( !live() ) return; auto const c = connection;"
+                        "quint64 const generation = c->generation; displayRead->setEnabled( false );"
+                        "if( wl_display_prepare_read( c->display ) != 0 ) {" + prepareFailure + "}"
+                        "c->prepared = true; pollfd ready{ c->fd, POLLIN, 0 };"
+                        "if( ::poll( &ready, 1, 0 ) <= 0 || !( ready.revents & ( POLLIN | POLLHUP | POLLERR ) ) ) {" + pollNotReady + "}" + consumed ),
+            "readable branches must remain contiguous without bypassing prepare, cancel, or read consumption" );
   QString const dispatch = method( "bool dispatchPending(" );
-  QVERIFY( selectionOrdered( dispatch, { "++c->dispatchDepth", "wl_display_dispatch_pending", "--c->dispatchDepth", "c->retired || c->generation != generation", "destroyConnection()" } ) );
+  QVERIFY2( sameAction( dispatch.left( dispatch.indexOf( "if( c->retired" ) ),
+                        "++c->dispatchDepth; int const result = wl_display_dispatch_pending( c->display ); --c->dispatchDepth;" ),
+            "pending dispatch must unwind dispatch depth before checking retirement" );
+  QVERIFY2( sameAction( selectionBranch( dispatch, "if( c->retired || c->generation != generation )" ),
+                        "c->destroyConnection(); return false;" ),
+            "pending-dispatch retirement must destroy the connection and return false" );
+  QVERIFY2( sameAction( dispatch.mid( dispatch.indexOf( "if( wl_display_get_error" ) ),
+                        "if( wl_display_get_error( c->display ) ) { fail( \"Wayland display error\" ); return false; }"
+                        "if( result < 0 ) return flushRequests(); return true;" ),
+            "pending-dispatch error must fail, a negative result must return the flush result, and success must return true" );
+  QVERIFY2( sameAction( dispatch,
+                        "++c->dispatchDepth; int const result = wl_display_dispatch_pending( c->display ); --c->dispatchDepth;"
+                        "if( c->retired || c->generation != generation ) { c->destroyConnection(); return false; }"
+                        "if( wl_display_get_error( c->display ) ) { fail( \"Wayland display error\" ); return false; }"
+                        "if( result < 0 ) return flushRequests(); return true;" ),
+            "pending-dispatch branches must remain contiguous without extra dispatch or early returns" );
   QString const flush = method( "bool flushRequests()" );
-  QVERIFY( selectionOrdered( flush, { "wl_display_flush", "if( result >= 0 )", "displayWrite->setEnabled( false )", "errno == EINTR", "errno == EAGAIN", "displayWrite->setEnabled( true )", "fail( \"Wayland display error\" )" } ) );
-  QVERIFY( selectionBlock( flush, "if( errno == EAGAIN )" ).contains( "return true" ) );
+  QVERIFY2( sameAction( flush.left( flush.indexOf( "for( ;; )" ) ), "assertThread(); if( !live() ) return false;" ),
+            "flush must return false while not live before accessing the connection" );
+  QString const flushLoop = selectionBranch( flush, "for( ;; )" );
+  QVERIFY2( sameAction( flushLoop.left( flushLoop.indexOf( "if( result >= 0 )" ) ),
+                        "if( wl_display_get_error( connection->display ) ) { fail( \"Wayland display error\" ); return false; }"
+                        "int const result = wl_display_flush( connection->display );"
+                        "if( wl_display_get_error( connection->display ) ) { fail( \"Wayland display error\" ); return false; }" ),
+            "flush must check display errors before and after each attempt without changing writer arming" );
+  QVERIFY2( sameAction( selectionBranch( flushLoop, "if( result >= 0 )" ), "displayWrite->setEnabled( false ); return true;" ),
+            "successful flush must disarm the writer and return true" );
+  QVERIFY2( sameAction( selectionBranch( flushLoop, "if( errno == EINTR )" ), "continue;" ),
+            "flush EINTR must retry the flush loop without disarming an armed writer" );
+  QVERIFY2( sameAction( selectionBranch( flushLoop, "if( errno == EAGAIN )" ), "displayWrite->setEnabled( true ); return true;" ),
+            "flush EAGAIN must arm the writer and return true" );
+  QVERIFY2( sameAction( flushLoop.mid( flushLoop.lastIndexOf( "fail(" ) ), "fail( \"Wayland display error\" ); return false;" ),
+            "unrecoverable flush error must fail and return false" );
+  QVERIFY2( sameAction( flushLoop,
+                        "if( wl_display_get_error( connection->display ) ) { fail( \"Wayland display error\" ); return false; }"
+                        "int const result = wl_display_flush( connection->display );"
+                        "if( wl_display_get_error( connection->display ) ) { fail( \"Wayland display error\" ); return false; }"
+                        "if( result >= 0 ) { displayWrite->setEnabled( false ); return true; }"
+                        "if( errno == EINTR ) continue;"
+                        "if( errno == EAGAIN ) { displayWrite->setEnabled( true ); return true; }"
+                        "fail( \"Wayland display error\" ); return false;" ),
+            "flush loop must reach each result branch without intervening returns or writer state changes" );
   QString const writable = method( "void dispatchDisplayWritable()" );
-  QVERIFY( writable.contains( "if( ownerStopped || !connection || connection->retired ) return" ) );
-  QVERIFY( writable.contains( "flushRequests()" ) );
+  QVERIFY2( sameAction( writable, "assertThread(); if( ownerStopped || !connection || connection->retired ) return; flushRequests();" ),
+            "writable callback must return after stop or retirement and otherwise retry the flush" );
   QString const dispose = method( "void dispose()" );
   QVERIFY( selectionOrdered( dispose, { "c->retired = true", "++c->generation", "offersState.retire()", "debounce.stop()", "activation.stop()",
                                        "closeRead()", "displayRead.reset()", "displayWrite.reset()", "destroyProtocol()", "if( c->dispatchDepth == 0 )", "c->destroyConnection()", "[c]" } ) );

@@ -374,7 +374,10 @@ public:
     REQUIRE(set(62,text("new-value")));REQUIRE(wait([&]{return source->lastText()=="new-value";}));
     REQUIRE(until(Monotonic::nowMs()+450));
     REQUIRE(source->lastText()=="new-value");REQUIRE(source->state()==WaylandSelectionSource::State::Available);
-    REQUIRE(captures()==1);REQUIRE(event(61,"write-error")||event(61,"closed"));
+    REQUIRE(captures()==1);REQUIRE(event(61,"write-error"));
+    bool readerClosed=false;
+    for(auto const & e:events) if(e.value("event")=="write-error"&&e.value("serial").toInt()==61&&e.value("errno").toInt()==EPIPE) readerClosed=true;
+    REQUIRE(readerClosed);
     source->requestCapture(2);REQUIRE(forId(2).size()==1&&forId(2)[0].text=="new-value"&&forId(2)[0].stamp>0);
     REQUIRE(forId(1).size()==1&&forId(1)[0].text=="new-value");return true;
   }

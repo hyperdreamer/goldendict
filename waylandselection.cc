@@ -540,7 +540,8 @@ public:
   void checkTransferDeadline( ReadToken token )
   {
     assertThread();
-    if( ownerStopped || !offersState.accepts( token ) ) return;
+    if( ownerStopped ) return;
+    if( !offersState.accepts( token ) ) { gdDebug( "selection-ignored reason=stale-token" ); return; }
     qint64 const now = Monotonic::nowMs();
     if( now >= transferDeadline ) { dropCapture( true ); return; }
     if( now >= lastProgressAt + IdleTimeoutMs )
