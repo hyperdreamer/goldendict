@@ -36,10 +36,57 @@ unavailable until the user edits them; nothing is silently truncated or rewritte
 save. Labels are exactly what the portal reports — the application displays
 portal-reported labels only and never invents its own.
 
-Clipboard-change scanning (the Clipboard-mode watch on the selection buffer) and
-explicit clipboard lookup remain two separate behaviours; one does not enable or
-impersonate the other. Hover translation and X11 focus restoration remain X11-only,
-so on Wayland both are absent by design rather than broken.
+Selected-text translation is available through a global shortcut on compositors
+exposing `ext_data_control_manager_v1`, with clipboard fallback when primary-selection
+capture is unavailable. The shortcut is opt-in and defaults off. Binding the shortcut
+and reading the selection are separate capabilities: a build without libwayland-client
+still registers the enabled Wayland action and uses the clipboard.
+
+Clipboard-change scanning, explicit clipboard lookup and the selected-text action
+remain separate behaviours. A selection alone does not open a new shortcut-driven
+popup. Automatic selection popups and held-modifier emulation on Wayland are outside
+this change. Hover translation and X11 focus restoration remain X11-only.
+
+Coverage is limited to the ext protocol. wlroots compositors (sway, hyprland and labwc)
+expose `zwlr_data_control_v1`; support is deferred. Its generated pair and bind attempt
+can later fit behind the same source interface without changing the pure selection
+logic. GNOME/Mutter exposes neither data-control protocol, so this feature cannot read
+its primary selection in the background. A future GNOME-side protocol or the
+RemoteDesktop Clipboard portal with remote-control consent would be needed; the
+shortcut remains registered and falls back to the clipboard. Only the first seat is
+watched, with no simultaneous multi-seat aggregation. Data-control has no owner
+identity: selections in GoldenDict's own article and in other applications are both
+eligible.
+
+Binding the manager does not prove primary-selection support. Available with no
+primary event means `selection not observed yet`; even a null primary event latches
+the capability. Cached text is intentionally sticky across null selections. A promoted
+activation that reaches its 300 ms deadline suppresses that cache for that request;
+it does not turn old text into a fresh capture. The deadline is a source policy under
+event-loop progress, without a promise through OS suspension or unrelated GUI-thread
+blocking.
+
+The source uses a private connection. A protocol failure ends that watcher while the
+rest of the application may continue. A compositor restart also kills Qt's own
+Wayland connection and Qt terminates the process; application survival or reconnection
+is not promised. An unavailable source stays terminal until the preference is turned
+off and on. Materialising a native handle and applying an activation token requests
+activation; the compositor can decline focus.
+
+An empty activation attempts the main-window status bar when visible, otherwise a
+GoldenDict tray notification if the tray object exists. A hidden main window without
+a tray object has no visible notification channel and only logs `selection-empty`.
+Desktop notification policy can also suppress a requested tray message.
+
+The logic suite proves pure decisions without exercising a Wayland session. The
+hotkeys suite links Config, Preferences and the backend, but not MainWindow, ScanPopup
+or the selection source; its source assertions pin wiring without proving runtime
+effects. The separate live script links the real source and tests its stated protocol
+cases, including receipt stamps, MIME policy and overlapping requests. Flush pressure,
+registry removal and error branches that the live harness cannot force remain
+explicitly labelled source assertions. Popup opening, the visible notification ladder
+and focus outcomes require a person's application session; no successful interaction
+receipt is inferred from a source assertion or protocol-runner PASS.
 
 ## 3. Portal dialogs, `parent_window` and best-effort activation
 
