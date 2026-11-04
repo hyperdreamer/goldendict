@@ -442,10 +442,61 @@ QString selectionBlock( QString const & text, QString const & anchor )
   }
   return {};
 }
+// Tokenize the C++ fragments under review without changing string contents or
+// token boundaries. Only braces around one simple controlled statement are
+// optional: nested control flow and multi-statement blocks keep their scopes.
+QString selectionCode( QString const & text )
+{
+  QRegularExpression const lexer( R"cpp("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|//[^\n]*|/\*[\s\S]*?\*/|[A-Za-z_][A-Za-z_0-9]*|[0-9]+|::|->|\+\+|--|&&|\|\||==|!=|<=|>=|\+=|-=|<<|>>|\S)cpp" );
+  QStringList tokens;
+  auto matches = lexer.globalMatch( text );
+  while( matches.hasNext() )
+  {
+    QString const token = matches.next().captured();
+    if( !token.startsWith( "//" ) && !token.startsWith( "/*" ) ) tokens.append( token );
+  }
+  for( qsizetype i = 0; i < tokens.size(); ++i )
+  {
+    qsizetype body = i + 1;
+    if( tokens[i] == "if" || tokens[i] == "for" || tokens[i] == "while" )
+    {
+      if( body == tokens.size() || tokens[body] != "(" ) continue;
+      int depth = 0;
+      do
+      {
+        if( tokens[body] == "(" ) ++depth;
+        else if( tokens[body] == ")" ) --depth;
+        ++body;
+      } while( body < tokens.size() && depth > 0 );
+      if( depth != 0 ) continue;
+    }
+    else if( tokens[i] != "else" ) continue;
+    if( body + 2 >= tokens.size() || tokens[body] != "{" ) continue;
+    QString const first = tokens[body + 1];
+    if( first == "if" || first == "for" || first == "while" || first == "switch" || first == "do" ) continue;
+    qsizetype end = body + 1;
+    int parentheses = 0, semicolons = 0;
+    for( ; end < tokens.size() && tokens[end] != "{" && tokens[end] != "}"; ++end )
+    {
+      if( tokens[end] == "(" ) ++parentheses;
+      else if( tokens[end] == ")" ) --parentheses;
+      else if( tokens[end] == ";" && parentheses == 0 ) ++semicolons;
+    }
+    if( end < tokens.size() && tokens[end] == "}" && tokens[end - 1] == ";" &&
+        parentheses == 0 && semicolons == 1 )
+    {
+      tokens.removeAt( end );
+      tokens.removeAt( body );
+    }
+  }
+  return tokens.join( ' ' );
+}
 // Unlike selectionBlock(), this requires the body to start immediately after
 // the condition and also handles an unbraced action such as EINTR's continue.
-QString selectionBranch( QString const & text, QString const & condition )
+QString selectionBranch( QString text, QString condition )
 {
+  text = selectionCode( text );
+  condition = selectionCode( condition );
   qsizetype const at = text.indexOf( condition );
   if( at < 0 ) return {};
   qsizetype first = at + condition.size();
@@ -3097,6 +3148,26 @@ void TstHotkeys::scanPopupSourceLoopContractIsPinned()
   qInfo( "source assertions: protocol loop/teardown contracts; no syscall or compositor observation" );
   QString const source = selectionSourceText( "waylandselection.cc" ); QVERIFY( !source.isEmpty() );
   auto method = [&]( QString const & name ) { return selectionBlock( source, name ); };
+  QString const codeSource = selectionCode( source );
+  auto codeMethod = [&]( QString const & name ) { return selectionBlock( codeSource, selectionCode( name ) ); };
+  auto sameAction = []( QString const & actual, QString const & expected ) {
+    return selectionCode( actual ) == selectionCode( expected );
+  };
+  auto before = []( QString const & text, QString const & anchor ) {
+    QString const code = selectionCode( text );
+    qsizetype const at = code.indexOf( selectionCode( anchor ) );
+    return at < 0 ? QString() : code.left( at );
+  };
+  auto from = []( QString const & text, QString const & anchor, bool last = false ) {
+    QString const code = selectionCode( text );
+    QString const needle = selectionCode( anchor );
+    qsizetype const at = last ? code.lastIndexOf( needle ) : code.indexOf( needle );
+    return at < 0 ? QString() : code.mid( at );
+  };
+  auto orderedAction = []( QString const & text, QStringList needles ) {
+    for( QString & needle : needles ) needle = selectionCode( needle );
+    return selectionOrdered( selectionCode( text ), needles );
+  };
   QString const start = method( "void start()" );
   QVERIFY( !start.isEmpty() );
   QVERIFY( selectionOrdered( start, { "if( started || ownerStopped ) return", "started = true", "wl_display_connect( nullptr )",
@@ -3122,36 +3193,53 @@ void TstHotkeys::scanPopupSourceLoopContractIsPinned()
   QVERIFY( !attempt.contains( "O_CLOEXEC | O_NONBLOCK" ) );
   QVERIFY( !attempt.contains( "fcntl( fds[1]" ) );
   QVERIFY( !attempt.contains( "transferStartedAt =" ) );
-  QString const drain = method( "void drainPipe(" );
-  QVERIFY( selectionOrdered( drain, { "offersState.accepts( token )", "checkTransferDeadline( token )", "char buffer[16384]",
-                                      "MaxPayloadBytes + 1 - bytesObserved", "::read(", "if( count > 0 )", "bytesObserved == MaxPayloadBytes + 1", "if( count == 0 )" } ) );
-  QVERIFY( drain.contains( "errno == EINTR" ) && drain.contains( "errno == EAGAIN || errno == EWOULDBLOCK" ) );
-  QString const readFailure = selectionBlock( drain, "if( bytesObserved == 0 )" );
-  QVERIFY( selectionOrdered( readFailure, { "offersState.mimeAttemptFailed()", "closeRead()", "startMimeAttempt()" } ) );
-  QVERIFY( selectionCompact( drain ).contains( "elsedropCapture(false);" ) );
-  QString const timeout = method( "void checkTransferDeadline(" );
-  QVERIFY2( selectionCompact( timeout ).startsWith( "assertThread();if(ownerStopped)return;" ),
+  QString const drain = codeMethod( "void drainPipe(" );
+  QVERIFY( orderedAction( drain, { "offersState.accepts( token )", "checkTransferDeadline( token )", "char buffer[16384]",
+                                  "MaxPayloadBytes + 1 - bytesObserved", "::read(", "if( count > 0 )", "bytesObserved == MaxPayloadBytes + 1", "if( count == 0 )" } ) );
+  QString const drainLoop = selectionBranch( drain, "for( ;; )" );
+  QVERIFY2( sameAction( selectionBranch( drainLoop, "if( errno == EINTR )" ), "continue;" ),
+            "pipe EINTR must retry the read loop without returning or rearming the notifier" );
+  QVERIFY2( sameAction( selectionBranch( drainLoop, "if( errno == EAGAIN || errno == EWOULDBLOCK )" ),
+                        "checkTransferDeadline( token ); if( offersState.accepts( token ) ) pipeRead->setEnabled( true ); return;" ),
+            "pipe EAGAIN must check the deadline, rearm only for the accepted token, and return" );
+  QVERIFY2( sameAction( drainLoop,
+                        "checkTransferDeadline( token ); if( !offersState.accepts( token ) ) return;"
+                        "char buffer[16384]; int const remaining = MaxPayloadBytes + 1 - bytesObserved;"
+                        "ssize_t const count = ::read( readEnd, buffer, std::min<int>( sizeof buffer, remaining ) );"
+                        "if( count > 0 ) { payload.append( QByteArray( buffer, count ) );"
+                        "bytesObserved += int( count ); lastProgressAt = Monotonic::nowMs();"
+                        "if( bytesObserved == MaxPayloadBytes + 1 ) { complete( token ); return; } continue; }"
+                        "if( count == 0 ) { complete( token ); return; }"
+                        "if( errno == EINTR ) continue;"
+                        "if( errno == EAGAIN || errno == EWOULDBLOCK ) { checkTransferDeadline( token );"
+                        "if( offersState.accepts( token ) ) pipeRead->setEnabled( true ); return; }"
+                        "int const error = errno; gdDebug( \"selection-transfer-error operation=read errno=%d\", error );"
+                        "if( bytesObserved == 0 ) { offersState.mimeAttemptFailed(); closeRead(); startMimeAttempt(); }"
+                        "else dropCapture( false ); return;" ),
+            "pipe read loop must reach each result branch without intervening returns or notifier state changes" );
+  QString const readFailure = selectionBranch( drain, "if( bytesObserved == 0 )" );
+  QVERIFY( orderedAction( readFailure, { "offersState.mimeAttemptFailed()", "closeRead()", "startMimeAttempt()" } ) );
+  QVERIFY( selectionCompact( selectionCode( drain ) ).contains( "elsedropCapture(false);" ) );
+  QString const timeout = codeMethod( "void checkTransferDeadline(" );
+  QVERIFY2( sameAction( before( timeout, "if( ownerStopped )" ), "assertThread();" ) &&
+              sameAction( selectionBranch( timeout, "if( ownerStopped )" ), "return;" ),
             "deadline owner-stopped path must return silently before token checks" );
   QString const rejectedDeadline = selectionBranch( timeout, "if( !offersState.accepts( token ) )" );
-  QVERIFY2( rejectedDeadline.contains( "\"selection-ignored reason=stale-token\"" ) &&
-              selectionCompact( rejectedDeadline ) == selectionCompact( "gdDebug( \"selection-ignored reason=stale-token\" ); return;" ) &&
-              selectionCompact( timeout ).startsWith( "assertThread();if(ownerStopped)return;if(!offersState.accepts(token)){" ),
+  QVERIFY2( sameAction( rejectedDeadline, "gdDebug( \"selection-ignored reason=stale-token\" ); return;" ) &&
+              sameAction( before( timeout, "qint64 const now" ),
+                          "assertThread(); if( ownerStopped ) return;"
+                          "if( !offersState.accepts( token ) ) { gdDebug( \"selection-ignored reason=stale-token\" ); return; }" ),
             "deadline stale-token path must log selection-ignored reason=stale-token and return without state changes" );
-  QVERIFY( selectionOrdered( timeout, { "if( ownerStopped )", "if( !offersState.accepts( token ) )", "qint64 const now", "now >= transferDeadline", "now >= lastProgressAt + IdleTimeoutMs", "bytesObserved == 0", "mimeAttemptFailed()", "startMimeAttempt()" } ) );
+  QVERIFY( orderedAction( timeout, { "if( ownerStopped )", "if( !offersState.accepts( token ) )", "qint64 const now", "now >= transferDeadline", "now >= lastProgressAt + IdleTimeoutMs", "bytesObserved == 0", "mimeAttemptFailed()", "startMimeAttempt()" } ) );
   QString const success = method( "void complete(" );
   QVERIFY( selectionOrdered( success, { "offersState.accepts( token )", "checkTransferDeadline( token )", "offersState.accepts( token )", "cache = decodePayload", "cacheStamp =", "offersState.completed( token )", "closeRead()", "destroyOffer", "flushRequests()", "expireInterest()", "answerInterest" } ) );
   QString const retire = method( "void retirePrimary()" );
   QVERIFY( selectionOrdered( retire, { "offersState.retire()", "debounce.stop()", "closeRead()", "destroyOffer" } ) );
   // These branches cannot be forced by the live compositor harness. Compare
-  // complete extracted actions, including their returns, so an unreachable or
-  // differently guarded token cannot satisfy the contract.
-  auto sameAction = []( QString actual, QString expected ) {
-    QRegularExpression const comments( "//[^\\n]*|/\\*[\\s\\S]*?\\*/" );
-    actual.remove( comments ); expected.remove( comments );
-    return selectionCompact( actual ) == selectionCompact( expected );
-  };
+  // normalized complete actions, including their returns and ordering, so an
+  // unreachable or differently guarded token cannot satisfy the contract.
   QString const rearmRead = "if( flushRequests() && live() ) displayRead->setEnabled( true );";
-  QString const readable = method( "void dispatchDisplayReadable()" );
+  QString const readable = codeMethod( "void dispatchDisplayReadable()" );
   QString const prepareFailure = selectionBranch( readable, "if( wl_display_prepare_read( c->display ) != 0 )" );
   QVERIFY2( sameAction( prepareFailure,
                         "if( wl_display_get_error( c->display ) ) { fail( \"Wayland display error\" ); return; }"
@@ -3160,18 +3248,16 @@ void TstHotkeys::scanPopupSourceLoopContractIsPinned()
   QString const pollNotReady = selectionBranch( readable, "if( ::poll( &ready, 1, 0 ) <= 0 || !( ready.revents & ( POLLIN | POLLHUP | POLLERR ) ) )" );
   QVERIFY2( sameAction( pollNotReady, "wl_display_cancel_read( c->display ); c->prepared = false;" + rearmRead + "return;" ),
             "poll-not-ready path must cancel the prepared read, clear prepared, flush/rearm only while live, and return without reading" );
-  QVERIFY2( sameAction( readable.left( readable.indexOf( "if( wl_display_prepare_read" ) ),
+  QVERIFY2( sameAction( before( readable, "if( wl_display_prepare_read" ),
                         "assertThread(); if( !live() ) return; auto const c = connection;"
                         "quint64 const generation = c->generation; displayRead->setEnabled( false );" ),
             "readable path must guard liveness and disable the reader before preparing" );
-  QVERIFY2( sameAction( readable.mid( readable.indexOf( "c->prepared = true" ),
-                                      readable.indexOf( "if( ::poll(" ) - readable.indexOf( "c->prepared = true" ) ),
+  QVERIFY2( sameAction( before( from( readable, "c->prepared = true" ), "if( ::poll(" ),
                         "c->prepared = true; pollfd ready{ c->fd, POLLIN, 0 };" ),
             "successful prepare must mark the read prepared and poll without an intervening return" );
-  qsizetype const readAt = readable.indexOf( "++c->dispatchDepth" );
-  QVERIFY( readAt >= 0 );
-  QString const consumed = readable.mid( readAt );
-  QVERIFY2( sameAction( consumed.left( consumed.indexOf( "if( c->retired" ) ),
+  QString const consumed = from( readable, "++c->dispatchDepth" );
+  QVERIFY( !consumed.isEmpty() );
+  QVERIFY2( sameAction( before( consumed, "if( c->retired" ),
                         "++c->dispatchDepth; int const result = wl_display_read_events( c->display );"
                         "--c->dispatchDepth; c->prepared = false;" ),
             "read-events must consume the prepared read and clear prepared without canceling it" );
@@ -3181,7 +3267,7 @@ void TstHotkeys::scanPopupSourceLoopContractIsPinned()
   QVERIFY2( sameAction( selectionBranch( consumed, "if( result < 0 || wl_display_get_error( c->display ) )" ),
                         "fail( \"Wayland display error\" ); return;" ),
             "consumed-read error must fail and return without canceling or dispatching" );
-  QVERIFY2( sameAction( consumed.mid( consumed.indexOf( "if( !dispatchPending" ) ),
+  QVERIFY2( sameAction( from( consumed, "if( !dispatchPending" ),
                         "if( !dispatchPending( c, generation ) ) return;" + rearmRead ),
             "consumed-read success must stop on dispatch failure and flush/rearm only while live without canceling" );
   QVERIFY2( sameAction( consumed,
@@ -3198,14 +3284,14 @@ void TstHotkeys::scanPopupSourceLoopContractIsPinned()
                         "c->prepared = true; pollfd ready{ c->fd, POLLIN, 0 };"
                         "if( ::poll( &ready, 1, 0 ) <= 0 || !( ready.revents & ( POLLIN | POLLHUP | POLLERR ) ) ) {" + pollNotReady + "}" + consumed ),
             "readable branches must remain contiguous without bypassing prepare, cancel, or read consumption" );
-  QString const dispatch = method( "bool dispatchPending(" );
-  QVERIFY2( sameAction( dispatch.left( dispatch.indexOf( "if( c->retired" ) ),
+  QString const dispatch = codeMethod( "bool dispatchPending(" );
+  QVERIFY2( sameAction( before( dispatch, "if( c->retired" ),
                         "++c->dispatchDepth; int const result = wl_display_dispatch_pending( c->display ); --c->dispatchDepth;" ),
             "pending dispatch must unwind dispatch depth before checking retirement" );
   QVERIFY2( sameAction( selectionBranch( dispatch, "if( c->retired || c->generation != generation )" ),
                         "c->destroyConnection(); return false;" ),
             "pending-dispatch retirement must destroy the connection and return false" );
-  QVERIFY2( sameAction( dispatch.mid( dispatch.indexOf( "if( wl_display_get_error" ) ),
+  QVERIFY2( sameAction( from( dispatch, "if( wl_display_get_error" ),
                         "if( wl_display_get_error( c->display ) ) { fail( \"Wayland display error\" ); return false; }"
                         "if( result < 0 ) return flushRequests(); return true;" ),
             "pending-dispatch error must fail, a negative result must return the flush result, and success must return true" );
@@ -3215,11 +3301,11 @@ void TstHotkeys::scanPopupSourceLoopContractIsPinned()
                         "if( wl_display_get_error( c->display ) ) { fail( \"Wayland display error\" ); return false; }"
                         "if( result < 0 ) return flushRequests(); return true;" ),
             "pending-dispatch branches must remain contiguous without extra dispatch or early returns" );
-  QString const flush = method( "bool flushRequests()" );
-  QVERIFY2( sameAction( flush.left( flush.indexOf( "for( ;; )" ) ), "assertThread(); if( !live() ) return false;" ),
+  QString const flush = codeMethod( "bool flushRequests()" );
+  QVERIFY2( sameAction( before( flush, "for( ;; )" ), "assertThread(); if( !live() ) return false;" ),
             "flush must return false while not live before accessing the connection" );
   QString const flushLoop = selectionBranch( flush, "for( ;; )" );
-  QVERIFY2( sameAction( flushLoop.left( flushLoop.indexOf( "if( result >= 0 )" ) ),
+  QVERIFY2( sameAction( before( flushLoop, "if( result >= 0 )" ),
                         "if( wl_display_get_error( connection->display ) ) { fail( \"Wayland display error\" ); return false; }"
                         "int const result = wl_display_flush( connection->display );"
                         "if( wl_display_get_error( connection->display ) ) { fail( \"Wayland display error\" ); return false; }" ),
@@ -3230,7 +3316,7 @@ void TstHotkeys::scanPopupSourceLoopContractIsPinned()
             "flush EINTR must retry the flush loop without disarming an armed writer" );
   QVERIFY2( sameAction( selectionBranch( flushLoop, "if( errno == EAGAIN )" ), "displayWrite->setEnabled( true ); return true;" ),
             "flush EAGAIN must arm the writer and return true" );
-  QVERIFY2( sameAction( flushLoop.mid( flushLoop.lastIndexOf( "fail(" ) ), "fail( \"Wayland display error\" ); return false;" ),
+  QVERIFY2( sameAction( from( flushLoop, "fail(", true ), "fail( \"Wayland display error\" ); return false;" ),
             "unrecoverable flush error must fail and return false" );
   QVERIFY2( sameAction( flushLoop,
                         "if( wl_display_get_error( connection->display ) ) { fail( \"Wayland display error\" ); return false; }"
@@ -3241,7 +3327,7 @@ void TstHotkeys::scanPopupSourceLoopContractIsPinned()
                         "if( errno == EAGAIN ) { displayWrite->setEnabled( true ); return true; }"
                         "fail( \"Wayland display error\" ); return false;" ),
             "flush loop must reach each result branch without intervening returns or writer state changes" );
-  QString const writable = method( "void dispatchDisplayWritable()" );
+  QString const writable = codeMethod( "void dispatchDisplayWritable()" );
   QVERIFY2( sameAction( writable, "assertThread(); if( ownerStopped || !connection || connection->retired ) return; flushRequests();" ),
             "writable callback must return after stop or retirement and otherwise retry the flush" );
   QString const dispose = method( "void dispose()" );
