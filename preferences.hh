@@ -5,6 +5,7 @@
 #include "config.hh"
 #include "helpwindow.hh"
 #include "hotkeybackend.hh"
+#include "waylandselection.hh"
 #include "ui_preferences.h"
 
 /// Preferences dialog -- allows changing various program options.
@@ -26,8 +27,10 @@ public:
 
   Config::Preferences getPreferences();
   void setHotkeyStatus( QString const & platform, HotkeyBackend::State state,
-                        QString const & explanation, QVector<PortalBindingDisplay> const & bindings,
-                        bool configureAvailable );
+                        QString const & explanation,
+                        QVector<PortalBindingDisplay> const & bindings,
+                        bool configureAvailable,
+                        SelectionStatus const & selection = SelectionStatus{} );
 
 signals:
   void configureShortcutsRequested();

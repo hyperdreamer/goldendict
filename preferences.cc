@@ -615,8 +615,10 @@ bool Preferences::eventFilter( QObject * watched, QEvent * event )
 void Preferences::setHotkeyStatus( QString const & platform, HotkeyBackend::State state,
                                    QString const & explanation,
                                    QVector<PortalBindingDisplay> const & bindings,
-                                   bool configureAvailable )
+                                   bool configureAvailable,
+                                   SelectionStatus const & selection )
 {
+  Q_UNUSED( selection )
   bool const wayland = platform.startsWith( QLatin1String( "wayland" ) );
   bool const active = state == HotkeyBackend::State::Bound || state == HotkeyBackend::State::Partial;
   QString status;

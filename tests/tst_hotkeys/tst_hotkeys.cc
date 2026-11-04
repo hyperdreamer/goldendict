@@ -586,6 +586,11 @@ private slots:
   void legacyConfigDefaultsScanPopupHotkeyOff();
   void scanPopupConfigBooleanValues();
 
+  // Selection ownership and portal activation wiring (§4.3-§4.6).
+  void sourceFollowsThePreference();
+  void scanPopupActivationWiringIsPinned();
+  void xcbGuardDoesNotCreateThePopup();
+
 private slots:
   void wireBarrier( uint marker ) { seenMarker = marker; }
 
@@ -3345,6 +3350,99 @@ void TstHotkeys::scanPopupConfigBooleanValues()
   QVERIFY( selectionAmendPreference( "scanPopupHotkey", "", false ) );
   QCOMPARE( Config::load().preferences.scanPopupHotkey.toKeySequence().toString( QKeySequence::PortableText ),
             QString( "Meta+Ctrl+D" ) );
+}
+
+// The source exists exactly while the preference selects it on a platform that
+// supports capture; recreating the popup or using another dialog never connects
+// a second instance, and every teardown stops before it resets the popup.
+void TstHotkeys::sourceFollowsThePreference()
+{
+  qInfo( "source assertions: source preference/lifetime wiring; no runtime MainWindow observation" );
+  QString const source = selectionSourceText( "mainwindow.cc" );
+  QString const header = selectionSourceText( "mainwindow.hh" );
+  QVERIFY( !source.isEmpty() && !header.isEmpty() );
+  QVERIFY( selectionOrdered( header, { "std::unique_ptr< WaylandSelectionSource > selectionSource", "sptr< ScanPopup > scanPopup", "std::unique_ptr<ArticleProfileController> articleProfile" } ) );
+  QString const reconcile = selectionBlock( source, "void MainWindow::reconcileSelectionSource()" );
+  QVERIFY( !reconcile.isEmpty() );
+  QVERIFY( selectionCompact( reconcile ).contains( "boolconstwanted=cfg.preferences.enableScanPopupHotkey&&scanPopupCaptureSupported(kHaveWaylandDataControl,QGuiApplication::platformName());" ) );
+  QString const disabled = selectionBlock( reconcile, "if( !wanted )" ); QVERIFY( !disabled.isEmpty() );
+  QVERIFY( selectionOrdered( disabled, { "++scanPopupRequestId", "selectionSource->stop()", "selectionSource.reset()", "refreshHotkeyStatus()", "return" } ) );
+  QVERIFY( selectionCompact( reconcile ).contains( "if(selectionSource){refreshHotkeyStatus();return;}" ) );
+  QCOMPARE( reconcile.count( "std::make_unique<WaylandSelectionSource>(this)" ), 1 );
+  QVERIFY( selectionOrdered( reconcile, { "std::make_unique<WaylandSelectionSource>(this)", "&WaylandSelectionSource::stateChanged", "&WaylandSelectionSource::capabilityChanged", "&WaylandSelectionSource::captureFinished", "QPointer< WaylandSelectionSource >", "QTimer::singleShot" } ) );
+  QString const deferred = selectionBlock( reconcile, "QTimer::singleShot" );
+  QVERIFY( selectionCompact( deferred ).contains( "if(shuttingDown||!source||source.data()!=selectionSource.get())return;" ) );
+  QVERIFY( selectionOrdered( deferred, { "if( shuttingDown", "source->start()" } ) );
+  QString const install = selectionBlock( source, "void MainWindow::installHotKeys(" );
+  QVERIFY( selectionOrdered( install, { "if( shuttingDown ) return", "reconcileSelectionSource()", "installGate.shouldBind" } ) );
+  QVERIFY( selectionBlock( source, "MainWindow::MainWindow(" ).contains( "installHotKeys()" ) );
+  QVERIFY( selectionBlock( source, "void MainWindow::editPreferences()" ).contains( "installHotKeys( result == QDialog::Accepted" ) );
+  for( QString const & name : QStringList{ "MainWindow::~MainWindow()", "void MainWindow::quitApp()", "void MainWindow::finishShutdown()", "void MainWindow::failStartup(" } )
+  {
+    QString const b = selectionBlock( source, name ); QVERIFY2( !b.isEmpty(), qPrintable( name ) );
+    QVERIFY2( selectionCompact( b ).contains( "if(selectionSource)selectionSource->stop();scanPopup.reset();" ), qPrintable( "source assertion: missing immediate stop/reset in " + name ) );
+  }
+  QVERIFY( selectionOrdered( selectionBlock( source, "MainWindow::~MainWindow()" ), { "shuttingDown = true", "hotkeyBackend.reset()", "selectionSource->stop()" } ) );
+  QString const failure = selectionBlock( selectionBlock( source, "void MainWindow::failStartup(" ), "connect( dialog" );
+  QVERIFY( failure.contains( "selectionSource->stop()" ) );
+  for( QString const & name : QStringList{ "void MainWindow::makeScanPopup()", "void MainWindow::editDictionaries(", "void MainWindow::editPreferences()", "void MainWindow::on_rescanFiles_triggered()" } )
+  {
+    QString const b = selectionBlock( source, name ); QVERIFY2( !b.isEmpty(), qPrintable( name ) );
+    QVERIFY2( !b.contains( "selectionSource->stop()" ) && !b.contains( "selectionSource.reset()" ), qPrintable( "source assertion: recreation reconnects source in " + name ) );
+  }
+}
+void TstHotkeys::scanPopupActivationWiringIsPinned()
+{
+  qInfo( "source assertions: selected-text activation, snapshot and notification wiring" );
+  QString const source = selectionSourceText( "mainwindow.cc" ); QVERIFY( !source.isEmpty() );
+  QCOMPARE( source.count( "\"scan-popup\"" ), 2 );
+  QString const install = selectionBlock( source, "void MainWindow::installHotKeys(" );
+  QVERIFY2( selectionCompact( install ).contains( "if(scanPopupBindingPlanned(QGuiApplication::platformName(),cfg.preferences.enableScanPopupHotkey))add(true,\"scan-popup\",tr(\"Translatetheselectedtext\"),cfg.preferences.scanPopupHotkey);" ), "source assertion: binding predicate/description/key" );
+  QString const branch = selectionBlock( install, "else if( id == \"scan-popup\" && scanPopup )" );
+  QVERIFY2( !branch.isEmpty(), "source assertion: missing activation branch" );
+  QVERIFY2( selectionOrdered( branch, { "scanPopup->winId()", "PlatformWindow::applyActivation", "if( selectionSource )" } ), "source assertion: native handle/token/source order" );
+  QString const withSource = selectionBlock( branch, "if( selectionSource )" );
+  QVERIFY2( selectionOrdered( withSource, { "quint64 const requestId = ++scanPopupRequestId", "selectionSource->requestCapture( requestId )" } ), "source assertion: guarded incremented request" );
+  QVERIFY2( selectionCompact( branch ).contains( "elseif(!scanPopup->translateSelectedText(QApplication::clipboard()->text(QClipboard::Clipboard)))reportNothingToTranslate();" ), "source assertion: clipboard-only branch" );
+  QCOMPARE( source.count( "requestId != scanPopupRequestId" ), 1 );
+  QString const reconcile = selectionBlock( source, "void MainWindow::reconcileSelectionSource()" );
+  QString const completion = selectionBlock( reconcile, "&WaylandSelectionSource::captureFinished" );
+  QVERIFY2( selectionCompact( completion ).contains( "if(shuttingDown||requestId!=scanPopupRequestId||!scanPopup)return;" ), "source assertion: completion guard" );
+  QVERIFY2( selectionCompact( completion ).contains( "WaylandSelection::chooseText(capturedAt>0?selection:QString(),capturedAt,QApplication::clipboard()->text(QClipboard::Clipboard),clipboardChangedAt)" ), "source assertion: suppressed selection and current clipboard at completion" );
+  QVERIFY2( selectionCompact( completion ).contains( "if(!scanPopup->translateSelectedText(text))reportNothingToTranslate();" ), "source assertion: completion translation/empty report" );
+  QCOMPARE( source.count( "&WaylandSelectionSource::capabilityChanged" ), 1 );
+  QVERIFY2( selectionCompact( reconcile ).contains( "&WaylandSelectionSource::capabilityChanged,this,&MainWindow::refreshHotkeyStatus" ), "source assertion: typed capability snapshot refresh" );
+  QVERIFY2( reconcile.contains( "&WaylandSelectionSource::stateChanged" ) && reconcile.contains( "&WaylandSelectionSource::captureFinished" ), "source assertion: creation-block signal connections" );
+  QCOMPARE( source.count( "clipboardStampAdvances(" ), 1 );
+  QString const constructor = selectionBlock( source, "MainWindow::MainWindow(" );
+  QString const changed = selectionBlock( constructor, "&QClipboard::changed" );
+  QVERIFY2( selectionCompact( changed ).contains( "if(WaylandSelection::clipboardStampAdvances(mode==QClipboard::Clipboard))clipboardChangedAt=Monotonic::nowMs();" ), "source assertion: Clipboard-only monotonic stamp" );
+  QVERIFY2( !changed.contains( "QClipboard::Selection" ) && !changed.contains( "QClipboard::FindBuffer" ), "source assertion: no alternate stamp assignment" );
+  QString const status = selectionBlock( source, "void MainWindow::refreshHotkeyStatus()" );
+  for( QString const & field : QStringList{ "selection.state = selectionSource->state()", "selection.reason = selectionSource->reason()", "selection.primarySelectionSeen = selectionSource->primarySelectionSeen()" } )
+    QVERIFY2( status.contains( field ), qPrintable( "source assertion: snapshot " + field ) );
+  QVERIFY2( selectionCompact( status ).contains( "hotkeyBackend&&hotkeyBackend->isConfigureAvailable(),selection)" ), "source assertion: final snapshot argument" );
+  QString const preferences = selectionSourceText( "preferences.hh" ) + selectionSourceText( "preferences.cc" );
+  QVERIFY2( !QRegularExpression( "WaylandSelectionSource\\s*[*&]" ).match( preferences ).hasMatch(), "source assertion: Preferences must hold no source pointer/reference" );
+  QString const popup = selectionBlock( selectionSourceText( "scanpopup.cc" ), "bool ScanPopup::translateSelectedText(" );
+  QVERIFY2( selectionOrdered( popup, { "sanitizeInputPhrase( text )", "if( !phrase.isValid() )", "return false", "if( isVisible() && phrase == inputPhrase )", "return true", "translateWord( text )", "return true" } ), "source assertion: sanitize/invalid/dedupe/translate order" );
+  QVERIFY2( !popup.contains( "showStatusBarMessage" ) && !popup.contains( "engagePopup" ) && !popup.contains( "forcePopup" ), "source assertion: entry point preserves existing translation path" );
+  QString const report = selectionBlock( source, "void MainWindow::reportNothingToTranslate()" );
+  QCOMPARE( report.count( "gdDebug( \"selection-empty\" )" ), 1 );
+  QVERIFY2( selectionOrdered( report, { "gdDebug", "No selected text or clipboard text to translate", "if( isVisible() )", "mainStatusBar->showMessage( message, 3000 )", "else if( trayIcon )", "trayIcon->showMessage( tr( \"GoldenDict\" ), message, QSystemTrayIcon::Information, 3000 )" } ), "source assertion: exact visible-channel ladder" );
+  QVERIFY2( !report.contains( "else\n" ) && !report.contains( "QMessageBox" ) && !report.contains( "scanPopup" ) && !report.contains( "showStatusBarMessage" ), "source assertion: exhausted ladder has no additional visible channel" );
+}
+void TstHotkeys::xcbGuardDoesNotCreateThePopup()
+{
+  QVERIFY( !scanPopupBindingPlanned( "xcb", true ) );
+  bool const oldScan = false, oldClipboard = false;
+  QVERIFY( !oldScan && !oldClipboard && !scanPopupBindingPlanned( "xcb", true ) );
+  qInfo( "source assertions: popup creation expression; no widget construction observed" );
+  QString const body = selectionBlock( selectionSourceText( "mainwindow.cc" ), "void MainWindow::makeScanPopup()" );
+  QVERIFY( !body.isEmpty() );
+  QVERIFY( selectionOrdered( body, { "++scanPopupRequestId", "scanPopup.reset()", "if( !cfg.preferences.enableScanPopup", "new ScanPopup" } ) );
+  QVERIFY( selectionCompact( body ).contains( "if(!cfg.preferences.enableScanPopup&&!cfg.preferences.enableClipboardHotkey&&!scanPopupBindingPlanned(QGuiApplication::platformName(),cfg.preferences.enableScanPopupHotkey))return;" ) );
+  QVERIFY( !body.contains( "!cfg.preferences.enableScanPopupHotkey" ) );
 }
 
 QTEST_MAIN( TstHotkeys )
