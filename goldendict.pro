@@ -150,6 +150,12 @@ unix:!mac {
   QMAKE_LFLAGS += -rdynamic
 
     CONFIG += link_pkgconfig
+    packagesExist(wayland-client) {
+        DEFINES += HAVE_WAYLAND_DATA_CONTROL
+        PKGCONFIG += wayland-client
+        INCLUDEPATH += $$PWD/protocols/ext-data-control-v1
+        SOURCES += $$PWD/protocols/ext-data-control-v1/ext-data-control-v1-protocol.c
+    }
     PKGCONFIG += vorbisfile \
         vorbis \
         ogg \
@@ -415,6 +421,7 @@ HEADERS += folding.hh \
     hotkeysyntax.hh \
     portalhotkeys.hh \
     waylandselectionlogic.hh \
+    waylandselection.hh \
     platformwindow.hh
 
 FORMS += groups.ui \
@@ -560,6 +567,7 @@ SOURCES += folding.cc \
     hotkeysyntax.cc \
     portalhotkeys.cc \
     waylandselectionlogic.cc \
+    waylandselection.cc \
     platformwindow.cc
 
 win32 {
@@ -709,7 +717,9 @@ TRANSLATIONS += locale/ru_RU.ts \
 
   ALL_SOURCES = $$SOURCES $$HEADERS $$FORMS
   for(src, ALL_SOURCES) {
-    QUALIFIED_SOURCES += $${PWD}/$${src}
+    # A source entry may itself be absolute (the optional ext-data-control
+    # protocol code); prefixing it again would produce a doubled path.
+    QUALIFIED_SOURCES += $$absolute_path($$src, $$PWD)
   }
   revtarget.depends = $$QUALIFIED_SOURCES
 }

@@ -33,6 +33,9 @@ include(../testsupport.pri)
 
 QT += core gui widgets xml help
 
+# preferences.hh uses only waylandselection.hh's enum, snapshot and capability
+# constant. Do not list that Q_OBJECT header in HEADERS: the source implementation
+# and its MOC belong to the application and the separate live runner, not this suite.
 FORMS += $$GD_REPO_ROOT/preferences.ui
 SOURCES += $$GD_REPO_ROOT/preferences.cc \
            $$GD_REPO_ROOT/hotkeyedit.cc \

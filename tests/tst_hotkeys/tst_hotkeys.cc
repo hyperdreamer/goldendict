@@ -67,6 +67,7 @@
 #include "keyboardstate.hh"
 #include "platformwindow.hh"
 #include "portalhotkeys.hh"
+#include "waylandselection.hh"
 #include "preferences.hh"
 #include "hotkeyedit.hh"
 #include <QCheckBox>
@@ -400,20 +401,25 @@ QString selectionCompact( QString text )
 }
 // Extract a balanced body, ignoring braces in quoted strings and comments.
 // Empty means anchor/opening/closing brace missing; every caller asserts nonempty.
+// The extractor also reads the qmake text these assertions inspect: an anchor that
+// ends with the opening brace opens the body itself, a leading '#' starts a line
+// comment, a backslash escapes the next character, and "/*" is a block comment
+// only when a closing "*/" exists (glob paths such as redist/icons/*.* are not).
 QString selectionBlock( QString const & text, QString const & anchor )
 {
   qsizetype const at = text.indexOf( anchor );
   if( at < 0 ) return {};
-  qsizetype const first = text.indexOf( '{', at + anchor.size() );
+  qsizetype const first = anchor.endsWith( '{' ) ? at + anchor.size() - 1
+                                                : text.indexOf( '{', at + anchor.size() );
   if( first < 0 ) return {};
   int depth = 0;
   QChar quote;
-  bool line = false, block = false, escape = false;
+  bool line = false, block = false, escape = false, lineStart = true;
   for( qsizetype i = first; i < text.size(); ++i )
   {
     QChar const c = text[i];
     QChar const next = i + 1 < text.size() ? text[i+1] : QChar{};
-    if( line ) { if( c == '\n' ) line = false; continue; }
+    if( line ) { if( c == '\n' ) { line = false; lineStart = true; } continue; }
     if( block ) { if( c == '*' && next == '/' ) { block = false; ++i; } continue; }
     if( !quote.isNull() )
     {
@@ -422,11 +428,16 @@ QString selectionBlock( QString const & text, QString const & anchor )
       else if( c == quote ) quote = QChar{};
       continue;
     }
+    if( c == '\\' ) { ++i; continue; }
+    if( c == '#' && lineStart ) { line = true; continue; }
     if( c == '/' && next == '/' ) { line = true; ++i; continue; }
-    if( c == '/' && next == '*' ) { block = true; ++i; continue; }
+    if( c == '/' && next == '*' && text.indexOf( QStringLiteral( "*/" ), i + 2 ) >= 0 )
+    { block = true; ++i; continue; }
     if( c == '"' || c == '\'' ) { quote = c; continue; }
-    if( c == '{' ) ++depth;
+    if( c == '{' ) { ++depth; lineStart = false; }
     else if( c == '}' && --depth == 0 ) return text.mid( first + 1, i - first - 1 );
+    else if( c == '\n' ) lineStart = true;
+    else if( c != ' ' && c != '\t' && c != '\r' ) lineStart = false;
   }
   return {};
 }
@@ -527,6 +538,8 @@ private slots:
   void scanPopupBindingIsPortalOnly();
   void portalIdPredicateAcceptsThreeIds();
   void threeBindingsStayBound();
+  void capabilityConstantMatchesBuild();
+  void scanPopupSourceLoopContractIsPinned();
 
 private slots:
   void wireBarrier( uint marker ) { seenMarker = marker; }
@@ -2975,6 +2988,124 @@ void TstHotkeys::threeBindingsStayBound()
     QStringList sortedReturned = returned; reportedIds.sort(); sortedReturned.sort();
     QCOMPARE( reportedIds, sortedReturned );
   }
+}
+
+void TstHotkeys::capabilityConstantMatchesBuild()
+{
+#ifdef HAVE_WAYLAND_DATA_CONTROL
+  QCOMPARE( kHaveWaylandDataControl, true );
+#else
+  QCOMPARE( kHaveWaylandDataControl, false );
+#endif
+  qInfo( "source assertions: nested qmake optional-feature scopes" );
+  for( char const * file : { "goldendict.pro", "tests/testsupport.pri" } )
+  {
+    QString const project = selectionSourceText( file ); QVERIFY( !project.isEmpty() );
+    QString const unixScope = selectionBlock( project, "unix:!mac {" ); QVERIFY( !unixScope.isEmpty() );
+    QString const probe = selectionBlock( unixScope, "packagesExist(wayland-client)" ); QVERIFY( !probe.isEmpty() );
+    QVERIFY2( probe.contains( "DEFINES += HAVE_WAYLAND_DATA_CONTROL" ), file );
+    if( QString::fromLatin1( file ) == "goldendict.pro" )
+    {
+      QVERIFY( probe.contains( "PKGCONFIG += wayland-client" ) );
+      QVERIFY( probe.contains( "INCLUDEPATH += $$PWD/protocols/ext-data-control-v1" ) );
+      QVERIFY( probe.contains( "SOURCES += $$PWD/protocols/ext-data-control-v1/ext-data-control-v1-protocol.c" ) );
+    }
+    else QVERIFY( !project.contains( "PKGCONFIG += wayland-client" ) );
+  }
+  QString const hotkeys = selectionSourceText( "tests/tst_hotkeys/tst_hotkeys.pro" );
+  QVERIFY( !hotkeys.contains( "$$GD_REPO_ROOT/waylandselection.cc" ) );
+  QVERIFY( !hotkeys.contains( "HEADERS += $$GD_REPO_ROOT/waylandselection.hh" ) );
+}
+void TstHotkeys::scanPopupSourceLoopContractIsPinned()
+{
+  qInfo( "source assertions: protocol loop/teardown contracts; no syscall or compositor observation" );
+  QString const source = selectionSourceText( "waylandselection.cc" ); QVERIFY( !source.isEmpty() );
+  auto method = [&]( QString const & name ) { return selectionBlock( source, name ); };
+  QString const start = method( "void start()" );
+  QVERIFY( !start.isEmpty() );
+  QVERIFY( selectionOrdered( start, { "if( started || ownerStopped ) return", "started = true", "wl_display_connect( nullptr )",
+                                      "wl_display_get_registry", "wl_registry_add_listener", "wl_display_sync", "wl_callback_add_listener", "flushRequests()" } ) );
+  QVERIFY( start.contains( "fail( \"cannot get Wayland registry\" ); return" ) );
+  QVERIFY( start.contains( "fail( \"cannot create Wayland sync callback\" ); return" ) );
+  QString const done = method( "static void discoveryDone(" );
+  QVERIFY( selectionOrdered( done, { "wl_callback_destroy", "discoveryComplete = true", "if( !self->manager )", "no ext_data_control_manager_v1", "maybeAvailable()" } ) );
+  QString const removed = method( "static void registryGlobalRemoved(" );
+  QVERIFY( selectionOrdered( removed, { "name == self->managerName", "manager removed", "name != self->seatNameId", "retirePrimary()",
+                                        "destroyDeviceAndSeat()", "seats.isEmpty()", "seat removed", "bindSeat" } ) );
+  QString const primary = method( "static void primarySelection(" );
+  QVERIFY( selectionOrdered( primary, { "receivedAt = Monotonic::nowMs()", "primary-selection-seen=1", "retirePrimary()", "pendingOffer", "takeForPrimary()", "offerStamp = receivedAt", "flushRequests()" } ) );
+  QString const clipboard = method( "static void selection(" );
+  QVERIFY( selectionOrdered( clipboard, { "pendingOffer", "discardForClipboard()", "destroyOffer", "flushRequests()" } ) );
+  QVERIFY( !clipboard.contains( "receive(" ) && !clipboard.contains( "cache =" ) );
+  QString const promote = method( "void promote()" );
+  QCOMPARE( source.count( "transferStartedAt = Monotonic::nowMs()" ), 1 );
+  QVERIFY( selectionOrdered( promote, { "if( !transferStartedAt )", "transferStartedAt = Monotonic::nowMs()", "TransferTimeoutMs", "startMimeAttempt()" } ) );
+  QString const attempt = method( "bool startMimeAttempt()" );
+  QVERIFY( selectionOrdered( attempt, { "beginMimeAttempt()", "pipe2( fds, O_CLOEXEC )", "fcntl( fds[0], F_GETFL )",
+                                        "fcntl( fds[0], F_SETFL, oldFlags | O_NONBLOCK )", "beginRead()", "ext_data_control_offer_v1_receive", "close( fds[1] )", "flushRequests()" } ) );
+  QVERIFY( !attempt.contains( "O_CLOEXEC | O_NONBLOCK" ) );
+  QVERIFY( !attempt.contains( "fcntl( fds[1]" ) );
+  QVERIFY( !attempt.contains( "transferStartedAt =" ) );
+  QString const drain = method( "void drainPipe(" );
+  QVERIFY( selectionOrdered( drain, { "offersState.accepts( token )", "checkTransferDeadline( token )", "char buffer[16384]",
+                                      "MaxPayloadBytes + 1 - bytesObserved", "::read(", "if( count > 0 )", "bytesObserved == MaxPayloadBytes + 1", "if( count == 0 )" } ) );
+  QVERIFY( drain.contains( "errno == EINTR" ) && drain.contains( "errno == EAGAIN || errno == EWOULDBLOCK" ) );
+  QString const readFailure = selectionBlock( drain, "if( bytesObserved == 0 )" );
+  QVERIFY( selectionOrdered( readFailure, { "offersState.mimeAttemptFailed()", "closeRead()", "startMimeAttempt()" } ) );
+  QVERIFY( selectionCompact( drain ).contains( "elsedropCapture(false);" ) );
+  QString const timeout = method( "void checkTransferDeadline(" );
+  QVERIFY( selectionOrdered( timeout, { "now >= transferDeadline", "now >= lastProgressAt + IdleTimeoutMs", "bytesObserved == 0", "mimeAttemptFailed()", "startMimeAttempt()" } ) );
+  QString const success = method( "void complete(" );
+  QVERIFY( selectionOrdered( success, { "offersState.accepts( token )", "checkTransferDeadline( token )", "offersState.accepts( token )", "cache = decodePayload", "cacheStamp =", "offersState.completed( token )", "closeRead()", "destroyOffer", "flushRequests()", "expireInterest()", "answerInterest" } ) );
+  QString const retire = method( "void retirePrimary()" );
+  QVERIFY( selectionOrdered( retire, { "offersState.retire()", "debounce.stop()", "closeRead()", "destroyOffer" } ) );
+  QString const readable = method( "void dispatchDisplayReadable()" );
+  QString const prepareFailure = selectionBlock( readable, "if( wl_display_prepare_read( c->display ) != 0 )" );
+  QVERIFY( !prepareFailure.isEmpty() );
+  QVERIFY( prepareFailure.contains( "dispatchPending( c, generation )" ) );
+  QVERIFY( !prepareFailure.contains( "wl_display_read_events" ) );
+  QVERIFY( selectionCompact( prepareFailure ).endsWith( "return;" ) );
+  QVERIFY( prepareFailure.contains( "if( flushRequests() && live() ) displayRead->setEnabled( true );" ) );
+  QString const pollNotReady = selectionBlock( readable, "if( ::poll(" );
+  QVERIFY( !pollNotReady.isEmpty() && !pollNotReady.contains( "wl_display_read_events" ) );
+  QVERIFY( selectionOrdered( pollNotReady, { "wl_display_cancel_read", "c->prepared = false", "flushRequests()", "displayRead->setEnabled( true )", "return" } ) );
+  QVERIFY( readable.trimmed().endsWith( "if( flushRequests() && live() ) displayRead->setEnabled( true );" ) );
+  QVERIFY( selectionOrdered( readable, { "displayRead->setEnabled( false )", "wl_display_prepare_read", "c->prepared = true",
+                                         "poll(", "wl_display_cancel_read", "++c->dispatchDepth", "wl_display_read_events", "--c->dispatchDepth", "c->prepared = false", "c->retired || c->generation != generation", "dispatchPending" } ) );
+  QString const dispatch = method( "bool dispatchPending(" );
+  QVERIFY( selectionOrdered( dispatch, { "++c->dispatchDepth", "wl_display_dispatch_pending", "--c->dispatchDepth", "c->retired || c->generation != generation", "destroyConnection()" } ) );
+  QString const flush = method( "bool flushRequests()" );
+  QVERIFY( selectionOrdered( flush, { "wl_display_flush", "if( result >= 0 )", "displayWrite->setEnabled( false )", "errno == EINTR", "errno == EAGAIN", "displayWrite->setEnabled( true )", "fail( \"Wayland display error\" )" } ) );
+  QVERIFY( selectionBlock( flush, "if( errno == EAGAIN )" ).contains( "return true" ) );
+  QString const writable = method( "void dispatchDisplayWritable()" );
+  QVERIFY( writable.contains( "if( ownerStopped || !connection || connection->retired ) return" ) );
+  QVERIFY( writable.contains( "flushRequests()" ) );
+  QString const dispose = method( "void dispose()" );
+  QVERIFY( selectionOrdered( dispose, { "c->retired = true", "++c->generation", "offersState.retire()", "debounce.stop()", "activation.stop()",
+                                       "closeRead()", "displayRead.reset()", "displayWrite.reset()", "destroyProtocol()", "if( c->dispatchDepth == 0 )", "c->destroyConnection()", "[c]" } ) );
+  QVERIFY( !dispose.contains( "[this" ) );
+  QVERIFY( selectionOrdered( dispose, { "destroyProtocol()", "terminalNotificationPending = false", "publishState()", "captureFinished( id, QString(), 0 )", "if( c->dispatchDepth == 0 )", "c->destroyConnection()" } ) );
+  QString const destroy = method( "void destroyConnection()" );
+  QVERIFY( selectionOrdered( destroy, { "if( destroyed_ ) return", "Q_ASSERT( dispatchDepth == 0 )", "destroyed_ = true", "if( prepared )", "wl_display_cancel_read", "wl_display_flush", "wl_display_disconnect", "display = nullptr" } ) );
+  QVERIFY( source.contains( "std::shared_ptr<Connection> connection" ) );
+  QVERIFY( method( "~Connection()" ).contains( "destroyConnection()" ) );
+  QVERIFY( method( "void stop()" ).contains( "ownerStopped = true" ) );
+  QVERIFY( selectionOrdered( method( "void stop()" ), { "ownerStopped = true", "dispose()" } ) );
+  QVERIFY( method( "void fail(" ).contains( "dispose()" ) );
+  QVERIFY( method( "WaylandSelectionSource::~WaylandSelectionSource()" ).contains( "stop()" ) );
+  for( QString const & callback : QStringList{ "registryGlobal", "registryGlobalRemoved", "discoveryDone", "dataOffer", "offeredMime", "selection", "primarySelection", "deviceFinished", "seatCapabilities", "seatName" } )
+  {
+    QString const b = method( "static void " + callback + "(" ); QVERIFY2( !b.isEmpty(), qPrintable( callback ) );
+    QVERIFY2( !b.contains( "wl_display_disconnect" ), qPrintable( "source assertion: listener disconnects: " + callback ) );
+    QVERIFY2( !QRegularExpression( "\\bdelete\\b|\\.reset\\s*\\(|destroyConnection\\s*\\(|deleteLater\\s*\\(" ).match( b ).hasMatch(), qPrintable( "source assertion: listener performs physical/owner teardown: " + callback ) );
+  }
+  QString const request = method( "void requestCapture( quint64 id )" );
+  QString const overlap = selectionBlock( request, "if( superseded )" ); QVERIFY( !overlap.isEmpty() );
+  QVERIFY( !overlap.contains( "beginRead" ) && !overlap.contains( "activeToken" ) && !overlap.contains( "retirePrimary" ) );
+  QVERIFY( selectionOrdered( request, { "interestedId = id", "armActivation()", "if( superseded )", "captureFinished( superseded", "if( ownerStopped || interestedId != id ) return" } ) );
+  QVERIFY( !source.contains( "wl_display_roundtrip" ) );
+  QVERIFY( !source.contains( "nativeInterface" ) && !source.contains( "PlatformWindow::x11Display" ) );
+  QVERIFY( !source.contains( "create_data_source(" ) && !source.contains( "set_primary_selection(" ) && !source.contains( "set_selection(" ) );
 }
 
 QTEST_MAIN( TstHotkeys )
