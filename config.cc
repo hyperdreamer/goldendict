@@ -306,6 +306,9 @@ Preferences::Preferences():
   enableClipboardHotkey( true ),
   clipboardHotkey( QKeySequence( "Ctrl+C,C" ) ),
 
+  enableScanPopupHotkey( false ),
+  scanPopupHotkey( QKeySequence( Qt::CTRL | Qt::META | Qt::Key_D ) ),
+
   enableScanPopup( true ),
   startWithScanPopupOn( false ),
   enableScanPopupModifiers( false ),
@@ -963,6 +966,12 @@ Class load() THROW_SPEC( exError )
     applyBoolOption( c.preferences.enableClipboardHotkey, preferences.namedItem( "enableClipboardHotkey" ) );
     if ( !preferences.namedItem( "clipboardHotkey" ).isNull() )
       c.preferences.clipboardHotkey = loadHotKey( preferences.namedItem( "clipboardHotkey" ).toElement().text() );
+
+    applyBoolOption( c.preferences.enableScanPopupHotkey,
+                     preferences.namedItem( "enableScanPopupHotkey" ) );
+    if ( !preferences.namedItem( "scanPopupHotkey" ).isNull() )
+      c.preferences.scanPopupHotkey = loadHotKey(
+        preferences.namedItem( "scanPopupHotkey" ).toElement().text() );
 
     c.preferences.enableScanPopup = ( preferences.namedItem( "enableScanPopup" ).toElement().text() == "1" );
     c.preferences.startWithScanPopupOn = ( preferences.namedItem( "startWithScanPopupOn" ).toElement().text() == "1" );
@@ -1856,6 +1865,14 @@ void save( Class const & c ) THROW_SPEC( exError )
 
     opt = dd.createElement( "clipboardHotkey" );
     opt.appendChild( dd.createTextNode( hotKeyStorageText( c.preferences.clipboardHotkey ) ) );
+    preferences.appendChild( opt );
+
+    opt = dd.createElement( "enableScanPopupHotkey" );
+    opt.appendChild( dd.createTextNode( c.preferences.enableScanPopupHotkey ? "1" : "0" ) );
+    preferences.appendChild( opt );
+
+    opt = dd.createElement( "scanPopupHotkey" );
+    opt.appendChild( dd.createTextNode( hotKeyStorageText( c.preferences.scanPopupHotkey ) ) );
     preferences.appendChild( opt );
 
     opt = dd.createElement( "enableScanPopup" );

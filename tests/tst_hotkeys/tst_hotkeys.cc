@@ -452,6 +452,44 @@ bool selectionOrdered( QString const & text, QStringList const & needles )
   return true;
 }
 
+/// Adds, replaces or removes one <preferences> child in the suite's installed
+/// isolated fixture. Only the copy Config::load() reads is edited: the
+/// repository fixtures stay exactly as committed, so a case can inspect the
+/// effect of one stored value without inventing a second fixture. Returns false
+/// when the document cannot be read, has no <preferences> element, or cannot be
+/// written back completely.
+bool selectionAmendPreference( QString const & name, QString const & value, bool present = true )
+{
+  QString const path = Config::getConfigFileName();
+  QDomDocument document;
+
+  if( !document.setContent( readFileBytes( path ) ) )
+    return false;
+
+  auto preferences = document.documentElement().firstChildElement( "preferences" );
+
+  if( preferences.isNull() )
+    return false;
+
+  while( !preferences.firstChildElement( name ).isNull() )
+    preferences.removeChild( preferences.firstChildElement( name ) );
+
+  if( present )
+  {
+    auto element = document.createElement( name );
+    element.appendChild( document.createTextNode( value ) );
+    preferences.appendChild( element );
+  }
+
+  QFile output( path );
+
+  if( !output.open( QIODevice::WriteOnly | QIODevice::Truncate ) )
+    return false;
+
+  auto const bytes = document.toByteArray();
+  return output.write( bytes ) == bytes.size();
+}
+
 } // namespace
 
 class TstHotkeys : public QObject
@@ -540,6 +578,13 @@ private slots:
   void threeBindingsStayBound();
   void capabilityConstantMatchesBuild();
   void scanPopupSourceLoopContractIsPinned();
+
+  // Opt-in selected-text shortcut preference (§5).
+  void defaultScanPopupHotkeyIsBindable();
+  void scanPopupPortalBindingSurvivesSaveLoad();
+  void scanPopupHotkeyKeepsVerbatimText();
+  void legacyConfigDefaultsScanPopupHotkeyOff();
+  void scanPopupConfigBooleanValues();
 
 private slots:
   void wireBarrier( uint marker ) { seenMarker = marker; }
@@ -3106,6 +3151,200 @@ void TstHotkeys::scanPopupSourceLoopContractIsPinned()
   QVERIFY( !source.contains( "wl_display_roundtrip" ) );
   QVERIFY( !source.contains( "nativeInterface" ) && !source.contains( "PlatformWindow::x11Display" ) );
   QVERIFY( !source.contains( "create_data_source(" ) && !source.contains( "set_primary_selection(" ) && !source.contains( "set_selection(" ) );
+}
+
+// ---------------------------------------------------------------------------
+// Opt-in selected-text shortcut preference (§5)
+// ---------------------------------------------------------------------------
+
+// The default the specification names: one Ctrl+Meta+D combination, off by
+// default, bindable as a portal shortcut and stored as its PortableText.
+void TstHotkeys::defaultScanPopupHotkeyIsBindable()
+{
+  Config::Class cfg;
+  auto const & p = cfg.preferences;
+
+  QVERIFY( !p.enableScanPopupHotkey );
+  QCOMPARE( p.scanPopupHotkey.key1, int( Qt::Key_D ) );
+  QCOMPARE( p.scanPopupHotkey.key2, 0 );
+  QCOMPARE( p.scanPopupHotkey.modifiers,
+            Qt::KeyboardModifiers( Qt::ControlModifier | Qt::MetaModifier ) );
+  QCOMPARE( p.scanPopupHotkey.toKeySequence().count(), 1 );
+  QCOMPARE( p.scanPopupHotkey.toKeySequence().toString( QKeySequence::PortableText ),
+            QString( "Meta+Ctrl+D" ) );
+
+  QString trigger, reason;
+  QVERIFY2( HotkeySyntax::preferredTrigger( p.scanPopupHotkey, &trigger, &reason ),
+            qPrintable( reason ) );
+  QVERIFY( reason.isEmpty() );
+  QCOMPARE( trigger, QString( "CTRL+LOGO+d" ) );
+
+  auto const saved = saveAndRead( cfg );
+  QCOMPARE( saved.documentElement().firstChildElement( "preferences" )
+              .firstChildElement( "scanPopupHotkey" ).text(),
+            QString( "Meta+Ctrl+D" ) );
+}
+
+// The additive <hotkeys>/<portalBindings> section is the only place a portal
+// description is stored, it keeps escaped text, and later duplicates are
+// last-wins. A stored description never turns a foreign ID into a known one.
+void TstHotkeys::scanPopupPortalBindingSurvivesSaveLoad()
+{
+  Config::Class cfg;
+  cfg.hotkeys.portalBindings = { { "main-window", "Main" },
+                                 { "clipboard-lookup", "Clipboard" },
+                                 { "scan-popup", "Portal <selected> & key" },
+                                 { "foreign-action", "Foreign" } };
+
+  QDomDocument saved = saveAndRead( cfg );
+  auto bindings = saved.documentElement().firstChildElement( "hotkeys" )
+                    .firstChildElement( "portalBindings" );
+  auto const nodes = bindings.elementsByTagName( "binding" );
+
+  QCOMPARE( nodes.size(), 3 );
+
+  QSet<QString> ids;
+
+  for( int i = 0; i != nodes.size(); ++i )
+  {
+    auto const e = nodes.at( i ).toElement();
+    ids.insert( e.attribute( "id" ) );
+
+    if( e.attribute( "id" ) == "scan-popup" )
+      QCOMPARE( e.attribute( "triggerDescription" ), QString( "Portal <selected> & key" ) );
+  }
+
+  QCOMPARE( ids, ( QSet<QString>{ "main-window", "clipboard-lookup", "scan-popup" } ) );
+
+  auto loaded = Config::load();
+  int count = 0;
+
+  for( auto const & entry : loaded.hotkeys.portalBindings )
+    if( entry.id == "scan-popup" )
+    {
+      ++count;
+      QCOMPARE( entry.triggerDescription, QString( "Portal <selected> & key" ) );
+    }
+
+  QCOMPARE( count, 1 );
+  QCOMPARE( loaded.preferences.scanPopupHotkey.toKeySequence().toString( QKeySequence::PortableText ),
+            QString( "Meta+Ctrl+D" ) );
+
+  for( auto const & pair : QList<QPair<QString, QString>>{
+         { "scan-popup", "last <description> & value" }, { "foreign-action", "ignored" } } )
+  {
+    auto e = saved.createElement( "binding" );
+    e.setAttribute( "id", pair.first );
+    e.setAttribute( "triggerDescription", pair.second );
+    bindings.appendChild( e );
+  }
+
+  QFile file( Config::getConfigFileName() );
+  QVERIFY( file.open( QIODevice::WriteOnly | QIODevice::Truncate ) );
+  auto bytes = saved.toByteArray();
+  QCOMPARE( file.write( bytes ), bytes.size() );
+  file.close();
+
+  loaded = Config::load();
+  count = 0;
+
+  for( auto const & entry : loaded.hotkeys.portalBindings )
+  {
+    QVERIFY( entry.id != "foreign-action" );
+
+    if( entry.id == "scan-popup" )
+    {
+      ++count;
+      QCOMPARE( entry.triggerDescription, QString( "last <description> & value" ) );
+    }
+  }
+
+  QCOMPARE( count, 1 );
+}
+
+// An untouched stored value is written back exactly as it was read, including
+// text that is not a representable shortcut. Opening the preferences dialog and
+// accepting it unchanged is part of the round trip (SD-15).
+void TstHotkeys::scanPopupHotkeyKeepsVerbatimText()
+{
+  for( QString const & raw : QStringList{ "Ctrl+Meta+D", "Ctrl+G,Ctrl+H,Ctrl+I", "not a shortcut" } )
+  {
+    QVERIFY( !installConfigFixture( "config/legacy.xml" ).isEmpty() );
+    QVERIFY( selectionAmendPreference( "enableScanPopupHotkey", "1" ) );
+    QVERIFY( selectionAmendPreference( "scanPopupHotkey", raw ) );
+
+    auto cfg = Config::load();
+    QCOMPARE( cfg.preferences.scanPopupHotkey.rawText, raw );
+
+    Preferences dialog( nullptr, cfg );
+    dialog.accept();
+    cfg.preferences = dialog.getPreferences();
+
+    auto const saved = saveAndRead( cfg );
+    QCOMPARE( saved.documentElement().firstChildElement( "preferences" )
+                .firstChildElement( "scanPopupHotkey" ).text(),
+              raw );
+    QCOMPARE( Config::load().preferences.scanPopupHotkey.rawText, raw );
+  }
+}
+
+// A configuration written before the preference existed keeps the constructed
+// default: the boolean stays off and the shortcut stays the shipped combination.
+void TstHotkeys::legacyConfigDefaultsScanPopupHotkeyOff()
+{
+  QString const installed = installConfigFixture( "config/legacy.xml" );
+  QVERIFY( !installed.isEmpty() );
+
+  QByteArray const before = readFileBytes( installed );
+  auto cfg = Config::load();
+
+  QCOMPARE( readFileBytes( installed ), before );
+  QVERIFY( !cfg.preferences.enableScanPopupHotkey );
+
+  auto const & key = cfg.preferences.scanPopupHotkey;
+  QCOMPARE( key.key1, int( Qt::Key_D ) );
+  QCOMPARE( key.key2, 0 );
+  QCOMPARE( key.modifiers, Qt::KeyboardModifiers( Qt::ControlModifier | Qt::MetaModifier ) );
+  QCOMPARE( key.toKeySequence().count(), 1 );
+  QCOMPARE( key.toKeySequence().toString( QKeySequence::PortableText ), QString( "Meta+Ctrl+D" ) );
+
+  auto const saved = saveAndRead( cfg );
+  auto const p = saved.documentElement().firstChildElement( "preferences" );
+
+  QCOMPARE( p.firstChildElement( "enableScanPopupHotkey" ).text(), QString( "0" ) );
+  QCOMPARE( p.firstChildElement( "scanPopupHotkey" ).text(), QString( "Meta+Ctrl+D" ) );
+
+  auto const reloaded = Config::load();
+  QVERIFY( !reloaded.preferences.enableScanPopupHotkey );
+  QCOMPARE( reloaded.preferences.scanPopupHotkey.toKeySequence().toString( QKeySequence::PortableText ),
+            QString( "Meta+Ctrl+D" ) );
+}
+
+// Only "1" and "0" set the boolean; every other stored value (including an
+// empty one) leaves the default intact. An explicitly empty shortcut node is an
+// empty shortcut, while a missing node keeps the constructed default.
+void TstHotkeys::scanPopupConfigBooleanValues()
+{
+  QStringList const values{ "1", "0", "", "true", "2", "missing" };
+
+  for( int i = 0; i != values.size(); ++i )
+  {
+    QVERIFY( !installConfigFixture( "config/legacy.xml" ).isEmpty() );
+    QVERIFY( selectionAmendPreference( "enableScanPopupHotkey", values[i], i != 5 ) );
+    QCOMPARE( Config::load().preferences.enableScanPopupHotkey, i == 0 );
+  }
+
+  QVERIFY( selectionAmendPreference( "scanPopupHotkey", "" ) );
+
+  auto const empty = Config::load().preferences.scanPopupHotkey;
+  QVERIFY( empty.toKeySequence().isEmpty() );
+
+  QString trigger, reason;
+  QVERIFY( !HotkeySyntax::preferredTrigger( empty, &trigger, &reason ) );
+
+  QVERIFY( selectionAmendPreference( "scanPopupHotkey", "", false ) );
+  QCOMPARE( Config::load().preferences.scanPopupHotkey.toKeySequence().toString( QKeySequence::PortableText ),
+            QString( "Meta+Ctrl+D" ) );
 }
 
 QTEST_MAIN( TstHotkeys )
