@@ -78,7 +78,7 @@
 ## Task 1: Implement pure selection decisions and register the twentieth suite
 
 **Implementer tier:** Advanced
-**Lane:** selection-logic
+**Lane:** implementation
 
 **Files:**
 
@@ -539,7 +539,7 @@ git commit -m "feat(selection): add pure Wayland selection decisions and tests"
 ## Task 2: Publish shared portal IDs and independent platform predicates
 
 **Implementer tier:** Advanced
-**Lane:** hotkey-contracts
+**Lane:** implementation
 
 **Files:**
 
@@ -780,7 +780,7 @@ git commit -m "feat(hotkeys): publish selected-text portal binding contracts"
 ## Task 3: Implement the private ext-data-control source and optional build
 
 **Implementer tier:** Capable
-**Lane:** protocol-client
+**Lane:** implementation
 
 **Files:**
 
@@ -1699,7 +1699,7 @@ git commit -m "feat(selection): add nonblocking private ext-data-control source"
 ## Task 4: Persist opt-in selected-text preferences without rewriting stored keys
 
 **Implementer tier:** Advanced
-**Lane:** configuration
+**Lane:** implementation
 
 **Files:**
 
@@ -1920,7 +1920,7 @@ git commit -m "feat(config): persist opt-in selected-text shortcut preferences"
 ## Task 5: Wire selection ownership and portal activation through the popup
 
 **Implementer tier:** Capable
-**Lane:** integration
+**Lane:** implementation
 
 **Files:**
 
@@ -2284,7 +2284,7 @@ git commit -m "feat(scanpopup): dispatch Wayland selected text through existing 
 ## Task 6: Add the third Hotkeys row and render selection snapshots
 
 **Implementer tier:** Advanced
-**Lane:** preferences
+**Lane:** implementation
 
 **Files:**
 
@@ -2735,7 +2735,7 @@ git commit -m "feat(preferences): show selected-text shortcut and capture status
 ## Task 7: Add the isolated live protocol gate with all thirteen cases
 
 **Implementer tier:** Capable
-**Lane:** live-verification
+**Lane:** implementation
 
 **Files:**
 
@@ -3405,7 +3405,7 @@ git commit -m "test(selection): verify thirteen real Wayland transfer cases"
 ## Task 8: Document coverage and run the complete acceptance contract
 
 **Implementer tier:** Advanced
-**Lane:** tests-and-docs
+**Lane:** implementation
 
 **Files:**
 
