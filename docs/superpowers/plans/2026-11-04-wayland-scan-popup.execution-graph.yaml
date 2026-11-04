@@ -1,0 +1,850 @@
+source_plan:
+  path: "docs/superpowers/plans/2026-11-04-wayland-scan-popup.md"
+  sha256: "f8f65351b816a702236dbb42005ebbd3ea693a3e8fba596f5c9dfda26823dd7b"
+  commit: "36b679612c8cac6b12b7e97681d31550694edf08"
+  task_numbers: [1, 2, 3, 4, 5, 6, 7, 8]
+schema_version: 1
+derivation_notes:
+  - "Task metadata and writable ownership come from Implementer tier, Lane, Files Create/Modify entries and Interfaces. Test entries are read dependencies, not writable ownership."
+  - "Existing Qt, TestSupport, Config, backend and widget APIs are pinned repository baseline prerequisites. Task consumes below records only interfaces produced by this eight-task plan; no synthetic producer tasks are added."
+  - "All eight lanes contain one task. Sequences start at 1; no same-lane predecessor exists. Every shared writable file and every producer/consumer handoff has an explicit cross-lane edge."
+  - "All validation cwd values are repository-root relative. env argv supplies platform/wrapper settings; GD_TEST_WRAPPER=./scripts/test-wrapper.sh resolves from cwd without shell expansion. Build-tree resources serialize validation against shared output trees."
+  - "Validation vectors are executable configure/build/suite/wrapper/live checks. The source plan additionally requires its inline disposable-copy mutation/negative-package checks and manual evidence; those plan steps remain mandatory and are not replaced by these vectors."
+lanes:
+  - id: selection-logic
+    task_ids: [T-001]
+  - id: hotkey-contracts
+    task_ids: [T-002]
+  - id: protocol-client
+    task_ids: [T-003]
+  - id: configuration
+    task_ids: [T-004]
+  - id: integration
+    task_ids: [T-005]
+  - id: preferences
+    task_ids: [T-006]
+  - id: live-verification
+    task_ids: [T-007]
+  - id: tests-and-docs
+    task_ids: [T-008]
+tasks:
+  - id: T-001
+    plan_task: 1
+    title: "Implement pure selection decisions and register the twentieth suite"
+    lane: selection-logic
+    sequence: 1
+    implementer_tier: "advanced"
+    depends_on: []
+    owns:
+      - "waylandselectionlogic.hh"
+      - "waylandselectionlogic.cc"
+      - "tests/tst_waylandselection/tst_waylandselection.pro"
+      - "tests/tst_waylandselection/tst_waylandselection.cc"
+      - "goldendict.pro"
+      - "tests/tests.pro"
+    exclusive_resources: ["application-build-tree", "tests-build-tree"]
+    dependency_reasons: {}
+    produces:
+      - id: "selection.pure-api"
+        signature: "class Monotonic final { public: static qint64 nowMs() noexcept; }; namespace WaylandSelection { inline constexpr int MaxPayloadBytes = 1048576; inline constexpr int DebounceMs = 200; inline constexpr int IdleTimeoutMs = 250; inline constexpr int TransferTimeoutMs = 2000; inline constexpr int ActivationTimeoutMs = 300; QString chooseMimeType( QStringList const & offered ); class PayloadAccumulator { public: explicit PayloadAccumulator( int cap = MaxPayloadBytes ); void append( QByteArray const & chunk ); bool full() const noexcept; bool truncated() const noexcept; QByteArray payload() const; }; QString decodePayload( QByteArray const & raw ); bool clipboardStampAdvances( bool modeIsClipboard ) noexcept; QString chooseText( QString const & selection, qint64 capturedAt, QString const & clipboard, qint64 clipboardChangedAt ); enum class ActivationPlan { UseCached, AwaitPending }; ActivationPlan planActivation( bool hasPendingCapture ) noexcept; using ReadToken = quint64; struct ChannelOffer { quint64 id = 0; operator bool() const noexcept; }; class OfferState { public: void pendingOffer( quint64 offerId, QStringList const & mimeTypes ); ChannelOffer takeForPrimary(); ChannelOffer discardForClipboard(); bool beginMimeAttempt(); QString currentMimeType() const; void mimeAttemptFailed() noexcept; ReadToken beginRead() noexcept; bool accepts( ReadToken token ) const noexcept; void retire() noexcept; void completed( ReadToken token ) noexcept; }; }"
+        sha256: "b3b04d120e2a04aee97471f992bbbe8c751df0223bb2560dcfe9dec720932a95"
+      - id: "selection.test-inventory"
+        signature: "tests/tests.pro: exactly 20 sorted suites = [tst_article_bridge, tst_article_history, tst_article_load, tst_article_schemes, tst_article_stream, tst_btree_index, tst_encoding, tst_external_content, tst_hotkeys, tst_htmlescape, tst_langcoder, tst_linkrewrite, tst_platformwindow, tst_portal_hotkeys, tst_print_pipeline, tst_regex, tst_save_article, tst_utf8_wstring, tst_waylandselection, tst_website_frames]; tests/tst_waylandselection/tst_waylandselection: exactly 16 top-level slots = [initTestCase, cleanupTestCase, mimePreferenceOrder, payloadClampIsAppliedWhileReading, decodeReplacesInvalidUtf8, decodeStripsNul, chooseTextUsesRecency, clipboardStampIgnoresNonClipboardModes, mimeAttemptsAdvanceAndExhaust, payloadAtCapIsNotTruncated, payloadOverCapIsTruncated, offerSupersessionRetiresToken, clipboardOfferIsDiscarded, retiredOfferIsNeverReused, nullOfferClearsWithoutRead, activationPlanPromotesPendingCapture]; no _data supplier"
+        sha256: "a468b79af1e295f49a1cef48e01da9ac60b4ff20163799aba127811310a797b2"
+    consumes: []
+    interfaces:
+      produces:
+        - id: "selection.pure-api"
+          signature: "class Monotonic final { public: static qint64 nowMs() noexcept; }; namespace WaylandSelection { inline constexpr int MaxPayloadBytes = 1048576; inline constexpr int DebounceMs = 200; inline constexpr int IdleTimeoutMs = 250; inline constexpr int TransferTimeoutMs = 2000; inline constexpr int ActivationTimeoutMs = 300; QString chooseMimeType( QStringList const & offered ); class PayloadAccumulator { public: explicit PayloadAccumulator( int cap = MaxPayloadBytes ); void append( QByteArray const & chunk ); bool full() const noexcept; bool truncated() const noexcept; QByteArray payload() const; }; QString decodePayload( QByteArray const & raw ); bool clipboardStampAdvances( bool modeIsClipboard ) noexcept; QString chooseText( QString const & selection, qint64 capturedAt, QString const & clipboard, qint64 clipboardChangedAt ); enum class ActivationPlan { UseCached, AwaitPending }; ActivationPlan planActivation( bool hasPendingCapture ) noexcept; using ReadToken = quint64; struct ChannelOffer { quint64 id = 0; operator bool() const noexcept; }; class OfferState { public: void pendingOffer( quint64 offerId, QStringList const & mimeTypes ); ChannelOffer takeForPrimary(); ChannelOffer discardForClipboard(); bool beginMimeAttempt(); QString currentMimeType() const; void mimeAttemptFailed() noexcept; ReadToken beginRead() noexcept; bool accepts( ReadToken token ) const noexcept; void retire() noexcept; void completed( ReadToken token ) noexcept; }; }"
+          sha256: "b3b04d120e2a04aee97471f992bbbe8c751df0223bb2560dcfe9dec720932a95"
+        - id: "selection.test-inventory"
+          signature: "tests/tests.pro: exactly 20 sorted suites = [tst_article_bridge, tst_article_history, tst_article_load, tst_article_schemes, tst_article_stream, tst_btree_index, tst_encoding, tst_external_content, tst_hotkeys, tst_htmlescape, tst_langcoder, tst_linkrewrite, tst_platformwindow, tst_portal_hotkeys, tst_print_pipeline, tst_regex, tst_save_article, tst_utf8_wstring, tst_waylandselection, tst_website_frames]; tests/tst_waylandselection/tst_waylandselection: exactly 16 top-level slots = [initTestCase, cleanupTestCase, mimePreferenceOrder, payloadClampIsAppliedWhileReading, decodeReplacesInvalidUtf8, decodeStripsNul, chooseTextUsesRecency, clipboardStampIgnoresNonClipboardModes, mimeAttemptsAdvanceAndExhaust, payloadAtCapIsNotTruncated, payloadOverCapIsTruncated, offerSupersessionRetiresToken, clipboardOfferIsDiscarded, retiredOfferIsNeverReused, nullOfferClearsWithoutRead, activationPlanPromotesPendingCapture]; no _data supplier"
+          sha256: "a468b79af1e295f49a1cef48e01da9ac60b4ff20163799aba127811310a797b2"
+      consumes: []
+    validation:
+      - argv: ["qmake6", "goldendict.pro"]
+        cwd: "."
+        timeout_seconds: 120
+      - argv: ["make", "-j2"]
+        cwd: "."
+        timeout_seconds: 3600
+      - argv: ["make", "tests-makefile"]
+        cwd: "."
+        timeout_seconds: 120
+      - argv: ["make", "tests-build"]
+        cwd: "."
+        timeout_seconds: 1800
+      - argv: ["env", "QT_QPA_PLATFORM=offscreen", "timeout", "60", "tests/tst_waylandselection/tst_waylandselection"]
+        cwd: "."
+        timeout_seconds: 75
+      - argv: ["env", "QT_QPA_PLATFORM=xcb", "GD_TEST_WRAPPER=./scripts/test-wrapper.sh", "make", "tests-run"]
+        cwd: "."
+        timeout_seconds: 1900
+
+  - id: T-002
+    plan_task: 2
+    title: "Publish shared portal IDs and independent platform predicates"
+    lane: hotkey-contracts
+    sequence: 1
+    implementer_tier: "advanced"
+    depends_on: []
+    owns:
+      - "hotkeybackend.hh"
+      - "config.cc"
+      - "portalhotkeys.cc"
+      - "tests/tst_hotkeys/tst_hotkeys.cc"
+    exclusive_resources: ["application-build-tree", "tests-build-tree"]
+    dependency_reasons: {}
+    produces:
+      - id: "portal.selection-predicates"
+        signature: "inline bool isKnownPortalBindingId( QString const & id ); inline bool scanPopupBindingPlanned( QString const & platformName, bool preferenceEnabled ) noexcept; inline bool scanPopupCaptureSupported( bool buildSupportsSelection, QString const & platformName ) noexcept"
+        sha256: "60e91a9269c9c1fc6e08c4f82cacd978892fe5136575de0c1a46d0b5caef5455"
+      - id: "selection.source-assertion-helpers"
+        signature: "QString selectionSourceText( char const * path ); QString selectionBlock( QString const & text, QString const & anchor ); bool selectionOrdered( QString const & text, QStringList const & needles ); QString selectionCompact( QString text )"
+        sha256: "f233539b99c132a5938d836d623bf028936a2bb90cedca96b6183384eed5bd14"
+    consumes: []
+    interfaces:
+      produces:
+        - id: "portal.selection-predicates"
+          signature: "inline bool isKnownPortalBindingId( QString const & id ); inline bool scanPopupBindingPlanned( QString const & platformName, bool preferenceEnabled ) noexcept; inline bool scanPopupCaptureSupported( bool buildSupportsSelection, QString const & platformName ) noexcept"
+          sha256: "60e91a9269c9c1fc6e08c4f82cacd978892fe5136575de0c1a46d0b5caef5455"
+        - id: "selection.source-assertion-helpers"
+          signature: "QString selectionSourceText( char const * path ); QString selectionBlock( QString const & text, QString const & anchor ); bool selectionOrdered( QString const & text, QStringList const & needles ); QString selectionCompact( QString text )"
+          sha256: "f233539b99c132a5938d836d623bf028936a2bb90cedca96b6183384eed5bd14"
+      consumes: []
+    validation:
+      - argv: ["qmake6", "goldendict.pro"]
+        cwd: "."
+        timeout_seconds: 120
+      - argv: ["make", "-j2"]
+        cwd: "."
+        timeout_seconds: 3600
+      - argv: ["make", "tests-makefile"]
+        cwd: "."
+        timeout_seconds: 120
+      - argv: ["make", "tests-build"]
+        cwd: "."
+        timeout_seconds: 1800
+      - argv: ["env", "QT_QPA_PLATFORM=xcb", "xvfb-run", "-a", "timeout", "60", "tests/tst_hotkeys/tst_hotkeys", "scanPopupBindingIsPortalOnly", "portalIdPredicateAcceptsThreeIds", "threeBindingsStayBound"]
+        cwd: "."
+        timeout_seconds: 90
+      - argv: ["env", "QT_QPA_PLATFORM=xcb", "GD_TEST_WRAPPER=./scripts/test-wrapper.sh", "make", "tests-run"]
+        cwd: "."
+        timeout_seconds: 1900
+
+  - id: T-003
+    plan_task: 3
+    title: "Implement the private ext-data-control source and optional build"
+    lane: protocol-client
+    sequence: 1
+    implementer_tier: "capable"
+    depends_on: [T-001, T-002]
+    owns:
+      - "waylandselection.hh"
+      - "waylandselection.cc"
+      - "protocols/ext-data-control-v1/ext-data-control-v1.xml"
+      - "protocols/ext-data-control-v1/ext-data-control-v1-client-protocol.h"
+      - "protocols/ext-data-control-v1/ext-data-control-v1-protocol.c"
+      - "protocols/ext-data-control-v1/regenerate.sh"
+      - "goldendict.pro"
+      - "tests/testsupport.pri"
+      - "tests/tst_hotkeys/tst_hotkeys.pro"
+      - "tests/tst_hotkeys/tst_hotkeys.cc"
+    exclusive_resources: ["application-build-tree", "tests-build-tree", "ext-data-control-generated-files"]
+    dependency_reasons:
+      T-001: "Shared writable files: goldendict.pro; Consumes selection.pure-api"
+      T-002: "Shared writable files: tests/tst_hotkeys/tst_hotkeys.cc; Consumes portal.selection-predicates; Consumes selection.source-assertion-helpers"
+    produces:
+      - id: "selection.source-api"
+        signature: "inline constexpr bool kHaveWaylandDataControl; value is true iff HAVE_WAYLAND_DATA_CONTROL is defined; class WaylandSelectionSource : public QObject { Q_OBJECT; public: enum class State { Unsupported, Starting, Available, Unavailable }; explicit WaylandSelectionSource( QObject * parent = nullptr ); ~WaylandSelectionSource() override; State state() const noexcept; QString reason() const; bool primarySelectionSeen() const noexcept; QString lastText() const; bool hasPendingCapture() const noexcept; public slots: void start(); void stop(); void requestCapture( quint64 requestId ); signals: void stateChanged( State state, QString const & reason ); void capabilityChanged(); void captureFinished( quint64 requestId, QString const & text, qint64 capturedAt ); }; Q_DECLARE_METATYPE( WaylandSelectionSource::State )"
+        sha256: "c9d1ea66b425abbecd104c4bc231a94fe487154a8d4bf63f837fc13eaa8170d7"
+      - id: "selection.status-snapshot"
+        signature: "struct SelectionStatus { WaylandSelectionSource::State state = WaylandSelectionSource::State::Unsupported; QString reason; bool primarySelectionSeen = false; }"
+        sha256: "8158f2ffd3577b5a9fe922a9ff0c39714b7d2a05a8b3b5941350e25a7da44c73"
+      - id: "selection.source-private-contract"
+        signature: "WaylandSelectionSource::Impl callable surface: void assertThread() const; static char const * stateName( State state ); void publishState(); bool pending() const noexcept; void armActivation(); void answerInterest( QString text, qint64 stamp ); void expireInterest(); void requestCapture( quint64 id ); void start(); void stop(); bool live() const; bool healthy() const; ext_data_control_offer_v1 * proxyFor( quint64 id ) const; void destroyOffer( quint64 id ); void closeRead(); void retirePrimary(); void destroyDeviceAndSeat(); void destroyProtocol(); void dispose(); void fail( char const * reason ); bool flushRequests(); bool dispatchPending( std::shared_ptr<Connection> const & c, quint64 generation ); void dispatchDisplayReadable(); void dispatchDisplayWritable(); bool bindSeat( Seat const & candidate ); void maybeAvailable(); static void registryGlobal( void * data, wl_registry * registry, uint32_t name, char const * interface, uint32_t version ); static void registryGlobalRemoved( void * data, wl_registry * registry, uint32_t name ); static void discoveryDone( void * data, wl_callback * callback, uint32_t callbackData ); static void dataOffer( void * data, ext_data_control_device_v1 * device, ext_data_control_offer_v1 * offer ); static void offeredMime( void * data, ext_data_control_offer_v1 * offer, char const * mimeType ); static void selection( void * data, ext_data_control_device_v1 * device, ext_data_control_offer_v1 * offer ); static void primarySelection( void * data, ext_data_control_device_v1 * device, ext_data_control_offer_v1 * offer ); static void deviceFinished( void * data, ext_data_control_device_v1 * device ); static void seatCapabilities( void * data, wl_seat * seat, uint32_t capabilities ); static void seatName( void * data, wl_seat * seat, char const * name ); void dropCapture( bool timeout ); void promote(); bool startMimeAttempt(); void checkTransferDeadline( ReadToken token ); void complete( ReadToken token ); void drainPipe( ReadToken token ); void Connection::destroyConnection(); Connection::~Connection(); Impl stores std::shared_ptr<Connection>; deferred physical disposal captures [c] only"
+        sha256: "60fd82adcbb8ec18ca242cca8d3fa78d6a50dfa6f16e77cebf55ddedf8d36f65"
+      - id: "selection.protocol-generation"
+        signature: "protocols/ext-data-control-v1/ext-data-control-v1.xml sha256=293deba5dfdb974fbcf8dcf891a30a51a36a8bba0047dc6bdf6a03194089b7fb (wayland-protocols 1.50); protocols/ext-data-control-v1/regenerate.sh() -> wayland-scanner 1.26.0 client-header ext-data-control-v1.xml ext-data-control-v1-client-protocol.h; wayland-scanner 1.26.0 private-code ext-data-control-v1.xml ext-data-control-v1-protocol.c; committed header and C are linked by application/live runner; ordinary qmake never invokes scanner"
+        sha256: "9bb752aabaa803eac99be10ea974b92e9b5e40dd1bbfdb468277fb30a2da84e3"
+      - id: "selection.optional-build"
+        signature: "goldendict.pro: unix:!mac packagesExist(wayland-client) -> HAVE_WAYLAND_DATA_CONTROL, PKGCONFIG+=wayland-client, protocols/ext-data-control-v1 include, ext-data-control-v1-protocol.c source; tests/testsupport.pri: matching optional HAVE_WAYLAND_DATA_CONTROL, no wayland-client link; tst_hotkeys: waylandselection.hh is header-only dependency, absent from HEADERS, waylandselection.cc absent from SOURCES; public source API and stub compile with no optional package"
+        sha256: "2c345923c9420c5c7f8ed9f93dec5d7db82ada630125344ae584b17a17d40733"
+    consumes:
+      - id: "selection.pure-api"
+        producer_task: "T-001"
+        interface_id: "selection.pure-api"
+        signature: "class Monotonic final { public: static qint64 nowMs() noexcept; }; namespace WaylandSelection { inline constexpr int MaxPayloadBytes = 1048576; inline constexpr int DebounceMs = 200; inline constexpr int IdleTimeoutMs = 250; inline constexpr int TransferTimeoutMs = 2000; inline constexpr int ActivationTimeoutMs = 300; QString chooseMimeType( QStringList const & offered ); class PayloadAccumulator { public: explicit PayloadAccumulator( int cap = MaxPayloadBytes ); void append( QByteArray const & chunk ); bool full() const noexcept; bool truncated() const noexcept; QByteArray payload() const; }; QString decodePayload( QByteArray const & raw ); bool clipboardStampAdvances( bool modeIsClipboard ) noexcept; QString chooseText( QString const & selection, qint64 capturedAt, QString const & clipboard, qint64 clipboardChangedAt ); enum class ActivationPlan { UseCached, AwaitPending }; ActivationPlan planActivation( bool hasPendingCapture ) noexcept; using ReadToken = quint64; struct ChannelOffer { quint64 id = 0; operator bool() const noexcept; }; class OfferState { public: void pendingOffer( quint64 offerId, QStringList const & mimeTypes ); ChannelOffer takeForPrimary(); ChannelOffer discardForClipboard(); bool beginMimeAttempt(); QString currentMimeType() const; void mimeAttemptFailed() noexcept; ReadToken beginRead() noexcept; bool accepts( ReadToken token ) const noexcept; void retire() noexcept; void completed( ReadToken token ) noexcept; }; }"
+        sha256: "b3b04d120e2a04aee97471f992bbbe8c751df0223bb2560dcfe9dec720932a95"
+      - id: "portal.selection-predicates"
+        producer_task: "T-002"
+        interface_id: "portal.selection-predicates"
+        signature: "inline bool isKnownPortalBindingId( QString const & id ); inline bool scanPopupBindingPlanned( QString const & platformName, bool preferenceEnabled ) noexcept; inline bool scanPopupCaptureSupported( bool buildSupportsSelection, QString const & platformName ) noexcept"
+        sha256: "60e91a9269c9c1fc6e08c4f82cacd978892fe5136575de0c1a46d0b5caef5455"
+      - id: "selection.source-assertion-helpers"
+        producer_task: "T-002"
+        interface_id: "selection.source-assertion-helpers"
+        signature: "QString selectionSourceText( char const * path ); QString selectionBlock( QString const & text, QString const & anchor ); bool selectionOrdered( QString const & text, QStringList const & needles ); QString selectionCompact( QString text )"
+        sha256: "f233539b99c132a5938d836d623bf028936a2bb90cedca96b6183384eed5bd14"
+    interfaces:
+      produces:
+        - id: "selection.source-api"
+          signature: "inline constexpr bool kHaveWaylandDataControl; value is true iff HAVE_WAYLAND_DATA_CONTROL is defined; class WaylandSelectionSource : public QObject { Q_OBJECT; public: enum class State { Unsupported, Starting, Available, Unavailable }; explicit WaylandSelectionSource( QObject * parent = nullptr ); ~WaylandSelectionSource() override; State state() const noexcept; QString reason() const; bool primarySelectionSeen() const noexcept; QString lastText() const; bool hasPendingCapture() const noexcept; public slots: void start(); void stop(); void requestCapture( quint64 requestId ); signals: void stateChanged( State state, QString const & reason ); void capabilityChanged(); void captureFinished( quint64 requestId, QString const & text, qint64 capturedAt ); }; Q_DECLARE_METATYPE( WaylandSelectionSource::State )"
+          sha256: "c9d1ea66b425abbecd104c4bc231a94fe487154a8d4bf63f837fc13eaa8170d7"
+        - id: "selection.status-snapshot"
+          signature: "struct SelectionStatus { WaylandSelectionSource::State state = WaylandSelectionSource::State::Unsupported; QString reason; bool primarySelectionSeen = false; }"
+          sha256: "8158f2ffd3577b5a9fe922a9ff0c39714b7d2a05a8b3b5941350e25a7da44c73"
+        - id: "selection.source-private-contract"
+          signature: "WaylandSelectionSource::Impl callable surface: void assertThread() const; static char const * stateName( State state ); void publishState(); bool pending() const noexcept; void armActivation(); void answerInterest( QString text, qint64 stamp ); void expireInterest(); void requestCapture( quint64 id ); void start(); void stop(); bool live() const; bool healthy() const; ext_data_control_offer_v1 * proxyFor( quint64 id ) const; void destroyOffer( quint64 id ); void closeRead(); void retirePrimary(); void destroyDeviceAndSeat(); void destroyProtocol(); void dispose(); void fail( char const * reason ); bool flushRequests(); bool dispatchPending( std::shared_ptr<Connection> const & c, quint64 generation ); void dispatchDisplayReadable(); void dispatchDisplayWritable(); bool bindSeat( Seat const & candidate ); void maybeAvailable(); static void registryGlobal( void * data, wl_registry * registry, uint32_t name, char const * interface, uint32_t version ); static void registryGlobalRemoved( void * data, wl_registry * registry, uint32_t name ); static void discoveryDone( void * data, wl_callback * callback, uint32_t callbackData ); static void dataOffer( void * data, ext_data_control_device_v1 * device, ext_data_control_offer_v1 * offer ); static void offeredMime( void * data, ext_data_control_offer_v1 * offer, char const * mimeType ); static void selection( void * data, ext_data_control_device_v1 * device, ext_data_control_offer_v1 * offer ); static void primarySelection( void * data, ext_data_control_device_v1 * device, ext_data_control_offer_v1 * offer ); static void deviceFinished( void * data, ext_data_control_device_v1 * device ); static void seatCapabilities( void * data, wl_seat * seat, uint32_t capabilities ); static void seatName( void * data, wl_seat * seat, char const * name ); void dropCapture( bool timeout ); void promote(); bool startMimeAttempt(); void checkTransferDeadline( ReadToken token ); void complete( ReadToken token ); void drainPipe( ReadToken token ); void Connection::destroyConnection(); Connection::~Connection(); Impl stores std::shared_ptr<Connection>; deferred physical disposal captures [c] only"
+          sha256: "60fd82adcbb8ec18ca242cca8d3fa78d6a50dfa6f16e77cebf55ddedf8d36f65"
+        - id: "selection.protocol-generation"
+          signature: "protocols/ext-data-control-v1/ext-data-control-v1.xml sha256=293deba5dfdb974fbcf8dcf891a30a51a36a8bba0047dc6bdf6a03194089b7fb (wayland-protocols 1.50); protocols/ext-data-control-v1/regenerate.sh() -> wayland-scanner 1.26.0 client-header ext-data-control-v1.xml ext-data-control-v1-client-protocol.h; wayland-scanner 1.26.0 private-code ext-data-control-v1.xml ext-data-control-v1-protocol.c; committed header and C are linked by application/live runner; ordinary qmake never invokes scanner"
+          sha256: "9bb752aabaa803eac99be10ea974b92e9b5e40dd1bbfdb468277fb30a2da84e3"
+        - id: "selection.optional-build"
+          signature: "goldendict.pro: unix:!mac packagesExist(wayland-client) -> HAVE_WAYLAND_DATA_CONTROL, PKGCONFIG+=wayland-client, protocols/ext-data-control-v1 include, ext-data-control-v1-protocol.c source; tests/testsupport.pri: matching optional HAVE_WAYLAND_DATA_CONTROL, no wayland-client link; tst_hotkeys: waylandselection.hh is header-only dependency, absent from HEADERS, waylandselection.cc absent from SOURCES; public source API and stub compile with no optional package"
+          sha256: "2c345923c9420c5c7f8ed9f93dec5d7db82ada630125344ae584b17a17d40733"
+      consumes:
+        - id: "selection.pure-api"
+          producer_task: "T-001"
+          interface_id: "selection.pure-api"
+          signature: "class Monotonic final { public: static qint64 nowMs() noexcept; }; namespace WaylandSelection { inline constexpr int MaxPayloadBytes = 1048576; inline constexpr int DebounceMs = 200; inline constexpr int IdleTimeoutMs = 250; inline constexpr int TransferTimeoutMs = 2000; inline constexpr int ActivationTimeoutMs = 300; QString chooseMimeType( QStringList const & offered ); class PayloadAccumulator { public: explicit PayloadAccumulator( int cap = MaxPayloadBytes ); void append( QByteArray const & chunk ); bool full() const noexcept; bool truncated() const noexcept; QByteArray payload() const; }; QString decodePayload( QByteArray const & raw ); bool clipboardStampAdvances( bool modeIsClipboard ) noexcept; QString chooseText( QString const & selection, qint64 capturedAt, QString const & clipboard, qint64 clipboardChangedAt ); enum class ActivationPlan { UseCached, AwaitPending }; ActivationPlan planActivation( bool hasPendingCapture ) noexcept; using ReadToken = quint64; struct ChannelOffer { quint64 id = 0; operator bool() const noexcept; }; class OfferState { public: void pendingOffer( quint64 offerId, QStringList const & mimeTypes ); ChannelOffer takeForPrimary(); ChannelOffer discardForClipboard(); bool beginMimeAttempt(); QString currentMimeType() const; void mimeAttemptFailed() noexcept; ReadToken beginRead() noexcept; bool accepts( ReadToken token ) const noexcept; void retire() noexcept; void completed( ReadToken token ) noexcept; }; }"
+          sha256: "b3b04d120e2a04aee97471f992bbbe8c751df0223bb2560dcfe9dec720932a95"
+        - id: "portal.selection-predicates"
+          producer_task: "T-002"
+          interface_id: "portal.selection-predicates"
+          signature: "inline bool isKnownPortalBindingId( QString const & id ); inline bool scanPopupBindingPlanned( QString const & platformName, bool preferenceEnabled ) noexcept; inline bool scanPopupCaptureSupported( bool buildSupportsSelection, QString const & platformName ) noexcept"
+          sha256: "60e91a9269c9c1fc6e08c4f82cacd978892fe5136575de0c1a46d0b5caef5455"
+        - id: "selection.source-assertion-helpers"
+          producer_task: "T-002"
+          interface_id: "selection.source-assertion-helpers"
+          signature: "QString selectionSourceText( char const * path ); QString selectionBlock( QString const & text, QString const & anchor ); bool selectionOrdered( QString const & text, QStringList const & needles ); QString selectionCompact( QString text )"
+          sha256: "f233539b99c132a5938d836d623bf028936a2bb90cedca96b6183384eed5bd14"
+    validation:
+      - argv: ["qmake6", "goldendict.pro"]
+        cwd: "."
+        timeout_seconds: 120
+      - argv: ["make", "-j2"]
+        cwd: "."
+        timeout_seconds: 3600
+      - argv: ["make", "tests-makefile"]
+        cwd: "."
+        timeout_seconds: 120
+      - argv: ["make", "tests-build"]
+        cwd: "."
+        timeout_seconds: 1800
+      - argv: ["wayland-scanner", "--version"]
+        cwd: "."
+        timeout_seconds: 15
+      - argv: ["sha256sum", "protocols/ext-data-control-v1/ext-data-control-v1.xml"]
+        cwd: "."
+        timeout_seconds: 15
+      - argv: ["protocols/ext-data-control-v1/regenerate.sh"]
+        cwd: "."
+        timeout_seconds: 60
+      - argv: ["git", "diff", "--exit-code", "--", "protocols/ext-data-control-v1/"]
+        cwd: "."
+        timeout_seconds: 30
+      - argv: ["env", "QT_QPA_PLATFORM=xcb", "xvfb-run", "-a", "timeout", "60", "tests/tst_hotkeys/tst_hotkeys", "capabilityConstantMatchesBuild", "scanPopupSourceLoopContractIsPinned"]
+        cwd: "."
+        timeout_seconds: 90
+      - argv: ["env", "QT_QPA_PLATFORM=xcb", "GD_TEST_WRAPPER=./scripts/test-wrapper.sh", "make", "tests-run"]
+        cwd: "."
+        timeout_seconds: 1900
+
+  - id: T-004
+    plan_task: 4
+    title: "Persist opt-in selected-text preferences without rewriting stored keys"
+    lane: configuration
+    sequence: 1
+    implementer_tier: "advanced"
+    depends_on: [T-002, T-003]
+    owns:
+      - "config.hh"
+      - "config.cc"
+      - "tests/tst_hotkeys/tst_hotkeys.cc"
+    exclusive_resources: ["application-build-tree", "tests-build-tree"]
+    dependency_reasons:
+      T-002: "Shared writable files: config.cc, tests/tst_hotkeys/tst_hotkeys.cc; Consumes portal.selection-predicates"
+      T-003: "Shared writable files: tests/tst_hotkeys/tst_hotkeys.cc"
+    produces:
+      - id: "selection.preference-storage"
+        signature: "bool Config::Preferences::enableScanPopupHotkey = false; Config::HotKey Config::Preferences::scanPopupHotkey = Config::HotKey( QKeySequence( Qt::CTRL | Qt::META | Qt::Key_D ) ); preferences XML direct children enableScanPopupHotkey and scanPopupHotkey; PortableText=Meta+Ctrl+D; preferred_trigger=CTRL+LOGO+d; absent key retains default, empty key stays empty, stored rawText is verbatim, only boolean text 1 enables; portalBindings preserves scan-popup and last duplicate description"
+        sha256: "c1a7ad04afe7c7ebd1ffb603d9f57efe77c5e0ec6ddddc46cdf1e775e8f7e4f2"
+      - id: "selection.config-fixture-helper"
+        signature: "bool selectionAmendPreference( QString const & name, QString const & value, bool present = true )"
+        sha256: "e2dfb6fe9c3baac95d868515b8e9a1adb0ecf2d5b9d9f06ce8e98b5143d43cd6"
+    consumes:
+      - id: "portal.selection-predicates"
+        producer_task: "T-002"
+        interface_id: "portal.selection-predicates"
+        signature: "inline bool isKnownPortalBindingId( QString const & id ); inline bool scanPopupBindingPlanned( QString const & platformName, bool preferenceEnabled ) noexcept; inline bool scanPopupCaptureSupported( bool buildSupportsSelection, QString const & platformName ) noexcept"
+        sha256: "60e91a9269c9c1fc6e08c4f82cacd978892fe5136575de0c1a46d0b5caef5455"
+    interfaces:
+      produces:
+        - id: "selection.preference-storage"
+          signature: "bool Config::Preferences::enableScanPopupHotkey = false; Config::HotKey Config::Preferences::scanPopupHotkey = Config::HotKey( QKeySequence( Qt::CTRL | Qt::META | Qt::Key_D ) ); preferences XML direct children enableScanPopupHotkey and scanPopupHotkey; PortableText=Meta+Ctrl+D; preferred_trigger=CTRL+LOGO+d; absent key retains default, empty key stays empty, stored rawText is verbatim, only boolean text 1 enables; portalBindings preserves scan-popup and last duplicate description"
+          sha256: "c1a7ad04afe7c7ebd1ffb603d9f57efe77c5e0ec6ddddc46cdf1e775e8f7e4f2"
+        - id: "selection.config-fixture-helper"
+          signature: "bool selectionAmendPreference( QString const & name, QString const & value, bool present = true )"
+          sha256: "e2dfb6fe9c3baac95d868515b8e9a1adb0ecf2d5b9d9f06ce8e98b5143d43cd6"
+      consumes:
+        - id: "portal.selection-predicates"
+          producer_task: "T-002"
+          interface_id: "portal.selection-predicates"
+          signature: "inline bool isKnownPortalBindingId( QString const & id ); inline bool scanPopupBindingPlanned( QString const & platformName, bool preferenceEnabled ) noexcept; inline bool scanPopupCaptureSupported( bool buildSupportsSelection, QString const & platformName ) noexcept"
+          sha256: "60e91a9269c9c1fc6e08c4f82cacd978892fe5136575de0c1a46d0b5caef5455"
+    validation:
+      - argv: ["qmake6", "goldendict.pro"]
+        cwd: "."
+        timeout_seconds: 120
+      - argv: ["make", "-j2"]
+        cwd: "."
+        timeout_seconds: 3600
+      - argv: ["make", "tests-makefile"]
+        cwd: "."
+        timeout_seconds: 120
+      - argv: ["make", "tests-build"]
+        cwd: "."
+        timeout_seconds: 1800
+      - argv: ["env", "QT_QPA_PLATFORM=xcb", "xvfb-run", "-a", "timeout", "60", "tests/tst_hotkeys/tst_hotkeys", "defaultScanPopupHotkeyIsBindable", "scanPopupPortalBindingSurvivesSaveLoad", "scanPopupHotkeyKeepsVerbatimText", "legacyConfigDefaultsScanPopupHotkeyOff", "scanPopupConfigBooleanValues"]
+        cwd: "."
+        timeout_seconds: 90
+      - argv: ["env", "QT_QPA_PLATFORM=xcb", "GD_TEST_WRAPPER=./scripts/test-wrapper.sh", "make", "tests-run"]
+        cwd: "."
+        timeout_seconds: 1900
+
+  - id: T-005
+    plan_task: 5
+    title: "Wire selection ownership and portal activation through the popup"
+    lane: integration
+    sequence: 1
+    implementer_tier: "capable"
+    depends_on: [T-001, T-002, T-003, T-004]
+    owns:
+      - "mainwindow.hh"
+      - "mainwindow.cc"
+      - "scanpopup.hh"
+      - "scanpopup.cc"
+      - "preferences.hh"
+      - "preferences.cc"
+      - "tests/tst_hotkeys/tst_hotkeys.cc"
+    exclusive_resources: ["application-build-tree", "tests-build-tree"]
+    dependency_reasons:
+      T-001: "Consumes selection.pure-api"
+      T-002: "Shared writable files: tests/tst_hotkeys/tst_hotkeys.cc; Consumes portal.selection-predicates; Consumes selection.source-assertion-helpers"
+      T-003: "Shared writable files: tests/tst_hotkeys/tst_hotkeys.cc; Consumes selection.source-api; Consumes selection.status-snapshot"
+      T-004: "Shared writable files: tests/tst_hotkeys/tst_hotkeys.cc; Consumes selection.preference-storage"
+    produces:
+      - id: "selection.mainwindow-lifecycle"
+        signature: "void MainWindow::reconcileSelectionSource(); void MainWindow::reportNothingToTranslate(); std::unique_ptr<WaylandSelectionSource> MainWindow::selectionSource; quint64 MainWindow::scanPopupRequestId = 0; qint64 MainWindow::clipboardChangedAt = 0; scan-popup binding uses scanPopupBindingPlanned independently of capture support; GUI-thread source owned by MainWindow; monotonic Clipboard-only stamp; native handle then activation token then capture; capture completion guards shutdown/request/popup, reads current clipboard and chooseText; selection-empty -> No selected text or clipboard text to translate (3000 ms), visible main status then tray then log only"
+        sha256: "77d2584bdd49b5401bf19981870060ae2e7ad424833098f6d1c8b8ca00aa5520"
+      - id: "selection.popup-entrypoint"
+        signature: "bool ScanPopup::translateSelectedText( QString const & text ); sanitizeInputPhrase, reject invalid, accept visible identical phrase, otherwise translateWord through existing path"
+        sha256: "faa4373096c131a3361e346aaf64955736fe59636995e21fae69f938e6ddd98b"
+      - id: "selection.preferences-status-api"
+        signature: "void Preferences::setHotkeyStatus( QString const & platform, HotkeyBackend::State state, QString const & explanation, QVector<PortalBindingDisplay> const & bindings, bool configureAvailable, SelectionStatus const & selection = SelectionStatus{} ); default argument only in declaration"
+        sha256: "246c5b039c977fb1b270757f610be2d0b161aa480258d5738d4ee8c75a7b6a2c"
+    consumes:
+      - id: "selection.pure-api"
+        producer_task: "T-001"
+        interface_id: "selection.pure-api"
+        signature: "class Monotonic final { public: static qint64 nowMs() noexcept; }; namespace WaylandSelection { inline constexpr int MaxPayloadBytes = 1048576; inline constexpr int DebounceMs = 200; inline constexpr int IdleTimeoutMs = 250; inline constexpr int TransferTimeoutMs = 2000; inline constexpr int ActivationTimeoutMs = 300; QString chooseMimeType( QStringList const & offered ); class PayloadAccumulator { public: explicit PayloadAccumulator( int cap = MaxPayloadBytes ); void append( QByteArray const & chunk ); bool full() const noexcept; bool truncated() const noexcept; QByteArray payload() const; }; QString decodePayload( QByteArray const & raw ); bool clipboardStampAdvances( bool modeIsClipboard ) noexcept; QString chooseText( QString const & selection, qint64 capturedAt, QString const & clipboard, qint64 clipboardChangedAt ); enum class ActivationPlan { UseCached, AwaitPending }; ActivationPlan planActivation( bool hasPendingCapture ) noexcept; using ReadToken = quint64; struct ChannelOffer { quint64 id = 0; operator bool() const noexcept; }; class OfferState { public: void pendingOffer( quint64 offerId, QStringList const & mimeTypes ); ChannelOffer takeForPrimary(); ChannelOffer discardForClipboard(); bool beginMimeAttempt(); QString currentMimeType() const; void mimeAttemptFailed() noexcept; ReadToken beginRead() noexcept; bool accepts( ReadToken token ) const noexcept; void retire() noexcept; void completed( ReadToken token ) noexcept; }; }"
+        sha256: "b3b04d120e2a04aee97471f992bbbe8c751df0223bb2560dcfe9dec720932a95"
+      - id: "portal.selection-predicates"
+        producer_task: "T-002"
+        interface_id: "portal.selection-predicates"
+        signature: "inline bool isKnownPortalBindingId( QString const & id ); inline bool scanPopupBindingPlanned( QString const & platformName, bool preferenceEnabled ) noexcept; inline bool scanPopupCaptureSupported( bool buildSupportsSelection, QString const & platformName ) noexcept"
+        sha256: "60e91a9269c9c1fc6e08c4f82cacd978892fe5136575de0c1a46d0b5caef5455"
+      - id: "selection.source-assertion-helpers"
+        producer_task: "T-002"
+        interface_id: "selection.source-assertion-helpers"
+        signature: "QString selectionSourceText( char const * path ); QString selectionBlock( QString const & text, QString const & anchor ); bool selectionOrdered( QString const & text, QStringList const & needles ); QString selectionCompact( QString text )"
+        sha256: "f233539b99c132a5938d836d623bf028936a2bb90cedca96b6183384eed5bd14"
+      - id: "selection.source-api"
+        producer_task: "T-003"
+        interface_id: "selection.source-api"
+        signature: "inline constexpr bool kHaveWaylandDataControl; value is true iff HAVE_WAYLAND_DATA_CONTROL is defined; class WaylandSelectionSource : public QObject { Q_OBJECT; public: enum class State { Unsupported, Starting, Available, Unavailable }; explicit WaylandSelectionSource( QObject * parent = nullptr ); ~WaylandSelectionSource() override; State state() const noexcept; QString reason() const; bool primarySelectionSeen() const noexcept; QString lastText() const; bool hasPendingCapture() const noexcept; public slots: void start(); void stop(); void requestCapture( quint64 requestId ); signals: void stateChanged( State state, QString const & reason ); void capabilityChanged(); void captureFinished( quint64 requestId, QString const & text, qint64 capturedAt ); }; Q_DECLARE_METATYPE( WaylandSelectionSource::State )"
+        sha256: "c9d1ea66b425abbecd104c4bc231a94fe487154a8d4bf63f837fc13eaa8170d7"
+      - id: "selection.status-snapshot"
+        producer_task: "T-003"
+        interface_id: "selection.status-snapshot"
+        signature: "struct SelectionStatus { WaylandSelectionSource::State state = WaylandSelectionSource::State::Unsupported; QString reason; bool primarySelectionSeen = false; }"
+        sha256: "8158f2ffd3577b5a9fe922a9ff0c39714b7d2a05a8b3b5941350e25a7da44c73"
+      - id: "selection.preference-storage"
+        producer_task: "T-004"
+        interface_id: "selection.preference-storage"
+        signature: "bool Config::Preferences::enableScanPopupHotkey = false; Config::HotKey Config::Preferences::scanPopupHotkey = Config::HotKey( QKeySequence( Qt::CTRL | Qt::META | Qt::Key_D ) ); preferences XML direct children enableScanPopupHotkey and scanPopupHotkey; PortableText=Meta+Ctrl+D; preferred_trigger=CTRL+LOGO+d; absent key retains default, empty key stays empty, stored rawText is verbatim, only boolean text 1 enables; portalBindings preserves scan-popup and last duplicate description"
+        sha256: "c1a7ad04afe7c7ebd1ffb603d9f57efe77c5e0ec6ddddc46cdf1e775e8f7e4f2"
+    interfaces:
+      produces:
+        - id: "selection.mainwindow-lifecycle"
+          signature: "void MainWindow::reconcileSelectionSource(); void MainWindow::reportNothingToTranslate(); std::unique_ptr<WaylandSelectionSource> MainWindow::selectionSource; quint64 MainWindow::scanPopupRequestId = 0; qint64 MainWindow::clipboardChangedAt = 0; scan-popup binding uses scanPopupBindingPlanned independently of capture support; GUI-thread source owned by MainWindow; monotonic Clipboard-only stamp; native handle then activation token then capture; capture completion guards shutdown/request/popup, reads current clipboard and chooseText; selection-empty -> No selected text or clipboard text to translate (3000 ms), visible main status then tray then log only"
+          sha256: "77d2584bdd49b5401bf19981870060ae2e7ad424833098f6d1c8b8ca00aa5520"
+        - id: "selection.popup-entrypoint"
+          signature: "bool ScanPopup::translateSelectedText( QString const & text ); sanitizeInputPhrase, reject invalid, accept visible identical phrase, otherwise translateWord through existing path"
+          sha256: "faa4373096c131a3361e346aaf64955736fe59636995e21fae69f938e6ddd98b"
+        - id: "selection.preferences-status-api"
+          signature: "void Preferences::setHotkeyStatus( QString const & platform, HotkeyBackend::State state, QString const & explanation, QVector<PortalBindingDisplay> const & bindings, bool configureAvailable, SelectionStatus const & selection = SelectionStatus{} ); default argument only in declaration"
+          sha256: "246c5b039c977fb1b270757f610be2d0b161aa480258d5738d4ee8c75a7b6a2c"
+      consumes:
+        - id: "selection.pure-api"
+          producer_task: "T-001"
+          interface_id: "selection.pure-api"
+          signature: "class Monotonic final { public: static qint64 nowMs() noexcept; }; namespace WaylandSelection { inline constexpr int MaxPayloadBytes = 1048576; inline constexpr int DebounceMs = 200; inline constexpr int IdleTimeoutMs = 250; inline constexpr int TransferTimeoutMs = 2000; inline constexpr int ActivationTimeoutMs = 300; QString chooseMimeType( QStringList const & offered ); class PayloadAccumulator { public: explicit PayloadAccumulator( int cap = MaxPayloadBytes ); void append( QByteArray const & chunk ); bool full() const noexcept; bool truncated() const noexcept; QByteArray payload() const; }; QString decodePayload( QByteArray const & raw ); bool clipboardStampAdvances( bool modeIsClipboard ) noexcept; QString chooseText( QString const & selection, qint64 capturedAt, QString const & clipboard, qint64 clipboardChangedAt ); enum class ActivationPlan { UseCached, AwaitPending }; ActivationPlan planActivation( bool hasPendingCapture ) noexcept; using ReadToken = quint64; struct ChannelOffer { quint64 id = 0; operator bool() const noexcept; }; class OfferState { public: void pendingOffer( quint64 offerId, QStringList const & mimeTypes ); ChannelOffer takeForPrimary(); ChannelOffer discardForClipboard(); bool beginMimeAttempt(); QString currentMimeType() const; void mimeAttemptFailed() noexcept; ReadToken beginRead() noexcept; bool accepts( ReadToken token ) const noexcept; void retire() noexcept; void completed( ReadToken token ) noexcept; }; }"
+          sha256: "b3b04d120e2a04aee97471f992bbbe8c751df0223bb2560dcfe9dec720932a95"
+        - id: "portal.selection-predicates"
+          producer_task: "T-002"
+          interface_id: "portal.selection-predicates"
+          signature: "inline bool isKnownPortalBindingId( QString const & id ); inline bool scanPopupBindingPlanned( QString const & platformName, bool preferenceEnabled ) noexcept; inline bool scanPopupCaptureSupported( bool buildSupportsSelection, QString const & platformName ) noexcept"
+          sha256: "60e91a9269c9c1fc6e08c4f82cacd978892fe5136575de0c1a46d0b5caef5455"
+        - id: "selection.source-assertion-helpers"
+          producer_task: "T-002"
+          interface_id: "selection.source-assertion-helpers"
+          signature: "QString selectionSourceText( char const * path ); QString selectionBlock( QString const & text, QString const & anchor ); bool selectionOrdered( QString const & text, QStringList const & needles ); QString selectionCompact( QString text )"
+          sha256: "f233539b99c132a5938d836d623bf028936a2bb90cedca96b6183384eed5bd14"
+        - id: "selection.source-api"
+          producer_task: "T-003"
+          interface_id: "selection.source-api"
+          signature: "inline constexpr bool kHaveWaylandDataControl; value is true iff HAVE_WAYLAND_DATA_CONTROL is defined; class WaylandSelectionSource : public QObject { Q_OBJECT; public: enum class State { Unsupported, Starting, Available, Unavailable }; explicit WaylandSelectionSource( QObject * parent = nullptr ); ~WaylandSelectionSource() override; State state() const noexcept; QString reason() const; bool primarySelectionSeen() const noexcept; QString lastText() const; bool hasPendingCapture() const noexcept; public slots: void start(); void stop(); void requestCapture( quint64 requestId ); signals: void stateChanged( State state, QString const & reason ); void capabilityChanged(); void captureFinished( quint64 requestId, QString const & text, qint64 capturedAt ); }; Q_DECLARE_METATYPE( WaylandSelectionSource::State )"
+          sha256: "c9d1ea66b425abbecd104c4bc231a94fe487154a8d4bf63f837fc13eaa8170d7"
+        - id: "selection.status-snapshot"
+          producer_task: "T-003"
+          interface_id: "selection.status-snapshot"
+          signature: "struct SelectionStatus { WaylandSelectionSource::State state = WaylandSelectionSource::State::Unsupported; QString reason; bool primarySelectionSeen = false; }"
+          sha256: "8158f2ffd3577b5a9fe922a9ff0c39714b7d2a05a8b3b5941350e25a7da44c73"
+        - id: "selection.preference-storage"
+          producer_task: "T-004"
+          interface_id: "selection.preference-storage"
+          signature: "bool Config::Preferences::enableScanPopupHotkey = false; Config::HotKey Config::Preferences::scanPopupHotkey = Config::HotKey( QKeySequence( Qt::CTRL | Qt::META | Qt::Key_D ) ); preferences XML direct children enableScanPopupHotkey and scanPopupHotkey; PortableText=Meta+Ctrl+D; preferred_trigger=CTRL+LOGO+d; absent key retains default, empty key stays empty, stored rawText is verbatim, only boolean text 1 enables; portalBindings preserves scan-popup and last duplicate description"
+          sha256: "c1a7ad04afe7c7ebd1ffb603d9f57efe77c5e0ec6ddddc46cdf1e775e8f7e4f2"
+    validation:
+      - argv: ["qmake6", "goldendict.pro"]
+        cwd: "."
+        timeout_seconds: 120
+      - argv: ["make", "-j2"]
+        cwd: "."
+        timeout_seconds: 3600
+      - argv: ["make", "tests-makefile"]
+        cwd: "."
+        timeout_seconds: 120
+      - argv: ["make", "tests-build"]
+        cwd: "."
+        timeout_seconds: 1800
+      - argv: ["env", "QT_QPA_PLATFORM=xcb", "xvfb-run", "-a", "timeout", "60", "tests/tst_hotkeys/tst_hotkeys", "sourceFollowsThePreference", "scanPopupActivationWiringIsPinned", "xcbGuardDoesNotCreateThePopup"]
+        cwd: "."
+        timeout_seconds: 90
+      - argv: ["env", "QT_QPA_PLATFORM=xcb", "GD_TEST_WRAPPER=./scripts/test-wrapper.sh", "make", "tests-run"]
+        cwd: "."
+        timeout_seconds: 1900
+
+  - id: T-006
+    plan_task: 6
+    title: "Add the third Hotkeys row and render selection snapshots"
+    lane: preferences
+    sequence: 1
+    implementer_tier: "advanced"
+    depends_on: [T-002, T-003, T-004, T-005]
+    owns:
+      - "preferences.ui"
+      - "preferences.hh"
+      - "preferences.cc"
+      - "tests/tst_hotkeys/tst_hotkeys.cc"
+    exclusive_resources: ["application-build-tree", "tests-build-tree"]
+    dependency_reasons:
+      T-002: "Shared writable files: tests/tst_hotkeys/tst_hotkeys.cc; Consumes portal.selection-predicates; Consumes selection.source-assertion-helpers"
+      T-003: "Shared writable files: tests/tst_hotkeys/tst_hotkeys.cc; Consumes selection.status-snapshot"
+      T-004: "Shared writable files: tests/tst_hotkeys/tst_hotkeys.cc; Consumes selection.preference-storage"
+      T-005: "Shared writable files: preferences.cc, preferences.hh, tests/tst_hotkeys/tst_hotkeys.cc; Consumes selection.preferences-status-api"
+    produces:
+      - id: "selection.preferences-row"
+        signature: "bool Preferences::scanPopupHotkeyEdited = false; void Preferences::on_enableScanPopupHotkey_toggled( bool checked ); objects enableScanPopupHotkey, scanPopupHotkey, horizontalLayout_scanPopupHotkey, horizontalSpacer_scanPopupHotkey, scanPopupHotkeyStatus; Wayland-only row, PlainText labels, edited key preserved, non-Wayland stored values preserved; SelectionStatus suffix: selection source starting, primary selection supported, selection not observed yet, selection unavailable: %1 — clipboard is used instead, selection unsupported in this build — clipboard is used instead; setHotkeyStatus signature unchanged from Task 5"
+        sha256: "f6ed3b7082a4ee02c07669451f21237051c9a1ce368debd6b209b34c8f774bba"
+      - id: "selection.hotkeys-test-inventory"
+        signature: "TstHotkeys: exactly 20 new top-level functions = [scanPopupBindingIsPortalOnly, portalIdPredicateAcceptsThreeIds, threeBindingsStayBound, capabilityConstantMatchesBuild, scanPopupSourceLoopContractIsPinned, defaultScanPopupHotkeyIsBindable, scanPopupPortalBindingSurvivesSaveLoad, scanPopupHotkeyKeepsVerbatimText, legacyConfigDefaultsScanPopupHotkeyOff, scanPopupConfigBooleanValues, sourceFollowsThePreference, scanPopupActivationWiringIsPinned, xcbGuardDoesNotCreateThePopup, selectionStatusRowRendersSnapshots_data, selectionStatusRowRendersSnapshots, scanPopupRowPlatformMatrix_data, scanPopupRowPlatformMatrix, scanPopupRowWaylandValuesAndEdits, scanPopupRowWaylandProbe, scanPopupRowBaseStatuses]; exactly two new _data suppliers and one real-Wayland child probe; scan-popup-wayland-preferences: PASS; source assertions prove textual wiring only"
+        sha256: "0d64d8479cf2349f7f6b739799d2e834b0d436a718e7fcac8cef57ea1d77ea5b"
+    consumes:
+      - id: "portal.selection-predicates"
+        producer_task: "T-002"
+        interface_id: "portal.selection-predicates"
+        signature: "inline bool isKnownPortalBindingId( QString const & id ); inline bool scanPopupBindingPlanned( QString const & platformName, bool preferenceEnabled ) noexcept; inline bool scanPopupCaptureSupported( bool buildSupportsSelection, QString const & platformName ) noexcept"
+        sha256: "60e91a9269c9c1fc6e08c4f82cacd978892fe5136575de0c1a46d0b5caef5455"
+      - id: "selection.source-assertion-helpers"
+        producer_task: "T-002"
+        interface_id: "selection.source-assertion-helpers"
+        signature: "QString selectionSourceText( char const * path ); QString selectionBlock( QString const & text, QString const & anchor ); bool selectionOrdered( QString const & text, QStringList const & needles ); QString selectionCompact( QString text )"
+        sha256: "f233539b99c132a5938d836d623bf028936a2bb90cedca96b6183384eed5bd14"
+      - id: "selection.status-snapshot"
+        producer_task: "T-003"
+        interface_id: "selection.status-snapshot"
+        signature: "struct SelectionStatus { WaylandSelectionSource::State state = WaylandSelectionSource::State::Unsupported; QString reason; bool primarySelectionSeen = false; }"
+        sha256: "8158f2ffd3577b5a9fe922a9ff0c39714b7d2a05a8b3b5941350e25a7da44c73"
+      - id: "selection.preference-storage"
+        producer_task: "T-004"
+        interface_id: "selection.preference-storage"
+        signature: "bool Config::Preferences::enableScanPopupHotkey = false; Config::HotKey Config::Preferences::scanPopupHotkey = Config::HotKey( QKeySequence( Qt::CTRL | Qt::META | Qt::Key_D ) ); preferences XML direct children enableScanPopupHotkey and scanPopupHotkey; PortableText=Meta+Ctrl+D; preferred_trigger=CTRL+LOGO+d; absent key retains default, empty key stays empty, stored rawText is verbatim, only boolean text 1 enables; portalBindings preserves scan-popup and last duplicate description"
+        sha256: "c1a7ad04afe7c7ebd1ffb603d9f57efe77c5e0ec6ddddc46cdf1e775e8f7e4f2"
+      - id: "selection.preferences-status-api"
+        producer_task: "T-005"
+        interface_id: "selection.preferences-status-api"
+        signature: "void Preferences::setHotkeyStatus( QString const & platform, HotkeyBackend::State state, QString const & explanation, QVector<PortalBindingDisplay> const & bindings, bool configureAvailable, SelectionStatus const & selection = SelectionStatus{} ); default argument only in declaration"
+        sha256: "246c5b039c977fb1b270757f610be2d0b161aa480258d5738d4ee8c75a7b6a2c"
+    interfaces:
+      produces:
+        - id: "selection.preferences-row"
+          signature: "bool Preferences::scanPopupHotkeyEdited = false; void Preferences::on_enableScanPopupHotkey_toggled( bool checked ); objects enableScanPopupHotkey, scanPopupHotkey, horizontalLayout_scanPopupHotkey, horizontalSpacer_scanPopupHotkey, scanPopupHotkeyStatus; Wayland-only row, PlainText labels, edited key preserved, non-Wayland stored values preserved; SelectionStatus suffix: selection source starting, primary selection supported, selection not observed yet, selection unavailable: %1 — clipboard is used instead, selection unsupported in this build — clipboard is used instead; setHotkeyStatus signature unchanged from Task 5"
+          sha256: "f6ed3b7082a4ee02c07669451f21237051c9a1ce368debd6b209b34c8f774bba"
+        - id: "selection.hotkeys-test-inventory"
+          signature: "TstHotkeys: exactly 20 new top-level functions = [scanPopupBindingIsPortalOnly, portalIdPredicateAcceptsThreeIds, threeBindingsStayBound, capabilityConstantMatchesBuild, scanPopupSourceLoopContractIsPinned, defaultScanPopupHotkeyIsBindable, scanPopupPortalBindingSurvivesSaveLoad, scanPopupHotkeyKeepsVerbatimText, legacyConfigDefaultsScanPopupHotkeyOff, scanPopupConfigBooleanValues, sourceFollowsThePreference, scanPopupActivationWiringIsPinned, xcbGuardDoesNotCreateThePopup, selectionStatusRowRendersSnapshots_data, selectionStatusRowRendersSnapshots, scanPopupRowPlatformMatrix_data, scanPopupRowPlatformMatrix, scanPopupRowWaylandValuesAndEdits, scanPopupRowWaylandProbe, scanPopupRowBaseStatuses]; exactly two new _data suppliers and one real-Wayland child probe; scan-popup-wayland-preferences: PASS; source assertions prove textual wiring only"
+          sha256: "0d64d8479cf2349f7f6b739799d2e834b0d436a718e7fcac8cef57ea1d77ea5b"
+      consumes:
+        - id: "portal.selection-predicates"
+          producer_task: "T-002"
+          interface_id: "portal.selection-predicates"
+          signature: "inline bool isKnownPortalBindingId( QString const & id ); inline bool scanPopupBindingPlanned( QString const & platformName, bool preferenceEnabled ) noexcept; inline bool scanPopupCaptureSupported( bool buildSupportsSelection, QString const & platformName ) noexcept"
+          sha256: "60e91a9269c9c1fc6e08c4f82cacd978892fe5136575de0c1a46d0b5caef5455"
+        - id: "selection.source-assertion-helpers"
+          producer_task: "T-002"
+          interface_id: "selection.source-assertion-helpers"
+          signature: "QString selectionSourceText( char const * path ); QString selectionBlock( QString const & text, QString const & anchor ); bool selectionOrdered( QString const & text, QStringList const & needles ); QString selectionCompact( QString text )"
+          sha256: "f233539b99c132a5938d836d623bf028936a2bb90cedca96b6183384eed5bd14"
+        - id: "selection.status-snapshot"
+          producer_task: "T-003"
+          interface_id: "selection.status-snapshot"
+          signature: "struct SelectionStatus { WaylandSelectionSource::State state = WaylandSelectionSource::State::Unsupported; QString reason; bool primarySelectionSeen = false; }"
+          sha256: "8158f2ffd3577b5a9fe922a9ff0c39714b7d2a05a8b3b5941350e25a7da44c73"
+        - id: "selection.preference-storage"
+          producer_task: "T-004"
+          interface_id: "selection.preference-storage"
+          signature: "bool Config::Preferences::enableScanPopupHotkey = false; Config::HotKey Config::Preferences::scanPopupHotkey = Config::HotKey( QKeySequence( Qt::CTRL | Qt::META | Qt::Key_D ) ); preferences XML direct children enableScanPopupHotkey and scanPopupHotkey; PortableText=Meta+Ctrl+D; preferred_trigger=CTRL+LOGO+d; absent key retains default, empty key stays empty, stored rawText is verbatim, only boolean text 1 enables; portalBindings preserves scan-popup and last duplicate description"
+          sha256: "c1a7ad04afe7c7ebd1ffb603d9f57efe77c5e0ec6ddddc46cdf1e775e8f7e4f2"
+        - id: "selection.preferences-status-api"
+          producer_task: "T-005"
+          interface_id: "selection.preferences-status-api"
+          signature: "void Preferences::setHotkeyStatus( QString const & platform, HotkeyBackend::State state, QString const & explanation, QVector<PortalBindingDisplay> const & bindings, bool configureAvailable, SelectionStatus const & selection = SelectionStatus{} ); default argument only in declaration"
+          sha256: "246c5b039c977fb1b270757f610be2d0b161aa480258d5738d4ee8c75a7b6a2c"
+    validation:
+      - argv: ["qmake6", "goldendict.pro"]
+        cwd: "."
+        timeout_seconds: 120
+      - argv: ["make", "-j2"]
+        cwd: "."
+        timeout_seconds: 3600
+      - argv: ["make", "tests-makefile"]
+        cwd: "."
+        timeout_seconds: 120
+      - argv: ["make", "tests-build"]
+        cwd: "."
+        timeout_seconds: 1800
+      - argv: ["env", "QT_QPA_PLATFORM=xcb", "xvfb-run", "-a", "timeout", "60", "tests/tst_hotkeys/tst_hotkeys", "selectionStatusRowRendersSnapshots", "scanPopupRowPlatformMatrix", "scanPopupRowBaseStatuses", "scanPopupRowWaylandValuesAndEdits"]
+        cwd: "."
+        timeout_seconds: 90
+      - argv: ["env", "QT_QPA_PLATFORM=xcb", "GD_TEST_WRAPPER=./scripts/test-wrapper.sh", "make", "tests-run"]
+        cwd: "."
+        timeout_seconds: 1900
+      - argv: ["env", "QT_QPA_PLATFORM=offscreen", "timeout", "60", "tests/tst_hotkeys/tst_hotkeys", "nonXcbCapability"]
+        cwd: "."
+        timeout_seconds: 90
+
+  - id: T-007
+    plan_task: 7
+    title: "Add the isolated live protocol gate with all thirteen cases"
+    lane: live-verification
+    sequence: 1
+    implementer_tier: "capable"
+    depends_on: [T-001, T-003]
+    owns:
+      - "scripts/verify-wayland-selection-live.sh"
+    exclusive_resources: ["application-build-tree", "tests-build-tree"]
+    dependency_reasons:
+      T-001: "Consumes selection.pure-api"
+      T-003: "Consumes selection.source-api; Consumes selection.protocol-generation"
+    produces:
+      - id: "selection.live-cli"
+        signature: "scripts/verify-wayland-selection-live.sh() (executable, no arguments): exit 0 and exactly wayland-selection-live: PASS (13 cases); ordinary failure exit 1 with wayland-selection-live: FAIL <case>; watchdog exit 124; real source, logic and generated protocol C linked in temporary project, isolated private bus/compositor/config, bounded child cleanup; no scanner dependency"
+        sha256: "b5f1eb36aa14e68deea997f5a861b809b48fe360dcca8acf2a9c4a588edf83c5"
+      - id: "selection.live-helper-json"
+        signature: "newline-delimited compact JSON: commands {id:int,command:clear|set|release|quit}; set {channel,serial,mimes,schedule:{MIME:{chunks:[{at,data}|{at,repeat,count}],close:milliseconds}}}; close=-1 holds; clear/set ack {event:ack,id} only after display-sync done; receive {event:receive,serial,mime,fdFlags,nonblock,bytes,receiveTimeMs}; runner adds _at receipt stamp; write/closed/write-error are metadata, diagnostics stderr, helper clock never compared to source stamps"
+        sha256: "b80e4dc1aad5506d6f5bdbffa21d6faf0839ad9628a6bbfb328c350c5d7fa768"
+    consumes:
+      - id: "selection.pure-api"
+        producer_task: "T-001"
+        interface_id: "selection.pure-api"
+        signature: "class Monotonic final { public: static qint64 nowMs() noexcept; }; namespace WaylandSelection { inline constexpr int MaxPayloadBytes = 1048576; inline constexpr int DebounceMs = 200; inline constexpr int IdleTimeoutMs = 250; inline constexpr int TransferTimeoutMs = 2000; inline constexpr int ActivationTimeoutMs = 300; QString chooseMimeType( QStringList const & offered ); class PayloadAccumulator { public: explicit PayloadAccumulator( int cap = MaxPayloadBytes ); void append( QByteArray const & chunk ); bool full() const noexcept; bool truncated() const noexcept; QByteArray payload() const; }; QString decodePayload( QByteArray const & raw ); bool clipboardStampAdvances( bool modeIsClipboard ) noexcept; QString chooseText( QString const & selection, qint64 capturedAt, QString const & clipboard, qint64 clipboardChangedAt ); enum class ActivationPlan { UseCached, AwaitPending }; ActivationPlan planActivation( bool hasPendingCapture ) noexcept; using ReadToken = quint64; struct ChannelOffer { quint64 id = 0; operator bool() const noexcept; }; class OfferState { public: void pendingOffer( quint64 offerId, QStringList const & mimeTypes ); ChannelOffer takeForPrimary(); ChannelOffer discardForClipboard(); bool beginMimeAttempt(); QString currentMimeType() const; void mimeAttemptFailed() noexcept; ReadToken beginRead() noexcept; bool accepts( ReadToken token ) const noexcept; void retire() noexcept; void completed( ReadToken token ) noexcept; }; }"
+        sha256: "b3b04d120e2a04aee97471f992bbbe8c751df0223bb2560dcfe9dec720932a95"
+      - id: "selection.source-api"
+        producer_task: "T-003"
+        interface_id: "selection.source-api"
+        signature: "inline constexpr bool kHaveWaylandDataControl; value is true iff HAVE_WAYLAND_DATA_CONTROL is defined; class WaylandSelectionSource : public QObject { Q_OBJECT; public: enum class State { Unsupported, Starting, Available, Unavailable }; explicit WaylandSelectionSource( QObject * parent = nullptr ); ~WaylandSelectionSource() override; State state() const noexcept; QString reason() const; bool primarySelectionSeen() const noexcept; QString lastText() const; bool hasPendingCapture() const noexcept; public slots: void start(); void stop(); void requestCapture( quint64 requestId ); signals: void stateChanged( State state, QString const & reason ); void capabilityChanged(); void captureFinished( quint64 requestId, QString const & text, qint64 capturedAt ); }; Q_DECLARE_METATYPE( WaylandSelectionSource::State )"
+        sha256: "c9d1ea66b425abbecd104c4bc231a94fe487154a8d4bf63f837fc13eaa8170d7"
+      - id: "selection.protocol-generation"
+        producer_task: "T-003"
+        interface_id: "selection.protocol-generation"
+        signature: "protocols/ext-data-control-v1/ext-data-control-v1.xml sha256=293deba5dfdb974fbcf8dcf891a30a51a36a8bba0047dc6bdf6a03194089b7fb (wayland-protocols 1.50); protocols/ext-data-control-v1/regenerate.sh() -> wayland-scanner 1.26.0 client-header ext-data-control-v1.xml ext-data-control-v1-client-protocol.h; wayland-scanner 1.26.0 private-code ext-data-control-v1.xml ext-data-control-v1-protocol.c; committed header and C are linked by application/live runner; ordinary qmake never invokes scanner"
+        sha256: "9bb752aabaa803eac99be10ea974b92e9b5e40dd1bbfdb468277fb30a2da84e3"
+    interfaces:
+      produces:
+        - id: "selection.live-cli"
+          signature: "scripts/verify-wayland-selection-live.sh() (executable, no arguments): exit 0 and exactly wayland-selection-live: PASS (13 cases); ordinary failure exit 1 with wayland-selection-live: FAIL <case>; watchdog exit 124; real source, logic and generated protocol C linked in temporary project, isolated private bus/compositor/config, bounded child cleanup; no scanner dependency"
+          sha256: "b5f1eb36aa14e68deea997f5a861b809b48fe360dcca8acf2a9c4a588edf83c5"
+        - id: "selection.live-helper-json"
+          signature: "newline-delimited compact JSON: commands {id:int,command:clear|set|release|quit}; set {channel,serial,mimes,schedule:{MIME:{chunks:[{at,data}|{at,repeat,count}],close:milliseconds}}}; close=-1 holds; clear/set ack {event:ack,id} only after display-sync done; receive {event:receive,serial,mime,fdFlags,nonblock,bytes,receiveTimeMs}; runner adds _at receipt stamp; write/closed/write-error are metadata, diagnostics stderr, helper clock never compared to source stamps"
+          sha256: "b80e4dc1aad5506d6f5bdbffa21d6faf0839ad9628a6bbfb328c350c5d7fa768"
+      consumes:
+        - id: "selection.pure-api"
+          producer_task: "T-001"
+          interface_id: "selection.pure-api"
+          signature: "class Monotonic final { public: static qint64 nowMs() noexcept; }; namespace WaylandSelection { inline constexpr int MaxPayloadBytes = 1048576; inline constexpr int DebounceMs = 200; inline constexpr int IdleTimeoutMs = 250; inline constexpr int TransferTimeoutMs = 2000; inline constexpr int ActivationTimeoutMs = 300; QString chooseMimeType( QStringList const & offered ); class PayloadAccumulator { public: explicit PayloadAccumulator( int cap = MaxPayloadBytes ); void append( QByteArray const & chunk ); bool full() const noexcept; bool truncated() const noexcept; QByteArray payload() const; }; QString decodePayload( QByteArray const & raw ); bool clipboardStampAdvances( bool modeIsClipboard ) noexcept; QString chooseText( QString const & selection, qint64 capturedAt, QString const & clipboard, qint64 clipboardChangedAt ); enum class ActivationPlan { UseCached, AwaitPending }; ActivationPlan planActivation( bool hasPendingCapture ) noexcept; using ReadToken = quint64; struct ChannelOffer { quint64 id = 0; operator bool() const noexcept; }; class OfferState { public: void pendingOffer( quint64 offerId, QStringList const & mimeTypes ); ChannelOffer takeForPrimary(); ChannelOffer discardForClipboard(); bool beginMimeAttempt(); QString currentMimeType() const; void mimeAttemptFailed() noexcept; ReadToken beginRead() noexcept; bool accepts( ReadToken token ) const noexcept; void retire() noexcept; void completed( ReadToken token ) noexcept; }; }"
+          sha256: "b3b04d120e2a04aee97471f992bbbe8c751df0223bb2560dcfe9dec720932a95"
+        - id: "selection.source-api"
+          producer_task: "T-003"
+          interface_id: "selection.source-api"
+          signature: "inline constexpr bool kHaveWaylandDataControl; value is true iff HAVE_WAYLAND_DATA_CONTROL is defined; class WaylandSelectionSource : public QObject { Q_OBJECT; public: enum class State { Unsupported, Starting, Available, Unavailable }; explicit WaylandSelectionSource( QObject * parent = nullptr ); ~WaylandSelectionSource() override; State state() const noexcept; QString reason() const; bool primarySelectionSeen() const noexcept; QString lastText() const; bool hasPendingCapture() const noexcept; public slots: void start(); void stop(); void requestCapture( quint64 requestId ); signals: void stateChanged( State state, QString const & reason ); void capabilityChanged(); void captureFinished( quint64 requestId, QString const & text, qint64 capturedAt ); }; Q_DECLARE_METATYPE( WaylandSelectionSource::State )"
+          sha256: "c9d1ea66b425abbecd104c4bc231a94fe487154a8d4bf63f837fc13eaa8170d7"
+        - id: "selection.protocol-generation"
+          producer_task: "T-003"
+          interface_id: "selection.protocol-generation"
+          signature: "protocols/ext-data-control-v1/ext-data-control-v1.xml sha256=293deba5dfdb974fbcf8dcf891a30a51a36a8bba0047dc6bdf6a03194089b7fb (wayland-protocols 1.50); protocols/ext-data-control-v1/regenerate.sh() -> wayland-scanner 1.26.0 client-header ext-data-control-v1.xml ext-data-control-v1-client-protocol.h; wayland-scanner 1.26.0 private-code ext-data-control-v1.xml ext-data-control-v1-protocol.c; committed header and C are linked by application/live runner; ordinary qmake never invokes scanner"
+          sha256: "9bb752aabaa803eac99be10ea974b92e9b5e40dd1bbfdb468277fb30a2da84e3"
+    validation:
+      - argv: ["qmake6", "goldendict.pro"]
+        cwd: "."
+        timeout_seconds: 120
+      - argv: ["make", "tests-makefile"]
+        cwd: "."
+        timeout_seconds: 120
+      - argv: ["make", "tests-build"]
+        cwd: "."
+        timeout_seconds: 1800
+      - argv: ["sh", "-n", "scripts/verify-wayland-selection-live.sh"]
+        cwd: "."
+        timeout_seconds: 30
+      - argv: ["scripts/verify-wayland-selection-live.sh"]
+        cwd: "."
+        timeout_seconds: 135
+      - argv: ["env", "QT_QPA_PLATFORM=xcb", "GD_TEST_WRAPPER=./scripts/test-wrapper.sh", "make", "tests-run"]
+        cwd: "."
+        timeout_seconds: 1900
+
+  - id: T-008
+    plan_task: 8
+    title: "Document coverage and run the complete acceptance contract"
+    lane: tests-and-docs
+    sequence: 1
+    implementer_tier: "advanced"
+    depends_on: [T-001, T-002, T-003, T-004, T-005, T-006, T-007]
+    owns:
+      - "README.md"
+      - "docs/wayland-limitations.md"
+    exclusive_resources: ["application-build-tree", "tests-build-tree", "ext-data-control-generated-files"]
+    dependency_reasons:
+      T-001: "Consumes selection.pure-api; Consumes selection.test-inventory; Final acceptance of Task 1 deliverable/evidence"
+      T-002: "Consumes portal.selection-predicates; Final acceptance of Task 2 deliverable/evidence"
+      T-003: "Consumes selection.source-api; Consumes selection.status-snapshot; Consumes selection.source-private-contract; Consumes selection.protocol-generation; Consumes selection.optional-build; Final acceptance of Task 3 deliverable/evidence"
+      T-004: "Consumes selection.preference-storage; Final acceptance of Task 4 deliverable/evidence"
+      T-005: "Consumes selection.mainwindow-lifecycle; Consumes selection.popup-entrypoint; Consumes selection.preferences-status-api; Final acceptance of Task 5 deliverable/evidence"
+      T-006: "Consumes selection.preferences-row; Consumes selection.hotkeys-test-inventory; Final acceptance of Task 6 deliverable/evidence"
+      T-007: "Consumes selection.live-cli; Final acceptance of Task 7 deliverable/evidence"
+    produces:
+      - id: "selection.coverage-acceptance-report"
+        signature: "README.md and docs/wayland-limitations.md canonical coverage: opt-in ext-only selected-text shortcut, independent registration and clipboard fallback, first-seat/sticky-cache/deadline/focus/notification limits; historical evidence unchanged; controller acceptance report records actual command/status/evidence and explicitly unobserved manual cases, no extra checked-in report"
+        sha256: "a27eaf3a2a2162e3276ec4019534e0f80ce251179c918d3742e325ab29903bd7"
+    consumes:
+      - id: "selection.pure-api"
+        producer_task: "T-001"
+        interface_id: "selection.pure-api"
+        signature: "class Monotonic final { public: static qint64 nowMs() noexcept; }; namespace WaylandSelection { inline constexpr int MaxPayloadBytes = 1048576; inline constexpr int DebounceMs = 200; inline constexpr int IdleTimeoutMs = 250; inline constexpr int TransferTimeoutMs = 2000; inline constexpr int ActivationTimeoutMs = 300; QString chooseMimeType( QStringList const & offered ); class PayloadAccumulator { public: explicit PayloadAccumulator( int cap = MaxPayloadBytes ); void append( QByteArray const & chunk ); bool full() const noexcept; bool truncated() const noexcept; QByteArray payload() const; }; QString decodePayload( QByteArray const & raw ); bool clipboardStampAdvances( bool modeIsClipboard ) noexcept; QString chooseText( QString const & selection, qint64 capturedAt, QString const & clipboard, qint64 clipboardChangedAt ); enum class ActivationPlan { UseCached, AwaitPending }; ActivationPlan planActivation( bool hasPendingCapture ) noexcept; using ReadToken = quint64; struct ChannelOffer { quint64 id = 0; operator bool() const noexcept; }; class OfferState { public: void pendingOffer( quint64 offerId, QStringList const & mimeTypes ); ChannelOffer takeForPrimary(); ChannelOffer discardForClipboard(); bool beginMimeAttempt(); QString currentMimeType() const; void mimeAttemptFailed() noexcept; ReadToken beginRead() noexcept; bool accepts( ReadToken token ) const noexcept; void retire() noexcept; void completed( ReadToken token ) noexcept; }; }"
+        sha256: "b3b04d120e2a04aee97471f992bbbe8c751df0223bb2560dcfe9dec720932a95"
+      - id: "selection.test-inventory"
+        producer_task: "T-001"
+        interface_id: "selection.test-inventory"
+        signature: "tests/tests.pro: exactly 20 sorted suites = [tst_article_bridge, tst_article_history, tst_article_load, tst_article_schemes, tst_article_stream, tst_btree_index, tst_encoding, tst_external_content, tst_hotkeys, tst_htmlescape, tst_langcoder, tst_linkrewrite, tst_platformwindow, tst_portal_hotkeys, tst_print_pipeline, tst_regex, tst_save_article, tst_utf8_wstring, tst_waylandselection, tst_website_frames]; tests/tst_waylandselection/tst_waylandselection: exactly 16 top-level slots = [initTestCase, cleanupTestCase, mimePreferenceOrder, payloadClampIsAppliedWhileReading, decodeReplacesInvalidUtf8, decodeStripsNul, chooseTextUsesRecency, clipboardStampIgnoresNonClipboardModes, mimeAttemptsAdvanceAndExhaust, payloadAtCapIsNotTruncated, payloadOverCapIsTruncated, offerSupersessionRetiresToken, clipboardOfferIsDiscarded, retiredOfferIsNeverReused, nullOfferClearsWithoutRead, activationPlanPromotesPendingCapture]; no _data supplier"
+        sha256: "a468b79af1e295f49a1cef48e01da9ac60b4ff20163799aba127811310a797b2"
+      - id: "portal.selection-predicates"
+        producer_task: "T-002"
+        interface_id: "portal.selection-predicates"
+        signature: "inline bool isKnownPortalBindingId( QString const & id ); inline bool scanPopupBindingPlanned( QString const & platformName, bool preferenceEnabled ) noexcept; inline bool scanPopupCaptureSupported( bool buildSupportsSelection, QString const & platformName ) noexcept"
+        sha256: "60e91a9269c9c1fc6e08c4f82cacd978892fe5136575de0c1a46d0b5caef5455"
+      - id: "selection.source-api"
+        producer_task: "T-003"
+        interface_id: "selection.source-api"
+        signature: "inline constexpr bool kHaveWaylandDataControl; value is true iff HAVE_WAYLAND_DATA_CONTROL is defined; class WaylandSelectionSource : public QObject { Q_OBJECT; public: enum class State { Unsupported, Starting, Available, Unavailable }; explicit WaylandSelectionSource( QObject * parent = nullptr ); ~WaylandSelectionSource() override; State state() const noexcept; QString reason() const; bool primarySelectionSeen() const noexcept; QString lastText() const; bool hasPendingCapture() const noexcept; public slots: void start(); void stop(); void requestCapture( quint64 requestId ); signals: void stateChanged( State state, QString const & reason ); void capabilityChanged(); void captureFinished( quint64 requestId, QString const & text, qint64 capturedAt ); }; Q_DECLARE_METATYPE( WaylandSelectionSource::State )"
+        sha256: "c9d1ea66b425abbecd104c4bc231a94fe487154a8d4bf63f837fc13eaa8170d7"
+      - id: "selection.status-snapshot"
+        producer_task: "T-003"
+        interface_id: "selection.status-snapshot"
+        signature: "struct SelectionStatus { WaylandSelectionSource::State state = WaylandSelectionSource::State::Unsupported; QString reason; bool primarySelectionSeen = false; }"
+        sha256: "8158f2ffd3577b5a9fe922a9ff0c39714b7d2a05a8b3b5941350e25a7da44c73"
+      - id: "selection.source-private-contract"
+        producer_task: "T-003"
+        interface_id: "selection.source-private-contract"
+        signature: "WaylandSelectionSource::Impl callable surface: void assertThread() const; static char const * stateName( State state ); void publishState(); bool pending() const noexcept; void armActivation(); void answerInterest( QString text, qint64 stamp ); void expireInterest(); void requestCapture( quint64 id ); void start(); void stop(); bool live() const; bool healthy() const; ext_data_control_offer_v1 * proxyFor( quint64 id ) const; void destroyOffer( quint64 id ); void closeRead(); void retirePrimary(); void destroyDeviceAndSeat(); void destroyProtocol(); void dispose(); void fail( char const * reason ); bool flushRequests(); bool dispatchPending( std::shared_ptr<Connection> const & c, quint64 generation ); void dispatchDisplayReadable(); void dispatchDisplayWritable(); bool bindSeat( Seat const & candidate ); void maybeAvailable(); static void registryGlobal( void * data, wl_registry * registry, uint32_t name, char const * interface, uint32_t version ); static void registryGlobalRemoved( void * data, wl_registry * registry, uint32_t name ); static void discoveryDone( void * data, wl_callback * callback, uint32_t callbackData ); static void dataOffer( void * data, ext_data_control_device_v1 * device, ext_data_control_offer_v1 * offer ); static void offeredMime( void * data, ext_data_control_offer_v1 * offer, char const * mimeType ); static void selection( void * data, ext_data_control_device_v1 * device, ext_data_control_offer_v1 * offer ); static void primarySelection( void * data, ext_data_control_device_v1 * device, ext_data_control_offer_v1 * offer ); static void deviceFinished( void * data, ext_data_control_device_v1 * device ); static void seatCapabilities( void * data, wl_seat * seat, uint32_t capabilities ); static void seatName( void * data, wl_seat * seat, char const * name ); void dropCapture( bool timeout ); void promote(); bool startMimeAttempt(); void checkTransferDeadline( ReadToken token ); void complete( ReadToken token ); void drainPipe( ReadToken token ); void Connection::destroyConnection(); Connection::~Connection(); Impl stores std::shared_ptr<Connection>; deferred physical disposal captures [c] only"
+        sha256: "60fd82adcbb8ec18ca242cca8d3fa78d6a50dfa6f16e77cebf55ddedf8d36f65"
+      - id: "selection.protocol-generation"
+        producer_task: "T-003"
+        interface_id: "selection.protocol-generation"
+        signature: "protocols/ext-data-control-v1/ext-data-control-v1.xml sha256=293deba5dfdb974fbcf8dcf891a30a51a36a8bba0047dc6bdf6a03194089b7fb (wayland-protocols 1.50); protocols/ext-data-control-v1/regenerate.sh() -> wayland-scanner 1.26.0 client-header ext-data-control-v1.xml ext-data-control-v1-client-protocol.h; wayland-scanner 1.26.0 private-code ext-data-control-v1.xml ext-data-control-v1-protocol.c; committed header and C are linked by application/live runner; ordinary qmake never invokes scanner"
+        sha256: "9bb752aabaa803eac99be10ea974b92e9b5e40dd1bbfdb468277fb30a2da84e3"
+      - id: "selection.optional-build"
+        producer_task: "T-003"
+        interface_id: "selection.optional-build"
+        signature: "goldendict.pro: unix:!mac packagesExist(wayland-client) -> HAVE_WAYLAND_DATA_CONTROL, PKGCONFIG+=wayland-client, protocols/ext-data-control-v1 include, ext-data-control-v1-protocol.c source; tests/testsupport.pri: matching optional HAVE_WAYLAND_DATA_CONTROL, no wayland-client link; tst_hotkeys: waylandselection.hh is header-only dependency, absent from HEADERS, waylandselection.cc absent from SOURCES; public source API and stub compile with no optional package"
+        sha256: "2c345923c9420c5c7f8ed9f93dec5d7db82ada630125344ae584b17a17d40733"
+      - id: "selection.preference-storage"
+        producer_task: "T-004"
+        interface_id: "selection.preference-storage"
+        signature: "bool Config::Preferences::enableScanPopupHotkey = false; Config::HotKey Config::Preferences::scanPopupHotkey = Config::HotKey( QKeySequence( Qt::CTRL | Qt::META | Qt::Key_D ) ); preferences XML direct children enableScanPopupHotkey and scanPopupHotkey; PortableText=Meta+Ctrl+D; preferred_trigger=CTRL+LOGO+d; absent key retains default, empty key stays empty, stored rawText is verbatim, only boolean text 1 enables; portalBindings preserves scan-popup and last duplicate description"
+        sha256: "c1a7ad04afe7c7ebd1ffb603d9f57efe77c5e0ec6ddddc46cdf1e775e8f7e4f2"
+      - id: "selection.mainwindow-lifecycle"
+        producer_task: "T-005"
+        interface_id: "selection.mainwindow-lifecycle"
+        signature: "void MainWindow::reconcileSelectionSource(); void MainWindow::reportNothingToTranslate(); std::unique_ptr<WaylandSelectionSource> MainWindow::selectionSource; quint64 MainWindow::scanPopupRequestId = 0; qint64 MainWindow::clipboardChangedAt = 0; scan-popup binding uses scanPopupBindingPlanned independently of capture support; GUI-thread source owned by MainWindow; monotonic Clipboard-only stamp; native handle then activation token then capture; capture completion guards shutdown/request/popup, reads current clipboard and chooseText; selection-empty -> No selected text or clipboard text to translate (3000 ms), visible main status then tray then log only"
+        sha256: "77d2584bdd49b5401bf19981870060ae2e7ad424833098f6d1c8b8ca00aa5520"
+      - id: "selection.popup-entrypoint"
+        producer_task: "T-005"
+        interface_id: "selection.popup-entrypoint"
+        signature: "bool ScanPopup::translateSelectedText( QString const & text ); sanitizeInputPhrase, reject invalid, accept visible identical phrase, otherwise translateWord through existing path"
+        sha256: "faa4373096c131a3361e346aaf64955736fe59636995e21fae69f938e6ddd98b"
+      - id: "selection.preferences-status-api"
+        producer_task: "T-005"
+        interface_id: "selection.preferences-status-api"
+        signature: "void Preferences::setHotkeyStatus( QString const & platform, HotkeyBackend::State state, QString const & explanation, QVector<PortalBindingDisplay> const & bindings, bool configureAvailable, SelectionStatus const & selection = SelectionStatus{} ); default argument only in declaration"
+        sha256: "246c5b039c977fb1b270757f610be2d0b161aa480258d5738d4ee8c75a7b6a2c"
+      - id: "selection.preferences-row"
+        producer_task: "T-006"
+        interface_id: "selection.preferences-row"
+        signature: "bool Preferences::scanPopupHotkeyEdited = false; void Preferences::on_enableScanPopupHotkey_toggled( bool checked ); objects enableScanPopupHotkey, scanPopupHotkey, horizontalLayout_scanPopupHotkey, horizontalSpacer_scanPopupHotkey, scanPopupHotkeyStatus; Wayland-only row, PlainText labels, edited key preserved, non-Wayland stored values preserved; SelectionStatus suffix: selection source starting, primary selection supported, selection not observed yet, selection unavailable: %1 — clipboard is used instead, selection unsupported in this build — clipboard is used instead; setHotkeyStatus signature unchanged from Task 5"
+        sha256: "f6ed3b7082a4ee02c07669451f21237051c9a1ce368debd6b209b34c8f774bba"
+      - id: "selection.hotkeys-test-inventory"
+        producer_task: "T-006"
+        interface_id: "selection.hotkeys-test-inventory"
+        signature: "TstHotkeys: exactly 20 new top-level functions = [scanPopupBindingIsPortalOnly, portalIdPredicateAcceptsThreeIds, threeBindingsStayBound, capabilityConstantMatchesBuild, scanPopupSourceLoopContractIsPinned, defaultScanPopupHotkeyIsBindable, scanPopupPortalBindingSurvivesSaveLoad, scanPopupHotkeyKeepsVerbatimText, legacyConfigDefaultsScanPopupHotkeyOff, scanPopupConfigBooleanValues, sourceFollowsThePreference, scanPopupActivationWiringIsPinned, xcbGuardDoesNotCreateThePopup, selectionStatusRowRendersSnapshots_data, selectionStatusRowRendersSnapshots, scanPopupRowPlatformMatrix_data, scanPopupRowPlatformMatrix, scanPopupRowWaylandValuesAndEdits, scanPopupRowWaylandProbe, scanPopupRowBaseStatuses]; exactly two new _data suppliers and one real-Wayland child probe; scan-popup-wayland-preferences: PASS; source assertions prove textual wiring only"
+        sha256: "0d64d8479cf2349f7f6b739799d2e834b0d436a718e7fcac8cef57ea1d77ea5b"
+      - id: "selection.live-cli"
+        producer_task: "T-007"
+        interface_id: "selection.live-cli"
+        signature: "scripts/verify-wayland-selection-live.sh() (executable, no arguments): exit 0 and exactly wayland-selection-live: PASS (13 cases); ordinary failure exit 1 with wayland-selection-live: FAIL <case>; watchdog exit 124; real source, logic and generated protocol C linked in temporary project, isolated private bus/compositor/config, bounded child cleanup; no scanner dependency"
+        sha256: "b5f1eb36aa14e68deea997f5a861b809b48fe360dcca8acf2a9c4a588edf83c5"
+    interfaces:
+      produces:
+        - id: "selection.coverage-acceptance-report"
+          signature: "README.md and docs/wayland-limitations.md canonical coverage: opt-in ext-only selected-text shortcut, independent registration and clipboard fallback, first-seat/sticky-cache/deadline/focus/notification limits; historical evidence unchanged; controller acceptance report records actual command/status/evidence and explicitly unobserved manual cases, no extra checked-in report"
+          sha256: "a27eaf3a2a2162e3276ec4019534e0f80ce251179c918d3742e325ab29903bd7"
+      consumes:
+        - id: "selection.pure-api"
+          producer_task: "T-001"
+          interface_id: "selection.pure-api"
+          signature: "class Monotonic final { public: static qint64 nowMs() noexcept; }; namespace WaylandSelection { inline constexpr int MaxPayloadBytes = 1048576; inline constexpr int DebounceMs = 200; inline constexpr int IdleTimeoutMs = 250; inline constexpr int TransferTimeoutMs = 2000; inline constexpr int ActivationTimeoutMs = 300; QString chooseMimeType( QStringList const & offered ); class PayloadAccumulator { public: explicit PayloadAccumulator( int cap = MaxPayloadBytes ); void append( QByteArray const & chunk ); bool full() const noexcept; bool truncated() const noexcept; QByteArray payload() const; }; QString decodePayload( QByteArray const & raw ); bool clipboardStampAdvances( bool modeIsClipboard ) noexcept; QString chooseText( QString const & selection, qint64 capturedAt, QString const & clipboard, qint64 clipboardChangedAt ); enum class ActivationPlan { UseCached, AwaitPending }; ActivationPlan planActivation( bool hasPendingCapture ) noexcept; using ReadToken = quint64; struct ChannelOffer { quint64 id = 0; operator bool() const noexcept; }; class OfferState { public: void pendingOffer( quint64 offerId, QStringList const & mimeTypes ); ChannelOffer takeForPrimary(); ChannelOffer discardForClipboard(); bool beginMimeAttempt(); QString currentMimeType() const; void mimeAttemptFailed() noexcept; ReadToken beginRead() noexcept; bool accepts( ReadToken token ) const noexcept; void retire() noexcept; void completed( ReadToken token ) noexcept; }; }"
+          sha256: "b3b04d120e2a04aee97471f992bbbe8c751df0223bb2560dcfe9dec720932a95"
+        - id: "selection.test-inventory"
+          producer_task: "T-001"
+          interface_id: "selection.test-inventory"
+          signature: "tests/tests.pro: exactly 20 sorted suites = [tst_article_bridge, tst_article_history, tst_article_load, tst_article_schemes, tst_article_stream, tst_btree_index, tst_encoding, tst_external_content, tst_hotkeys, tst_htmlescape, tst_langcoder, tst_linkrewrite, tst_platformwindow, tst_portal_hotkeys, tst_print_pipeline, tst_regex, tst_save_article, tst_utf8_wstring, tst_waylandselection, tst_website_frames]; tests/tst_waylandselection/tst_waylandselection: exactly 16 top-level slots = [initTestCase, cleanupTestCase, mimePreferenceOrder, payloadClampIsAppliedWhileReading, decodeReplacesInvalidUtf8, decodeStripsNul, chooseTextUsesRecency, clipboardStampIgnoresNonClipboardModes, mimeAttemptsAdvanceAndExhaust, payloadAtCapIsNotTruncated, payloadOverCapIsTruncated, offerSupersessionRetiresToken, clipboardOfferIsDiscarded, retiredOfferIsNeverReused, nullOfferClearsWithoutRead, activationPlanPromotesPendingCapture]; no _data supplier"
+          sha256: "a468b79af1e295f49a1cef48e01da9ac60b4ff20163799aba127811310a797b2"
+        - id: "portal.selection-predicates"
+          producer_task: "T-002"
+          interface_id: "portal.selection-predicates"
+          signature: "inline bool isKnownPortalBindingId( QString const & id ); inline bool scanPopupBindingPlanned( QString const & platformName, bool preferenceEnabled ) noexcept; inline bool scanPopupCaptureSupported( bool buildSupportsSelection, QString const & platformName ) noexcept"
+          sha256: "60e91a9269c9c1fc6e08c4f82cacd978892fe5136575de0c1a46d0b5caef5455"
+        - id: "selection.source-api"
+          producer_task: "T-003"
+          interface_id: "selection.source-api"
+          signature: "inline constexpr bool kHaveWaylandDataControl; value is true iff HAVE_WAYLAND_DATA_CONTROL is defined; class WaylandSelectionSource : public QObject { Q_OBJECT; public: enum class State { Unsupported, Starting, Available, Unavailable }; explicit WaylandSelectionSource( QObject * parent = nullptr ); ~WaylandSelectionSource() override; State state() const noexcept; QString reason() const; bool primarySelectionSeen() const noexcept; QString lastText() const; bool hasPendingCapture() const noexcept; public slots: void start(); void stop(); void requestCapture( quint64 requestId ); signals: void stateChanged( State state, QString const & reason ); void capabilityChanged(); void captureFinished( quint64 requestId, QString const & text, qint64 capturedAt ); }; Q_DECLARE_METATYPE( WaylandSelectionSource::State )"
+          sha256: "c9d1ea66b425abbecd104c4bc231a94fe487154a8d4bf63f837fc13eaa8170d7"
+        - id: "selection.status-snapshot"
+          producer_task: "T-003"
+          interface_id: "selection.status-snapshot"
+          signature: "struct SelectionStatus { WaylandSelectionSource::State state = WaylandSelectionSource::State::Unsupported; QString reason; bool primarySelectionSeen = false; }"
+          sha256: "8158f2ffd3577b5a9fe922a9ff0c39714b7d2a05a8b3b5941350e25a7da44c73"
+        - id: "selection.source-private-contract"
+          producer_task: "T-003"
+          interface_id: "selection.source-private-contract"
+          signature: "WaylandSelectionSource::Impl callable surface: void assertThread() const; static char const * stateName( State state ); void publishState(); bool pending() const noexcept; void armActivation(); void answerInterest( QString text, qint64 stamp ); void expireInterest(); void requestCapture( quint64 id ); void start(); void stop(); bool live() const; bool healthy() const; ext_data_control_offer_v1 * proxyFor( quint64 id ) const; void destroyOffer( quint64 id ); void closeRead(); void retirePrimary(); void destroyDeviceAndSeat(); void destroyProtocol(); void dispose(); void fail( char const * reason ); bool flushRequests(); bool dispatchPending( std::shared_ptr<Connection> const & c, quint64 generation ); void dispatchDisplayReadable(); void dispatchDisplayWritable(); bool bindSeat( Seat const & candidate ); void maybeAvailable(); static void registryGlobal( void * data, wl_registry * registry, uint32_t name, char const * interface, uint32_t version ); static void registryGlobalRemoved( void * data, wl_registry * registry, uint32_t name ); static void discoveryDone( void * data, wl_callback * callback, uint32_t callbackData ); static void dataOffer( void * data, ext_data_control_device_v1 * device, ext_data_control_offer_v1 * offer ); static void offeredMime( void * data, ext_data_control_offer_v1 * offer, char const * mimeType ); static void selection( void * data, ext_data_control_device_v1 * device, ext_data_control_offer_v1 * offer ); static void primarySelection( void * data, ext_data_control_device_v1 * device, ext_data_control_offer_v1 * offer ); static void deviceFinished( void * data, ext_data_control_device_v1 * device ); static void seatCapabilities( void * data, wl_seat * seat, uint32_t capabilities ); static void seatName( void * data, wl_seat * seat, char const * name ); void dropCapture( bool timeout ); void promote(); bool startMimeAttempt(); void checkTransferDeadline( ReadToken token ); void complete( ReadToken token ); void drainPipe( ReadToken token ); void Connection::destroyConnection(); Connection::~Connection(); Impl stores std::shared_ptr<Connection>; deferred physical disposal captures [c] only"
+          sha256: "60fd82adcbb8ec18ca242cca8d3fa78d6a50dfa6f16e77cebf55ddedf8d36f65"
+        - id: "selection.protocol-generation"
+          producer_task: "T-003"
+          interface_id: "selection.protocol-generation"
+          signature: "protocols/ext-data-control-v1/ext-data-control-v1.xml sha256=293deba5dfdb974fbcf8dcf891a30a51a36a8bba0047dc6bdf6a03194089b7fb (wayland-protocols 1.50); protocols/ext-data-control-v1/regenerate.sh() -> wayland-scanner 1.26.0 client-header ext-data-control-v1.xml ext-data-control-v1-client-protocol.h; wayland-scanner 1.26.0 private-code ext-data-control-v1.xml ext-data-control-v1-protocol.c; committed header and C are linked by application/live runner; ordinary qmake never invokes scanner"
+          sha256: "9bb752aabaa803eac99be10ea974b92e9b5e40dd1bbfdb468277fb30a2da84e3"
+        - id: "selection.optional-build"
+          producer_task: "T-003"
+          interface_id: "selection.optional-build"
+          signature: "goldendict.pro: unix:!mac packagesExist(wayland-client) -> HAVE_WAYLAND_DATA_CONTROL, PKGCONFIG+=wayland-client, protocols/ext-data-control-v1 include, ext-data-control-v1-protocol.c source; tests/testsupport.pri: matching optional HAVE_WAYLAND_DATA_CONTROL, no wayland-client link; tst_hotkeys: waylandselection.hh is header-only dependency, absent from HEADERS, waylandselection.cc absent from SOURCES; public source API and stub compile with no optional package"
+          sha256: "2c345923c9420c5c7f8ed9f93dec5d7db82ada630125344ae584b17a17d40733"
+        - id: "selection.preference-storage"
+          producer_task: "T-004"
+          interface_id: "selection.preference-storage"
+          signature: "bool Config::Preferences::enableScanPopupHotkey = false; Config::HotKey Config::Preferences::scanPopupHotkey = Config::HotKey( QKeySequence( Qt::CTRL | Qt::META | Qt::Key_D ) ); preferences XML direct children enableScanPopupHotkey and scanPopupHotkey; PortableText=Meta+Ctrl+D; preferred_trigger=CTRL+LOGO+d; absent key retains default, empty key stays empty, stored rawText is verbatim, only boolean text 1 enables; portalBindings preserves scan-popup and last duplicate description"
+          sha256: "c1a7ad04afe7c7ebd1ffb603d9f57efe77c5e0ec6ddddc46cdf1e775e8f7e4f2"
+        - id: "selection.mainwindow-lifecycle"
+          producer_task: "T-005"
+          interface_id: "selection.mainwindow-lifecycle"
+          signature: "void MainWindow::reconcileSelectionSource(); void MainWindow::reportNothingToTranslate(); std::unique_ptr<WaylandSelectionSource> MainWindow::selectionSource; quint64 MainWindow::scanPopupRequestId = 0; qint64 MainWindow::clipboardChangedAt = 0; scan-popup binding uses scanPopupBindingPlanned independently of capture support; GUI-thread source owned by MainWindow; monotonic Clipboard-only stamp; native handle then activation token then capture; capture completion guards shutdown/request/popup, reads current clipboard and chooseText; selection-empty -> No selected text or clipboard text to translate (3000 ms), visible main status then tray then log only"
+          sha256: "77d2584bdd49b5401bf19981870060ae2e7ad424833098f6d1c8b8ca00aa5520"
+        - id: "selection.popup-entrypoint"
+          producer_task: "T-005"
+          interface_id: "selection.popup-entrypoint"
+          signature: "bool ScanPopup::translateSelectedText( QString const & text ); sanitizeInputPhrase, reject invalid, accept visible identical phrase, otherwise translateWord through existing path"
+          sha256: "faa4373096c131a3361e346aaf64955736fe59636995e21fae69f938e6ddd98b"
+        - id: "selection.preferences-status-api"
+          producer_task: "T-005"
+          interface_id: "selection.preferences-status-api"
+          signature: "void Preferences::setHotkeyStatus( QString const & platform, HotkeyBackend::State state, QString const & explanation, QVector<PortalBindingDisplay> const & bindings, bool configureAvailable, SelectionStatus const & selection = SelectionStatus{} ); default argument only in declaration"
+          sha256: "246c5b039c977fb1b270757f610be2d0b161aa480258d5738d4ee8c75a7b6a2c"
+        - id: "selection.preferences-row"
+          producer_task: "T-006"
+          interface_id: "selection.preferences-row"
+          signature: "bool Preferences::scanPopupHotkeyEdited = false; void Preferences::on_enableScanPopupHotkey_toggled( bool checked ); objects enableScanPopupHotkey, scanPopupHotkey, horizontalLayout_scanPopupHotkey, horizontalSpacer_scanPopupHotkey, scanPopupHotkeyStatus; Wayland-only row, PlainText labels, edited key preserved, non-Wayland stored values preserved; SelectionStatus suffix: selection source starting, primary selection supported, selection not observed yet, selection unavailable: %1 — clipboard is used instead, selection unsupported in this build — clipboard is used instead; setHotkeyStatus signature unchanged from Task 5"
+          sha256: "f6ed3b7082a4ee02c07669451f21237051c9a1ce368debd6b209b34c8f774bba"
+        - id: "selection.hotkeys-test-inventory"
+          producer_task: "T-006"
+          interface_id: "selection.hotkeys-test-inventory"
+          signature: "TstHotkeys: exactly 20 new top-level functions = [scanPopupBindingIsPortalOnly, portalIdPredicateAcceptsThreeIds, threeBindingsStayBound, capabilityConstantMatchesBuild, scanPopupSourceLoopContractIsPinned, defaultScanPopupHotkeyIsBindable, scanPopupPortalBindingSurvivesSaveLoad, scanPopupHotkeyKeepsVerbatimText, legacyConfigDefaultsScanPopupHotkeyOff, scanPopupConfigBooleanValues, sourceFollowsThePreference, scanPopupActivationWiringIsPinned, xcbGuardDoesNotCreateThePopup, selectionStatusRowRendersSnapshots_data, selectionStatusRowRendersSnapshots, scanPopupRowPlatformMatrix_data, scanPopupRowPlatformMatrix, scanPopupRowWaylandValuesAndEdits, scanPopupRowWaylandProbe, scanPopupRowBaseStatuses]; exactly two new _data suppliers and one real-Wayland child probe; scan-popup-wayland-preferences: PASS; source assertions prove textual wiring only"
+          sha256: "0d64d8479cf2349f7f6b739799d2e834b0d436a718e7fcac8cef57ea1d77ea5b"
+        - id: "selection.live-cli"
+          producer_task: "T-007"
+          interface_id: "selection.live-cli"
+          signature: "scripts/verify-wayland-selection-live.sh() (executable, no arguments): exit 0 and exactly wayland-selection-live: PASS (13 cases); ordinary failure exit 1 with wayland-selection-live: FAIL <case>; watchdog exit 124; real source, logic and generated protocol C linked in temporary project, isolated private bus/compositor/config, bounded child cleanup; no scanner dependency"
+          sha256: "b5f1eb36aa14e68deea997f5a861b809b48fe360dcca8acf2a9c4a588edf83c5"
+    validation:
+      - argv: ["qmake6", "goldendict.pro"]
+        cwd: "."
+        timeout_seconds: 120
+      - argv: ["qmake6", "goldendict.pro", "CONFIG+=verbose_build_output"]
+        cwd: "."
+        timeout_seconds: 120
+      - argv: ["make", "-j2"]
+        cwd: "."
+        timeout_seconds: 3600
+      - argv: ["make", "tests-makefile"]
+        cwd: "."
+        timeout_seconds: 120
+      - argv: ["make", "tests-build"]
+        cwd: "."
+        timeout_seconds: 1800
+      - argv: ["env", "QT_QPA_PLATFORM=xcb", "GD_TEST_WRAPPER=./scripts/test-wrapper.sh", "make", "tests-run"]
+        cwd: "."
+        timeout_seconds: 1900
+      - argv: ["env", "QT_QPA_PLATFORM=offscreen", "timeout", "60", "tests/tst_hotkeys/tst_hotkeys", "nonXcbCapability"]
+        cwd: "."
+        timeout_seconds: 90
+      - argv: ["env", "QT_QPA_PLATFORM=offscreen", "timeout", "60", "tests/tst_waylandselection/tst_waylandselection"]
+        cwd: "."
+        timeout_seconds: 75
+      - argv: ["wayland-scanner", "--version"]
+        cwd: "."
+        timeout_seconds: 15
+      - argv: ["sha256sum", "protocols/ext-data-control-v1/ext-data-control-v1.xml"]
+        cwd: "."
+        timeout_seconds: 15
+      - argv: ["protocols/ext-data-control-v1/regenerate.sh"]
+        cwd: "."
+        timeout_seconds: 60
+      - argv: ["git", "diff", "--exit-code", "--", "protocols/ext-data-control-v1/"]
+        cwd: "."
+        timeout_seconds: 30
+      - argv: ["scripts/verify-wayland-selection-live.sh"]
+        cwd: "."
+        timeout_seconds: 135
+      - argv: ["git", "diff", "--check"]
+        cwd: "."
+        timeout_seconds: 30

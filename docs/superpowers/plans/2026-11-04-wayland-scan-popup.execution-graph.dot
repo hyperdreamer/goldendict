@@ -1,0 +1,56 @@
+digraph execution_graph {
+  rankdir=LR;
+  subgraph "cluster_selection-logic" {
+    label="selection-logic";
+    "T-001" [label="Task 1: Implement pure selection decisions and register the twentieth suite\nAdvanced"];
+  }
+  subgraph "cluster_hotkey-contracts" {
+    label="hotkey-contracts";
+    "T-002" [label="Task 2: Publish shared portal IDs and independent platform predicates\nAdvanced"];
+  }
+  subgraph "cluster_protocol-client" {
+    label="protocol-client";
+    "T-003" [label="Task 3: Implement the private ext-data-control source and optional build\nCapable"];
+  }
+  subgraph "cluster_configuration" {
+    label="configuration";
+    "T-004" [label="Task 4: Persist opt-in selected-text preferences without rewriting stored keys\nAdvanced"];
+  }
+  subgraph "cluster_integration" {
+    label="integration";
+    "T-005" [label="Task 5: Wire selection ownership and portal activation through the popup\nCapable"];
+  }
+  subgraph "cluster_preferences" {
+    label="preferences";
+    "T-006" [label="Task 6: Add the third Hotkeys row and render selection snapshots\nAdvanced"];
+  }
+  subgraph "cluster_live-verification" {
+    label="live-verification";
+    "T-007" [label="Task 7: Add the isolated live protocol gate with all thirteen cases\nCapable"];
+  }
+  subgraph "cluster_tests-and-docs" {
+    label="tests-and-docs";
+    "T-008" [label="Task 8: Document coverage and run the complete acceptance contract\nAdvanced"];
+  }
+  "T-001" -> "T-003";
+  "T-002" -> "T-003";
+  "T-002" -> "T-004";
+  "T-003" -> "T-004";
+  "T-001" -> "T-005";
+  "T-002" -> "T-005";
+  "T-003" -> "T-005";
+  "T-004" -> "T-005";
+  "T-002" -> "T-006";
+  "T-003" -> "T-006";
+  "T-004" -> "T-006";
+  "T-005" -> "T-006";
+  "T-001" -> "T-007";
+  "T-003" -> "T-007";
+  "T-001" -> "T-008";
+  "T-002" -> "T-008";
+  "T-003" -> "T-008";
+  "T-004" -> "T-008";
+  "T-005" -> "T-008";
+  "T-006" -> "T-008";
+  "T-007" -> "T-008";
+}
