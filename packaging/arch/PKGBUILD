@@ -13,6 +13,9 @@
 #   GD_COMMIT=<sha> makepkg -si   build that exact commit
 # pkgver() is always derived from git describe, so the package version records
 # the tag, the distance from it, and the commit hash of whatever was built.
+# The pkgver= line is therefore informational only: keep it at the last release
+# tag and do not commit a build's pkgver() output here, which is stale as soon
+# as one more commit lands.
 
 pkgname=goldendict
 pkgver=1.5.4
