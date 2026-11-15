@@ -3,6 +3,7 @@
 
 #include <QDialog>
 #include "config.hh"
+#include "globalshortcutblock.hh"
 #include "helpwindow.hh"
 #include "hotkeybackend.hh"
 #include "waylandselection.hh"
@@ -32,6 +33,12 @@ public:
                         bool configureAvailable,
                         SelectionStatus const & selection = SelectionStatus{} );
 
+protected:
+
+  /// Closing the dialog while a field is armed must resume the desktop's own
+  /// shortcuts, whichever button was used.
+  void done( int result ) override;
+
 signals:
   void configureShortcutsRequested();
   void closeMainHelpRequested();
@@ -55,6 +62,9 @@ private:
   void hotkeyRowToggled();
 
   Ui::Preferences ui;
+  /// Suspends the desktop's global shortcuts while a hotkey field records, so
+  /// that a combination which is currently an active shortcut still arrives.
+  GlobalShortcutBlock * shortcutBlock = nullptr;
   HotkeyStatusSnapshot hotkeyStatus;
   bool hotkeyStatusKnown = false;
   bool mainHotkeyEdited = false, clipboardHotkeyEdited = false;

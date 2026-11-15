@@ -39,12 +39,14 @@ QT += core gui widgets xml help
 FORMS += $$GD_REPO_ROOT/preferences.ui
 SOURCES += $$GD_REPO_ROOT/preferences.cc \
            $$GD_REPO_ROOT/hotkeyedit.cc \
+           $$GD_REPO_ROOT/globalshortcutblock.cc \
            $$GD_REPO_ROOT/stylescombobox.cc \
            $$GD_REPO_ROOT/language.cc \
            $$GD_REPO_ROOT/langcoder.cc \
            $$GD_REPO_ROOT/helpwindow.cc
 HEADERS += $$GD_REPO_ROOT/preferences.hh \
            $$GD_REPO_ROOT/hotkeyedit.hh \
+           $$GD_REPO_ROOT/globalshortcutblock.hh \
            $$GD_REPO_ROOT/stylescombobox.hh \
            $$GD_REPO_ROOT/helpwindow.hh
 

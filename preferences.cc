@@ -58,6 +58,13 @@ Preferences::Preferences( QWidget * parent, Config::Class & cfg_ ):
     int const hint = editor->sizeHint().height();
     editor->setFixedHeight( hint + hint % 2 );
   }
+
+  // A hotkey field can only record what the desktop lets through: on Wayland the
+  // compositor matches global shortcuts before the key reaches the focused
+  // widget, so a combination that is an active shortcut - this application's own
+  // portal binding included - never arrives and the field looks dead. Suspend
+  // them while a field is armed, the way the Plasma shortcut KCM records.
+  shortcutBlock = new GlobalShortcutBlock( this );
   connect( ui.configureShortcuts, &QPushButton::clicked, this, &Preferences::configureShortcutsRequested );
   if( QGuiApplication::platformName() != QLatin1String( "xcb" ) )
   {
@@ -632,6 +639,16 @@ Config::Preferences Preferences::getPreferences()
 
 bool Preferences::eventFilter( QObject * watched, QEvent * event )
 {
+  if( watched == ui.mainWindowHotkey || watched == ui.clipboardHotkey || watched == ui.scanPopupHotkey )
+  {
+    // Arming happens before the user's next keystroke, disarming on the way out
+    // of the row, so the desktop's own shortcuts come back with the focus.
+    if( event->type() == QEvent::FocusIn )
+      shortcutBlock->begin();
+    else if( event->type() == QEvent::FocusOut )
+      shortcutBlock->end();
+  }
+
   if( event->type() == QEvent::KeyPress )
   {
     int const key = static_cast<QKeyEvent *>( event )->key();
@@ -644,6 +661,14 @@ bool Preferences::eventFilter( QObject * watched, QEvent * event )
     }
   }
   return QDialog::eventFilter( watched, event );
+}
+
+void Preferences::done( int result )
+{
+  // The dialog can be accepted, rejected or closed directly; every path has to
+  // resume the desktop's shortcuts before the editor goes away.
+  shortcutBlock->end();
+  QDialog::done( result );
 }
 
 void Preferences::setHotkeyStatus( QString const & platform, HotkeyBackend::State state,

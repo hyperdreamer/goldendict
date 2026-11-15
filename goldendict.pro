@@ -340,6 +340,7 @@ HEADERS += folding.hh \
     hotkeywrapper.hh \
     searchpanewidget.hh \
     hotkeyedit.hh \
+    globalshortcutblock.hh \
     langcoder.hh \
     editdictionaries.hh \
     loaddictionaries.hh \
@@ -489,6 +490,7 @@ SOURCES += folding.cc \
     processwrapper.cc \
     hotkeywrapper.cc \
     hotkeyedit.cc \
+    globalshortcutblock.cc \
     langcoder.cc \
     editdictionaries.cc \
     loaddictionaries.cc \

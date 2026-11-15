@@ -71,6 +71,7 @@
 #include "waylandselection.hh"
 #include "preferences.hh"
 #include "hotkeyedit.hh"
+#include "globalshortcutblock.hh"
 #include <QCheckBox>
 #include <QLabel>
 #include <QPushButton>
@@ -734,6 +735,14 @@ private slots:
   void scanPopupRowBaseStatuses();
   void hotkeyRowsFollowTheirCheckboxes();
   void hotkeyEditorsKeepAnEvenHeight();
+
+  // A hotkey field can only record what the desktop lets through: a combination
+  // that is an active global shortcut is consumed by the compositor before the
+  // focused widget sees it, so the row suspends the desktop's shortcuts while it
+  // is armed and resumes them on the way out.
+  void hotkeyFieldSuspendsDesktopShortcuts();
+  void shortcutSuspensionStaysBalanced();
+  void shortcutSuspensionIsReleasedWhenTheDialogCloses();
 
 private slots:
   void wireBarrier( uint marker ) { seenMarker = marker; }
@@ -4002,6 +4011,107 @@ void TstHotkeys::hotkeyEditorsKeepAnEvenHeight()
     }
   }
   dialog.reject();
+}
+
+void TstHotkeys::hotkeyFieldSuspendsDesktopShortcuts()
+{
+  // On Wayland the compositor matches global shortcuts before the focused client
+  // sees the key, so a combination that is currently an active shortcut - this
+  // application's own portal binding included - is consumed and never reaches
+  // the editor. The row has to suspend the desktop's shortcuts while it is armed.
+  Config::Class cfg;
+  cfg.preferences.enableMainWindowHotkey = true;
+  cfg.preferences.enableClipboardHotkey = true;
+  cfg.preferences.scanPopupHotkey = Config::HotKey( QKeySequence( "Ctrl+Meta+D" ) );
+  Preferences dialog( nullptr, cfg );
+  auto block = dialog.findChild< GlobalShortcutBlock * >();
+  QVERIFY( block );
+  QVector< bool > requests;
+  block->setSender( [ &requests ]( bool suspend ) { requests.append( suspend ); } );
+
+  auto button = dialog.findChild< QPushButton * >( "configureShortcuts" );
+  QVERIFY( button );
+  QFocusEvent unrelated( QEvent::FocusIn, Qt::TabFocusReason );
+  QCoreApplication::sendEvent( button, &unrelated );
+  QVERIFY2( !block->isActive(), "only a hotkey field may suspend the desktop" );
+  QVERIFY( requests.isEmpty() );
+
+  for( QString const & name : { QString( "mainWindowHotkey" ), QString( "clipboardHotkey" ),
+                               QString( "scanPopupHotkey" ) } )
+  {
+    auto editor = dialog.findChild< HotKeyEdit * >( name );
+    QVERIFY2( editor, qPrintable( name ) );
+    QFocusEvent focusIn( QEvent::FocusIn, Qt::MouseFocusReason );
+    QCoreApplication::sendEvent( editor, &focusIn );
+    QVERIFY2( block->isActive(), qPrintable( name ) );
+    // The field still records while the desktop is suspended. The selected-text
+    // row is only editable on Wayland; the platform matrix owns that rule.
+    if( editor->isEnabled() )
+    {
+      QTest::keyClick( editor, Qt::Key_J, Qt::ControlModifier | Qt::AltModifier );
+      QCOMPARE( editor->getHotKey().toKeySequence().toString( QKeySequence::PortableText ),
+                QString( "Ctrl+Alt+J" ) );
+    }
+    QFocusEvent focusOut( QEvent::FocusOut, Qt::MouseFocusReason );
+    QCoreApplication::sendEvent( editor, &focusOut );
+    QVERIFY2( !block->isActive(), qPrintable( name ) );
+  }
+  QCOMPARE( requests, ( QVector< bool >{ true, false, true, false, true, false } ) );
+}
+
+void TstHotkeys::shortcutSuspensionStaysBalanced()
+{
+  // A repeated focus-in, or a focus-out that never saw one, must not send a
+  // second request: the desktop's own shortcuts come back exactly once.
+  GlobalShortcutBlock block;
+  QVector< bool > requests;
+  block.setSender( [ &requests ]( bool suspend ) { requests.append( suspend ); } );
+  QVERIFY( !block.isActive() );
+
+  block.begin();
+  block.begin();
+  QVERIFY( block.isActive() );
+  QCOMPARE( requests, ( QVector< bool >{ true } ) );
+
+  block.end();
+  block.end();
+  QVERIFY( !block.isActive() );
+  QCOMPARE( requests, ( QVector< bool >{ true, false } ) );
+
+  block.begin();
+  QCOMPARE( requests, ( QVector< bool >{ true, false, true } ) );
+}
+
+void TstHotkeys::shortcutSuspensionIsReleasedWhenTheDialogCloses()
+{
+  Config::Class cfg;
+  QVector< bool > requests;
+  {
+    Preferences dialog( nullptr, cfg );
+    auto block = dialog.findChild< GlobalShortcutBlock * >();
+    auto editor = dialog.findChild< HotKeyEdit * >( "mainWindowHotkey" );
+    QVERIFY( block && editor );
+    block->setSender( [ &requests ]( bool suspend ) { requests.append( suspend ); } );
+    QFocusEvent focusIn( QEvent::FocusIn, Qt::MouseFocusReason );
+    QCoreApplication::sendEvent( editor, &focusIn );
+    QVERIFY( block->isActive() );
+    dialog.reject();
+    QVERIFY2( !block->isActive(), "rejecting must resume the desktop's shortcuts" );
+  }
+  QCOMPARE( requests, ( QVector< bool >{ true, false } ) );
+
+  // A dialog torn down while armed releases through the block itself, so a path
+  // that never reaches done() cannot leave the desktop suspended.
+  requests.clear();
+  {
+    Preferences dialog( nullptr, cfg );
+    auto block = dialog.findChild< GlobalShortcutBlock * >();
+    QVERIFY( block );
+    block->setSender( [ &requests ]( bool suspend ) { requests.append( suspend ); } );
+    block->begin();
+    QVERIFY( block->isActive() );
+  }
+  QCOMPARE( requests, ( QVector< bool >{ true, false } ) );
 }
 
 QTEST_MAIN( TstHotkeys )
