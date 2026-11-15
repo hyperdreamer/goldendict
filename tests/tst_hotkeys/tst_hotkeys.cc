@@ -714,7 +714,7 @@ private slots:
   void scanPopupSourceLoopContractIsPinned();
 
   // Opt-in selected-text shortcut preference (§5).
-  void defaultScanPopupHotkeyIsBindable();
+  void defaultHotkeysAreUnassigned();
   void scanPopupPortalBindingSurvivesSaveLoad();
   void scanPopupHotkeyKeepsVerbatimText();
   void legacyConfigDefaultsScanPopupHotkeyOff();
@@ -734,6 +734,7 @@ private slots:
   void scanPopupRowWaylandProbe();
   void scanPopupRowBaseStatuses();
   void hotkeyRowsFollowTheirCheckboxes();
+  void defaultHotkeysRenderUnassigned();
   void hotkeyEditorsKeepAnEvenHeight();
 
   // A hotkey field can only record what the desktop lets through: a combination
@@ -1423,6 +1424,10 @@ void TstHotkeys::mainWindowUsesTheSharedInstallGate()
   QByteArray const contents = source.readAll();
   QCOMPARE( contents.count( "installGate.shouldBind(" ), 1 );
   QVERIFY( !contents.contains( "requestedHotkeys" ) );
+  // An enabled-but-empty row is not a binding, and an all-disabled set never
+  // opens a portal session or an X11 recorder just to bind nothing.
+  QVERIFY( contents.contains( "if( key.key1 == 0 && key.rawText.isEmpty() ) return;" ) );
+  QVERIFY( contents.contains( "if( desired.isEmpty() )" ) );
 }
 
 void TstHotkeys::backendContractSignatures()
@@ -3002,6 +3007,7 @@ void TstHotkeys::preferencesPreserveUnavailableValues()
 {
   Config::Class cfg;
   QString const raw = QStringLiteral( "Ctrl+F11,F11,Ctrl+F12" );
+  cfg.preferences.enableMainWindowHotkey = true;
   cfg.preferences.mainWindowHotkey.rawText = raw;
   cfg.preferences.clipboardHotkey = Config::HotKey( QKeySequence( "Ctrl+C,C" ) );
   cfg.preferences.clipboardHotkey.rawText = "Ctrl+C,C";
@@ -3033,6 +3039,9 @@ void TstHotkeys::preferencesPreserveUnavailableValues()
 void TstHotkeys::preferencesReportHotkeyCapabilities()
 {
   Config::Class cfg;
+  cfg.preferences.enableMainWindowHotkey = true;
+  cfg.preferences.enableClipboardHotkey = true;
+  cfg.preferences.clipboardHotkey = Config::HotKey( QKeySequence( "Ctrl+C,C" ) );
   Preferences dialog( nullptr, cfg );
   auto state = dialog.findChild<QLabel *>( "hotkeyCapability" );
   auto main = dialog.findChild<QLabel *>( "mainWindowHotkeyStatus" );
@@ -3441,32 +3450,36 @@ void TstHotkeys::scanPopupSourceLoopContractIsPinned()
 // Opt-in selected-text shortcut preference (§5)
 // ---------------------------------------------------------------------------
 
-// The default the specification names: one Ctrl+Meta+D combination, off by
-// default, bindable as a portal shortcut and stored as its PortableText.
-void TstHotkeys::defaultScanPopupHotkeyIsBindable()
+// No global shortcut ships pre-assigned: every row starts disabled with an
+// empty key, so a fresh configuration registers no global shortcut at all.
+void TstHotkeys::defaultHotkeysAreUnassigned()
 {
   Config::Class cfg;
   auto const & p = cfg.preferences;
 
+  QVERIFY( !p.enableMainWindowHotkey );
+  QVERIFY( p.mainWindowHotkey.key1 == 0 && p.mainWindowHotkey.rawText.isEmpty() );
+  QVERIFY( p.mainWindowHotkey.toKeySequence().isEmpty() );
+
+  QVERIFY( !p.enableClipboardHotkey );
+  QVERIFY( p.clipboardHotkey.key1 == 0 && p.clipboardHotkey.rawText.isEmpty() );
+  QVERIFY( p.clipboardHotkey.toKeySequence().isEmpty() );
+
   QVERIFY( !p.enableScanPopupHotkey );
-  QCOMPARE( p.scanPopupHotkey.key1, int( Qt::Key_D ) );
-  QCOMPARE( p.scanPopupHotkey.key2, 0 );
-  QCOMPARE( p.scanPopupHotkey.modifiers,
-            Qt::KeyboardModifiers( Qt::ControlModifier | Qt::MetaModifier ) );
-  QCOMPARE( p.scanPopupHotkey.toKeySequence().count(), 1 );
-  QCOMPARE( p.scanPopupHotkey.toKeySequence().toString( QKeySequence::PortableText ),
-            QString( "Meta+Ctrl+D" ) );
+  QVERIFY( p.scanPopupHotkey.key1 == 0 && p.scanPopupHotkey.rawText.isEmpty() );
+  QVERIFY( p.scanPopupHotkey.toKeySequence().isEmpty() );
 
   QString trigger, reason;
-  QVERIFY2( HotkeySyntax::preferredTrigger( p.scanPopupHotkey, &trigger, &reason ),
-            qPrintable( reason ) );
-  QVERIFY( reason.isEmpty() );
-  QCOMPARE( trigger, QString( "CTRL+LOGO+d" ) );
+  QVERIFY( !HotkeySyntax::preferredTrigger( p.scanPopupHotkey, &trigger, &reason ) );
 
   auto const saved = saveAndRead( cfg );
-  QCOMPARE( saved.documentElement().firstChildElement( "preferences" )
-              .firstChildElement( "scanPopupHotkey" ).text(),
-            QString( "Meta+Ctrl+D" ) );
+  auto const prefs = saved.documentElement().firstChildElement( "preferences" );
+
+  QCOMPARE( prefs.firstChildElement( "enableMainWindowHotkey" ).text(), QString( "0" ) );
+  QCOMPARE( prefs.firstChildElement( "enableClipboardHotkey" ).text(), QString( "0" ) );
+  QCOMPARE( prefs.firstChildElement( "enableScanPopupHotkey" ).text(), QString( "0" ) );
+  for( char const * name : { "mainWindowHotkey", "clipboardHotkey", "scanPopupHotkey" } )
+    QVERIFY2( prefs.firstChildElement( name ).text().isEmpty(), name );
 }
 
 // The additive <hotkeys>/<portalBindings> section is the only place a portal
@@ -3511,8 +3524,7 @@ void TstHotkeys::scanPopupPortalBindingSurvivesSaveLoad()
     }
 
   QCOMPARE( count, 1 );
-  QCOMPARE( loaded.preferences.scanPopupHotkey.toKeySequence().toString( QKeySequence::PortableText ),
-            QString( "Meta+Ctrl+D" ) );
+  QVERIFY( loaded.preferences.scanPopupHotkey.toKeySequence().isEmpty() );
 
   for( auto const & pair : QList<QPair<QString, QString>>{
          { "scan-popup", "last <description> & value" }, { "foreign-action", "ignored" } } )
@@ -3586,27 +3598,25 @@ void TstHotkeys::legacyConfigDefaultsScanPopupHotkeyOff()
   QVERIFY( !cfg.preferences.enableScanPopupHotkey );
 
   auto const & key = cfg.preferences.scanPopupHotkey;
-  QCOMPARE( key.key1, int( Qt::Key_D ) );
+  QCOMPARE( key.key1, 0 );
   QCOMPARE( key.key2, 0 );
-  QCOMPARE( key.modifiers, Qt::KeyboardModifiers( Qt::ControlModifier | Qt::MetaModifier ) );
-  QCOMPARE( key.toKeySequence().count(), 1 );
-  QCOMPARE( key.toKeySequence().toString( QKeySequence::PortableText ), QString( "Meta+Ctrl+D" ) );
+  QCOMPARE( key.modifiers, Qt::KeyboardModifiers() );
+  QVERIFY( key.toKeySequence().isEmpty() );
 
   auto const saved = saveAndRead( cfg );
   auto const p = saved.documentElement().firstChildElement( "preferences" );
 
   QCOMPARE( p.firstChildElement( "enableScanPopupHotkey" ).text(), QString( "0" ) );
-  QCOMPARE( p.firstChildElement( "scanPopupHotkey" ).text(), QString( "Meta+Ctrl+D" ) );
+  QVERIFY( p.firstChildElement( "scanPopupHotkey" ).text().isEmpty() );
 
   auto const reloaded = Config::load();
   QVERIFY( !reloaded.preferences.enableScanPopupHotkey );
-  QCOMPARE( reloaded.preferences.scanPopupHotkey.toKeySequence().toString( QKeySequence::PortableText ),
-            QString( "Meta+Ctrl+D" ) );
+  QVERIFY( reloaded.preferences.scanPopupHotkey.toKeySequence().isEmpty() );
 }
 
 // Only "1" and "0" set the boolean; every other stored value (including an
 // empty one) leaves the default intact. An explicitly empty shortcut node is an
-// empty shortcut, while a missing node keeps the constructed default.
+// empty shortcut, while a missing node keeps the constructed (empty) default.
 void TstHotkeys::scanPopupConfigBooleanValues()
 {
   QStringList const values{ "1", "0", "", "true", "2", "missing" };
@@ -3627,8 +3637,7 @@ void TstHotkeys::scanPopupConfigBooleanValues()
   QVERIFY( !HotkeySyntax::preferredTrigger( empty, &trigger, &reason ) );
 
   QVERIFY( selectionAmendPreference( "scanPopupHotkey", "", false ) );
-  QCOMPARE( Config::load().preferences.scanPopupHotkey.toKeySequence().toString( QKeySequence::PortableText ),
-            QString( "Meta+Ctrl+D" ) );
+  QVERIFY( Config::load().preferences.scanPopupHotkey.toKeySequence().isEmpty() );
 }
 
 // The source exists exactly while the preference selects it on a platform that
@@ -3885,6 +3894,7 @@ void TstHotkeys::scanPopupRowBaseStatuses()
   SelectionStatus const snapshot{ WaylandSelectionSource::State::Available, {}, true };
   QString const base = "Hover lookup and focus restoration are unavailable on Wayland. Clipboard-change scanning and explicit clipboard lookup remain available; global shortcuts use the portal.";
   Config::Class cfg; cfg.preferences.enableScanPopupHotkey = true;
+  cfg.preferences.scanPopupHotkey = Config::HotKey( QKeySequence( "Meta+Ctrl+D" ) );
   Preferences dialog( nullptr, cfg );
   auto enabled = dialog.findChild<QCheckBox *>( "enableScanPopupHotkey" );
   auto editor = dialog.findChild<HotKeyEdit *>( "scanPopupHotkey" );
@@ -3977,6 +3987,30 @@ void TstHotkeys::hotkeyRowsFollowTheirCheckboxes()
   mainBox->click();
   QVERIFY( mainEditor->isEnabled() );
   QVERIFY( mainStatus->text() != QString( "Disabled" ) );
+}
+
+void TstHotkeys::defaultHotkeysRenderUnassigned()
+{
+  Config::Class cfg;
+  Preferences dialog( nullptr, cfg );
+  auto capability = dialog.findChild< QLabel * >( "hotkeyCapability" );
+  auto mainStatus = dialog.findChild< QLabel * >( "mainWindowHotkeyStatus" );
+  auto clipStatus = dialog.findChild< QLabel * >( "clipboardHotkeyStatus" );
+  auto scanStatus = dialog.findChild< QLabel * >( "scanPopupHotkeyStatus" );
+  auto mainEditor = dialog.findChild< HotKeyEdit * >( "mainWindowHotkey" );
+  auto mainBox = dialog.findChild< QCheckBox * >( "enableMainWindowHotkey" );
+  QVERIFY( capability && mainStatus && clipStatus && scanStatus && mainEditor && mainBox );
+
+  QCOMPARE( capability->text(), QString( "No global shortcuts are enabled" ) );
+  for( QLabel * label : { mainStatus, clipStatus } )
+    QCOMPARE( label->text(), QString( "Disabled" ) );
+  QVERIFY( mainEditor->text().isEmpty() );
+  QVERIFY( !mainEditor->isEnabled() );
+
+  // Ticking an empty row must not claim a bound or unavailable shortcut.
+  mainBox->setChecked( true );
+  QVERIFY( mainEditor->isEnabled() );
+  QCOMPARE( mainStatus->text(), QString( "No shortcut recorded" ) );
 }
 
 void TstHotkeys::hotkeyEditorsKeepAnEvenHeight()
@@ -4080,6 +4114,10 @@ void TstHotkeys::shortcutSuspensionStaysBalanced()
 
   block.begin();
   QCOMPARE( requests, ( QVector< bool >{ true, false, true } ) );
+  // The block must not outlive its recorder: its destructor releases the
+  // suspension and would otherwise append to the already destroyed vector.
+  block.end();
+  QCOMPARE( requests, ( QVector< bool >{ true, false, true, false } ) );
 }
 
 void TstHotkeys::shortcutSuspensionIsReleasedWhenTheDialogCloses()

@@ -308,13 +308,16 @@ struct Preferences
   /// are in the dockable side panel, not on the toolbar.
   bool searchInDock;
 
+  /// No global shortcut ships pre-assigned: each pair starts disabled with an
+  /// empty key, so a fresh configuration registers nothing until the user
+  /// records a combination and ticks its box.
   bool enableMainWindowHotkey;
   HotKey mainWindowHotkey;
   bool enableClipboardHotkey;
   HotKey clipboardHotkey;
 
-  /// Opt-in selected-text action (§5). It defaults to off and only registers the
-  /// action; it never creates a popup on its own.
+  /// Opt-in selected-text action (§5). It defaults to off with an empty key and
+  /// only registers the action; it never creates a popup on its own.
   bool enableScanPopupHotkey;
   HotKey scanPopupHotkey;
 

@@ -3278,6 +3278,10 @@ void MainWindow::installHotKeys( HotkeyInstallIntent intent )
   QVector<HotkeyBinding> desired;
   auto add = [&]( bool enabled, QString const & id, QString const & description, Config::HotKey const & key ) {
     if( !enabled ) return;
+    // An enabled row with no recorded combination is not a binding. Without this
+    // guard the portal would receive an empty preferred trigger and X11 would
+    // report a combination that cannot be bound.
+    if( key.key1 == 0 && key.rawText.isEmpty() ) return;
     QString sequence, reason;
     if( portal )
     {
@@ -3293,6 +3297,17 @@ void MainWindow::installHotKeys( HotkeyInstallIntent intent )
   if( scanPopupBindingPlanned( QGuiApplication::platformName(),
                                cfg.preferences.enableScanPopupHotkey ) )
     add( true, "scan-popup", tr( "Translate the selected text" ), cfg.preferences.scanPopupHotkey );
+  if( desired.isEmpty() )
+  {
+    // Nothing is enabled: do not open a portal session or start an X11 recorder
+    // just to bind an empty list. Drop any session a previous configuration
+    // opened and let the rows render as disabled.
+    if( hotkeyBackend )
+      hotkeyBackend->unbind();
+    installGate.reset();
+    refreshHotkeyStatus();
+    return;
+  }
   if( !installGate.shouldBind( hotkeyBackend != nullptr, desired, hotkeyState, intent ) )
   {
     refreshHotkeyStatus();

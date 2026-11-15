@@ -722,7 +722,11 @@ void Preferences::refreshHotkeyRows()
     case HotkeyBackend::State::Ready: status = tr( "Portal session ready" ); break;
     case HotkeyBackend::State::Closed: status = tr( "Global shortcuts closed" ); break;
   }
-  ui.hotkeyCapability->setText( explanation.isEmpty() ? status : status + ": " + explanation );
+  ui.hotkeyCapability->setText(
+    !ui.enableMainWindowHotkey->isChecked() && !ui.enableClipboardHotkey->isChecked() &&
+        !ui.enableScanPopupHotkey->isChecked()
+      ? tr( "No global shortcuts are enabled" )
+      : ( explanation.isEmpty() ? status : status + ": " + explanation ) );
   QString suffix;
   switch( selection.state )
   {
@@ -754,6 +758,10 @@ void Preferences::refreshHotkeyRows()
     if( !row.enabled->isChecked() ) { row.label->setText( tr( "Disabled" ) ); return; }
     QString reason, trigger;
     Config::HotKey key = row.editor->getHotKey();
+    // An enabled row whose key has never been recorded is not an unavailable
+    // shortcut; it simply has nothing to bind yet.
+    if( key.key1 == 0 && row.stored.rawText.isEmpty() )
+    { row.label->setText( tr( "No shortcut recorded" ) ); return; }
     if( wayland && !row.edited && !row.stored.rawText.isEmpty() && !HotkeySyntax::parse( row.stored.rawText, &key, &reason ) )
     { row.label->setText( tr( "Unavailable on Wayland: %1" ).arg( reason ) ); return; }
     if( wayland && !HotkeySyntax::preferredTrigger( key, &trigger, &reason ) )

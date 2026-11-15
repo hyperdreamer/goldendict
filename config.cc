@@ -301,13 +301,13 @@ Preferences::Preferences():
   alwaysOnTop ( false ),
   searchInDock ( false ),
 
-  enableMainWindowHotkey( true ),
-  mainWindowHotkey( QKeySequence( "Ctrl+F11,F11" ) ),
-  enableClipboardHotkey( true ),
-  clipboardHotkey( QKeySequence( "Ctrl+C,C" ) ),
+  enableMainWindowHotkey( false ),
+  mainWindowHotkey(),
+  enableClipboardHotkey( false ),
+  clipboardHotkey(),
 
   enableScanPopupHotkey( false ),
-  scanPopupHotkey( QKeySequence( Qt::CTRL | Qt::META | Qt::Key_D ) ),
+  scanPopupHotkey(),
 
   enableScanPopup( true ),
   startWithScanPopupOn( false ),
