@@ -4,6 +4,7 @@
 #include "langcoder.hh"
 #include <QKeyEvent>
 #include <QMessageBox>
+#include <QSignalBlocker>
 #include "broken_xrecord.hh"
 #include "hotkeysyntax.hh"
 
@@ -63,6 +64,15 @@ Preferences::Preferences( QWidget * parent, Config::Class & cfg_ ):
 
   connect( ui.showScanFlag, SIGNAL( toggled( bool ) ),
            this, SLOT( showScanFlagToggled( bool ) ) );
+
+  // Ticking a hotkey row enables its editor and re-derives its status text,
+  // instead of leaving the row stale until the backend reports again.
+  connect( ui.enableMainWindowHotkey, &QCheckBox::toggled,
+           this, &Preferences::hotkeyRowToggled );
+  connect( ui.enableClipboardHotkey, &QCheckBox::toggled,
+           this, &Preferences::hotkeyRowToggled );
+  connect( ui.enableScanPopupHotkey, &QCheckBox::toggled,
+           this, &Preferences::hotkeyRowToggled );
 
   connect( ui.altKey, SIGNAL( clicked( bool ) ),
            this, SLOT( wholeAltClicked( bool ) ) );
@@ -632,6 +642,36 @@ void Preferences::setHotkeyStatus( QString const & platform, HotkeyBackend::Stat
                                    bool configureAvailable,
                                    SelectionStatus const & selection )
 {
+  hotkeyStatus.platform = platform;
+  hotkeyStatus.state = state;
+  hotkeyStatus.explanation = explanation;
+  hotkeyStatus.bindings = bindings;
+  hotkeyStatus.configureAvailable = configureAvailable;
+  hotkeyStatus.selection = selection;
+  hotkeyStatusKnown = true;
+
+  refreshHotkeyRows();
+}
+
+void Preferences::hotkeyRowToggled()
+{
+  // A checkbox changes what its row reports: recompute the rows from the last
+  // snapshot instead of leaving a stale status label behind.
+  refreshHotkeyRows();
+}
+
+void Preferences::refreshHotkeyRows()
+{
+  if( !hotkeyStatusKnown )
+    return;
+
+  QString const & platform = hotkeyStatus.platform;
+  HotkeyBackend::State const state = hotkeyStatus.state;
+  QString const & explanation = hotkeyStatus.explanation;
+  QVector< PortalBindingDisplay > const & bindings = hotkeyStatus.bindings;
+  bool const configureAvailable = hotkeyStatus.configureAvailable;
+  SelectionStatus const & selection = hotkeyStatus.selection;
+
   bool const wayland = platform.startsWith( QLatin1String( "wayland" ) );
   bool const active = state == HotkeyBackend::State::Bound || state == HotkeyBackend::State::Partial;
   QString status;
@@ -700,14 +740,20 @@ void Preferences::setHotkeyStatus( QString const & platform, HotkeyBackend::Stat
       row.enabled->setEnabled( wayland );
       if( !wayland )
       {
-        row.enabled->setChecked( false ); row.editor->setEnabled( false );
+        // Programmatic reset: keep it out of the toggled() path that just
+        // brought us here.
+        QSignalBlocker blocker( row.enabled );
+        row.enabled->setChecked( false );
+        row.editor->setEnabled( false );
         row.label->setText( platform == QLatin1String( "xcb" )
           ? tr( "Not used on X11 — the Held keys setting on the Scan Popup tab applies" )
           : tr( "Not used outside Wayland sessions" ) );
         continue;
       }
-      row.editor->setEnabled( row.enabled->isChecked() );
     }
+    // The editor follows its own checkbox, so a row can never stay disabled
+    // with its box ticked (or the reverse), whatever order signals arrive in.
+    row.editor->setEnabled( row.enabled->isChecked() );
     display( row );
     if( wayland && row.id == QLatin1String( "scan-popup" ) && row.enabled->isChecked() )
       row.label->setText( row.label->text() + QStringLiteral( " · " ) + suffix );

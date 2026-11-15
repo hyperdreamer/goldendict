@@ -38,7 +38,25 @@ signals:
 
 private:
 
+  /// Last backend snapshot. Kept so the row labels and the editors' enabled
+  /// state can be recomputed from the current checkbox values without waiting
+  /// for the backend to report again.
+  struct HotkeyStatusSnapshot
+  {
+    QString platform;
+    HotkeyBackend::State state = HotkeyBackend::State::Unavailable;
+    QString explanation;
+    QVector< PortalBindingDisplay > bindings;
+    bool configureAvailable = false;
+    SelectionStatus selection;
+  };
+
+  void refreshHotkeyRows();
+  void hotkeyRowToggled();
+
   Ui::Preferences ui;
+  HotkeyStatusSnapshot hotkeyStatus;
+  bool hotkeyStatusKnown = false;
   bool mainHotkeyEdited = false, clipboardHotkeyEdited = false;
   bool scanPopupHotkeyEdited = false;
   bool eventFilter( QObject *, QEvent * ) override;

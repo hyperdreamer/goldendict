@@ -732,6 +732,7 @@ private slots:
   void scanPopupRowWaylandValuesAndEdits();
   void scanPopupRowWaylandProbe();
   void scanPopupRowBaseStatuses();
+  void hotkeyRowsFollowTheirCheckboxes();
 
 private slots:
   void wireBarrier( uint marker ) { seenMarker = marker; }
@@ -3901,6 +3902,71 @@ void TstHotkeys::scanPopupRowBaseStatuses()
     QCOMPARE( invalidLabel->text(), QString( "Unavailable on Wayland: Only one or two key combinations are supported. · primary selection supported" ) );
     QVERIFY( !invalidLabel->text().contains( "stale" ) ); QVERIFY( invalidEnabled->isChecked() );
   }
+}
+
+void TstHotkeys::hotkeyRowsFollowTheirCheckboxes()
+{
+  Config::Class cfg;
+  cfg.preferences.enableMainWindowHotkey = true;
+  cfg.preferences.mainWindowHotkey = Config::HotKey( QKeySequence( "Alt+4" ) );
+  cfg.preferences.enableClipboardHotkey = false;
+  cfg.preferences.clipboardHotkey = Config::HotKey( QKeySequence( "Ctrl+C" ) );
+  Preferences dialog( nullptr, cfg );
+  auto mainBox = dialog.findChild<QCheckBox *>( "enableMainWindowHotkey" );
+  auto mainEditor = dialog.findChild<HotKeyEdit *>( "mainWindowHotkey" );
+  auto mainStatus = dialog.findChild<QLabel *>( "mainWindowHotkeyStatus" );
+  auto clipBox = dialog.findChild<QCheckBox *>( "enableClipboardHotkey" );
+  auto clipEditor = dialog.findChild<HotKeyEdit *>( "clipboardHotkey" );
+  auto clipStatus = dialog.findChild<QLabel *>( "clipboardHotkeyStatus" );
+  QVERIFY( mainBox && mainEditor && mainStatus && clipBox && clipEditor && clipStatus );
+
+  // Unticked row: editor disabled (the .ui default) and the label says so.
+  QVERIFY( !clipBox->isChecked() );
+  QVERIFY( !clipEditor->isEnabled() );
+  QCOMPARE( clipStatus->text(), QString( "Disabled" ) );
+
+  // Ticking must enable the editor and drop the stale "Disabled" text in the
+  // same event, not only when the backend reports again.
+  clipBox->click();
+  QVERIFY( clipBox->isChecked() );
+  QVERIFY( clipEditor->isEnabled() );
+  QVERIFY2( clipStatus->text() != QString( "Disabled" ), qPrintable( clipStatus->text() ) );
+  QVERIFY( !clipStatus->text().isEmpty() );
+
+  // Unticking takes both away again.
+  clipBox->click();
+  QVERIFY( !clipBox->isChecked() );
+  QVERIFY( !clipEditor->isEnabled() );
+  QCOMPARE( clipStatus->text(), QString( "Disabled" ) );
+
+  // Re-enabling restores the last reported binding, not a stale label.
+  dialog.setHotkeyStatus( "wayland", HotkeyBackend::State::Bound, {}, {{ "clipboard-lookup", "Ctrl+C" }}, false, {} );
+  QVERIFY( !clipEditor->isEnabled() );
+  QCOMPARE( clipStatus->text(), QString( "Disabled" ) );
+  clipBox->setChecked( true );
+  QVERIFY( clipEditor->isEnabled() );
+  QCOMPARE( clipStatus->text(), QString( "Ctrl+C" ) );
+  clipBox->setChecked( false );
+  QVERIFY( !clipEditor->isEnabled() );
+  QCOMPARE( clipStatus->text(), QString( "Disabled" ) );
+
+  // A later backend report must re-derive the editor state from the checkbox,
+  // so a row can never stay disabled while its box is ticked.
+  clipBox->setChecked( true );
+  clipEditor->setEnabled( false );                       // the stuck state
+  dialog.setHotkeyStatus( "xcb", HotkeyBackend::State::Unavailable, "not initialized", {}, false, {} );
+  QVERIFY( clipBox->isChecked() );
+  QVERIFY( clipEditor->isEnabled() );
+  QCOMPARE( clipStatus->text(), QString( "not initialized" ) );
+
+  // Same wiring for the main-window row.
+  mainBox->click();
+  QVERIFY( !mainBox->isChecked() );
+  QVERIFY( !mainEditor->isEnabled() );
+  QCOMPARE( mainStatus->text(), QString( "Disabled" ) );
+  mainBox->click();
+  QVERIFY( mainEditor->isEnabled() );
+  QVERIFY( mainStatus->text() != QString( "Disabled" ) );
 }
 
 QTEST_MAIN( TstHotkeys )
