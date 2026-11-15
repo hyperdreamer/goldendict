@@ -733,6 +733,7 @@ private slots:
   void scanPopupRowWaylandProbe();
   void scanPopupRowBaseStatuses();
   void hotkeyRowsFollowTheirCheckboxes();
+  void hotkeyEditorsKeepAnEvenHeight();
 
 private slots:
   void wireBarrier( uint marker ) { seenMarker = marker; }
@@ -3967,6 +3968,40 @@ void TstHotkeys::hotkeyRowsFollowTheirCheckboxes()
   mainBox->click();
   QVERIFY( mainEditor->isEnabled() );
   QVERIFY( mainStatus->text() != QString( "Disabled" ) );
+}
+
+void TstHotkeys::hotkeyEditorsKeepAnEvenHeight()
+{
+  // The style draws no frame at all for a line edit whose height is odd, and the
+  // row layout used to shave one pixel off a single row, which made the
+  // clipboard field look like plain text next to its framed siblings.
+  Config::Class cfg;
+  cfg.preferences.enableMainWindowHotkey = true;
+  cfg.preferences.enableClipboardHotkey = true;
+  cfg.preferences.scanPopupHotkey = Config::HotKey( QKeySequence( "Ctrl+Meta+D" ) );
+  Preferences dialog( nullptr, cfg );
+  dialog.resize( 760, 620 );
+  dialog.show();
+  QCoreApplication::processEvents();
+  QList< HotKeyEdit * > editors{ dialog.findChild< HotKeyEdit * >( "mainWindowHotkey" ),
+                                 dialog.findChild< HotKeyEdit * >( "clipboardHotkey" ),
+                                 dialog.findChild< HotKeyEdit * >( "scanPopupHotkey" ) };
+  int height = 0;
+  for( HotKeyEdit * editor : editors )
+  {
+    QVERIFY( editor );
+    QVERIFY2( editor->minimumHeight() == editor->maximumHeight(), "editor height must be fixed" );
+    QCOMPARE( editor->minimumHeight() % 2, 0 );
+    if( height == 0 )
+      height = editor->minimumHeight();
+    QCOMPARE( editor->minimumHeight(), height );
+    if( editor->height() > 0 )
+    {
+      QCOMPARE( editor->height() % 2, 0 );
+      QCOMPARE( editor->height(), height );
+    }
+  }
+  dialog.reject();
 }
 
 QTEST_MAIN( TstHotkeys )

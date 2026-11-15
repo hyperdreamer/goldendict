@@ -48,6 +48,16 @@ Preferences::Preferences( QWidget * parent, Config::Class & cfg_ ):
 {
   Config::Preferences const & p = cfg_.preferences;
   ui.setupUi( this );
+
+  // The current style draws no frame at all for a line edit whose height is
+  // odd, and the row layout can shave a pixel off a single row, which left the
+  // clipboard field looking like plain text. Pin the three editors to their own
+  // even size hint so every row keeps its frame.
+  for( HotKeyEdit * editor : { ui.mainWindowHotkey, ui.clipboardHotkey, ui.scanPopupHotkey } )
+  {
+    int const hint = editor->sizeHint().height();
+    editor->setFixedHeight( hint + hint % 2 );
+  }
   connect( ui.configureShortcuts, &QPushButton::clicked, this, &Preferences::configureShortcutsRequested );
   if( QGuiApplication::platformName() != QLatin1String( "xcb" ) )
   {
@@ -834,21 +844,6 @@ void Preferences::sideShiftClicked( bool )
 {
   if ( ui.leftShift->isChecked() || ui.rightShift->isChecked() )
     ui.shiftKey->setChecked( false );
-}
-
-void Preferences::on_enableMainWindowHotkey_toggled( bool checked )
-{
-  ui.mainWindowHotkey->setEnabled( checked );
-}
-
-void Preferences::on_enableClipboardHotkey_toggled( bool checked )
-{
-  ui.clipboardHotkey->setEnabled( checked );
-}
-
-void Preferences::on_enableScanPopupHotkey_toggled( bool checked )
-{
-  ui.scanPopupHotkey->setEnabled( ui.enableScanPopupHotkey->isEnabled() && checked );
 }
 
 void Preferences::on_buttonBox_accepted()
