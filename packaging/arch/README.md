@@ -7,6 +7,19 @@ cd packaging/arch
 PKGDEST="$PWD/dist" SRCDEST=/var/tmp/makepkg-src BUILDDIR=/var/tmp/makepkg-build makepkg -si
 ```
 
+By default the source follows `master`, so every build takes the newest commit and the
+package version names what it built (`1.5.4.r0.gc9a20f82` on a tag, `1.5.4.r1.gbaef2345`
+one commit past it). To rebuild an exact revision instead:
+
+```bash
+GD_TAG=1.5.4    makepkg -si    # a release tag
+GD_COMMIT=<sha> makepkg -si    # any commit whatsoever
+```
+
+Both are read by `PKGBUILD` itself, so nothing has to be edited to pin a build, and
+`pkgver()` still derives the version from the checkout it actually received. Note that
+installing an older revision is a downgrade, which pacman will ask you to confirm.
+
 `PKGDEST` puts the built package in `packaging/arch/dist/` (git-ignored) instead of the
 current directory. `SRCDEST` and `BUILDDIR` must stay **outside** the repository:
 makepkg keeps a bare clone there and creates its working copy from it, and git refuses
