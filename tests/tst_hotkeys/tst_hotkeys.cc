@@ -1544,8 +1544,10 @@ void TstHotkeys::unassignedBindingLabelAndConfigureEnablement()
   Preferences dialog( nullptr, cfg );
   auto main = dialog.findChild< QLabel * >( "mainWindowHotkeyStatus" );
   auto clipboard = dialog.findChild< QLabel * >( "clipboardHotkeyStatus" );
+  auto mainEditor = dialog.findChild< HotKeyEdit * >( "mainWindowHotkey" );
+  auto clipboardEditor = dialog.findChild< HotKeyEdit * >( "clipboardHotkey" );
   auto configure = dialog.findChild< QPushButton * >( "configureShortcuts" );
-  QVERIFY( main && clipboard && configure );
+  QVERIFY( main && clipboard && mainEditor && clipboardEditor && configure );
   QString const unassigned = QStringLiteral( "Not assigned by the portal — use Configure shortcuts" );
 
   TestSupport::PrivateSessionBus privateBus;
@@ -1593,8 +1595,15 @@ void TstHotkeys::unassignedBindingLabelAndConfigureEnablement()
   QVERIFY( QTest::qWaitFor( [ & ] { return backend.state() == State::Bound; }, 1500 ) );
   render();
   QVERIFY( configure->isEnabled() );
-  QCOMPARE( main->text(), QStringLiteral( "Assigned by the desktop: Portal main trigger" ) );
-  QCOMPARE( clipboard->text(), QStringLiteral( "Assigned by the desktop: Portal clipboard trigger" ) );
+  // The assignment the desktop owns is shown in the field itself, read-only, and
+  // the row no longer prints a second copy of it.
+  QVERIFY( main->text().isEmpty() );
+  QVERIFY( clipboard->text().isEmpty() );
+  QCOMPARE( mainEditor->text(), QStringLiteral( "Portal main trigger" ) );
+  QCOMPARE( clipboardEditor->text(), QStringLiteral( "Portal clipboard trigger" ) );
+  QVERIFY( mainEditor->isReadOnly() && clipboardEditor->isReadOnly() );
+  // A mirror is not a recorded shortcut: the stored request is still what OK keeps.
+  QCOMPARE( mainEditor->getHotKey().key1, 0 );
 
   portal.setBoundShortcuts( {
     { QStringLiteral( "main-window" ), { { QStringLiteral( "trigger_description" ), QStringLiteral( "Portal main trigger" ) } } },
@@ -1604,8 +1613,12 @@ void TstHotkeys::unassignedBindingLabelAndConfigureEnablement()
   QVERIFY( QTest::qWaitFor( [ & ] { return backend.state() == State::Partial; }, 1500 ) );
   render();
   QVERIFY( configure->isEnabled() );
-  QCOMPARE( main->text(), QStringLiteral( "Assigned by the desktop: Portal main trigger" ) );
+  QVERIFY( main->text().isEmpty() );
+  QCOMPARE( mainEditor->text(), QStringLiteral( "Portal main trigger" ) );
   QCOMPARE( clipboard->text(), unassigned );
+  // A row the report does not assign falls back to the stored request, editable.
+  QCOMPARE( clipboardEditor->text(), QStringLiteral( "Ctrl+Alt+H" ) );
+  QVERIFY( !clipboardEditor->isReadOnly() );
 
   portal.setScenario( QStringLiteral( "bind-denied" ) );
   backend.bind( desired );
@@ -1614,6 +1627,9 @@ void TstHotkeys::unassignedBindingLabelAndConfigureEnablement()
   QVERIFY( configure->isEnabled() );
   QCOMPARE( main->text(), unassigned );
   QCOMPARE( clipboard->text(), unassigned );
+  // With no assignment to mirror, the field shows the stored request again.
+  QCOMPARE( mainEditor->text(), QStringLiteral( "Ctrl+Alt+G" ) );
+  QVERIFY( !mainEditor->isReadOnly() );
 
   portal.setScenario( QStringLiteral( "denied" ) );
   backend.bind( desired );
@@ -1707,12 +1723,16 @@ void TstHotkeys::systemSettingsEditIsLabelledNotConflated()
   backend.bind( desired );
   QVERIFY( QTest::qWaitFor( [ & ] { return backend.state() == State::Bound; }, 1500 ) );
   render();
-  QCOMPARE( mainLabel->text(), QStringLiteral( "Assigned by the desktop: Alt+4" ) );
-  QCOMPARE( clipboardLabel->text(), QStringLiteral( "Assigned by the desktop: Alt+S" ) );
+  // The assignment the desktop owns is shown in the field itself, read-only, and
+  // the row no longer prints a second copy of it: one value, one place.
+  QVERIFY( mainLabel->text().isEmpty() );
+  QVERIFY( clipboardLabel->text().isEmpty() );
+  QCOMPARE( mainField->text(), QStringLiteral( "Alt+4" ) );
+  QCOMPARE( clipboardField->text(), QStringLiteral( "Alt+S" ) );
+  QVERIFY( mainField->isReadOnly() && clipboardField->isReadOnly() );
 
   // The user edits one shortcut in the desktop's own settings. That edit is the
-  // authoritative assignment; the editor keeps the requested value, so both are
-  // visible at once and neither can be mistaken for the other.
+  // authoritative assignment, and the dialog follows it live.
   portal.emitShortcutsChanged( portal.sessionPath(),
     { { QStringLiteral( "clipboard-lookup" ),
         { { QStringLiteral( "trigger_description" ), QStringLiteral( "Ctrl+Alt+S" ) } } } } );
@@ -1720,12 +1740,30 @@ void TstHotkeys::systemSettingsEditIsLabelledNotConflated()
     return descriptionOf( QStringLiteral( "clipboard-lookup" ) ) == QLatin1String( "Ctrl+Alt+S" );
   }, 1500 ) );
   render();
-  QCOMPARE( clipboardLabel->text(), QStringLiteral( "Assigned by the desktop: Ctrl+Alt+S" ) );
-  QCOMPARE( clipboardField->text(), QStringLiteral( "Alt+S" ) );
-  QVERIFY( clipboardField->text() != clipboardLabel->text() );
-  // The rule that reconciles them is stated where the request is edited.
+  QCOMPARE( clipboardField->text(), QStringLiteral( "Ctrl+Alt+S" ) );
+  QVERIFY( clipboardLabel->text().isEmpty() );
+  // A mirror cannot be typed into, so the field can no longer claim a chord the
+  // desktop never granted -- the state this report was filed against.
+  QTest::keyClick( clipboardField, Qt::Key_J, Qt::AltModifier );
+  QCOMPARE( clipboardField->text(), QStringLiteral( "Ctrl+Alt+S" ) );
+  QCOMPARE( dialog.getPreferences().clipboardHotkey.toKeySequence().toString( QKeySequence::PortableText ),
+            QStringLiteral( "Alt+S" ) );
   QVERIFY( clipboardField->toolTip().contains( QStringLiteral( "requested" ) ) );
   QVERIFY( clipboardField->toolTip().contains( QStringLiteral( "desktop" ) ) );
+
+  // A chord typed before any report arrived is a request. The report must not
+  // overwrite it, and the row has to say that it is not applied yet.
+  Preferences typed( nullptr, cfg );
+  auto typedField = typed.findChild< HotKeyEdit * >( "clipboardHotkey" );
+  auto typedLabel = typed.findChild< QLabel * >( "clipboardHotkeyStatus" );
+  QVERIFY( typedField && typedLabel );
+  QTest::keyClick( typedField, Qt::Key_F, Qt::AltModifier );
+  QCOMPARE( typedField->text(), QStringLiteral( "Alt+F" ) );
+  typed.setHotkeyStatus( "wayland", backend.state(), explanation, reported,
+                         backend.isConfigureAvailable() );
+  QCOMPARE( typedField->text(), QStringLiteral( "Alt+F" ) );
+  QCOMPARE( typedLabel->text(),
+            QStringLiteral( "Requested Alt+F — not applied yet; the desktop has Ctrl+Alt+S" ) );
 
   // Contract lock (spec §3.4, §12; the fake portal's "one report replaces the
   // active subset" rule): an ID this update does not name is reported as not
@@ -3134,8 +3172,7 @@ void TstHotkeys::preferencesReportHotkeyCapabilities()
   auto main = dialog.findChild<QLabel *>( "mainWindowHotkeyStatus" );
   auto clipboard = dialog.findChild<QLabel *>( "clipboardHotkeyStatus" );
   auto configure = dialog.findChild<QPushButton *>( "configureShortcuts" );
-  QVERIFY( state && main && clipboard && configure );
-  dialog.setHotkeyStatus( "xcb", HotkeyBackend::State::Bound, {}, {}, false );
+  QVERIFY( state && main && clipboard && configure );  dialog.setHotkeyStatus( "xcb", HotkeyBackend::State::Bound, {}, {}, false );
   QVERIFY( state->text().contains( "X11 active" ) );
   dialog.setHotkeyStatus( "xcb", HotkeyBackend::State::Partial, "clipboard-lookup was refused", {}, false );
   QVERIFY( !main->text().contains( "Active", Qt::CaseInsensitive ) );
@@ -3146,10 +3183,15 @@ void TstHotkeys::preferencesReportHotkeyCapabilities()
   main = portal.findChild<QLabel *>( "mainWindowHotkeyStatus" );
   clipboard = portal.findChild<QLabel *>( "clipboardHotkeyStatus" );
   configure = portal.findChild<QPushButton *>( "configureShortcuts" );
+  auto portalMainEditor = portal.findChild<HotKeyEdit *>( "mainWindowHotkey" );
+  QVERIFY( portalMainEditor );
   QVector<PortalBindingDisplay> const reported{ { "main-window", "Assigned in System Settings" } };
   portal.setHotkeyStatus( "wayland", HotkeyBackend::State::Partial, "one binding refused", reported, true );
   QVERIFY( state->text().contains( "partial", Qt::CaseInsensitive ) );
-  QVERIFY( main->text().contains( "Assigned in System Settings" ) );
+  // The reported assignment is what the row shows, in the field the user reads.
+  QCOMPARE( portalMainEditor->text(), QStringLiteral( "Assigned in System Settings" ) );
+  QVERIFY( portalMainEditor->isReadOnly() );
+  QVERIFY( main->text().isEmpty() );
   QVERIFY( clipboard->text().contains( "unavailable", Qt::CaseInsensitive ) );
   QVERIFY( clipboard->text().contains( "Wayland" ) );
   QVERIFY( configure->isEnabled() );
@@ -3168,13 +3210,26 @@ void TstHotkeys::preferencesReportHotkeyCapabilities()
   QVERIFY( note->text().contains( "explicit clipboard", Qt::CaseInsensitive ) );
   QVERIFY( note->text().contains( "Hover" ) );
 
-  // Unparseable raw text must not acquire the parsed field's valid trigger.
+  // Unparseable raw text must not acquire the parsed field's valid trigger: the
+  // field mirrors only what the portal reported, and the stored text is untouched.
   cfg.preferences.mainWindowHotkey.rawText = "Ctrl+G,Ctrl+H,Ctrl+I";
   Preferences unsupported( nullptr, cfg );
+  auto unsupportedEditor = unsupported.findChild<HotKeyEdit *>( "mainWindowHotkey" );
+  QVERIFY( unsupportedEditor );
   unsupported.setHotkeyStatus( "wayland", HotkeyBackend::State::Bound, {}, reported, true );
   main = unsupported.findChild<QLabel *>( "mainWindowHotkeyStatus" );
+  QCOMPARE( unsupportedEditor->text(), QStringLiteral( "Assigned in System Settings" ) );
+  QVERIFY( main->text().isEmpty() );
+  QCOMPARE( unsupported.getPreferences().mainWindowHotkey.rawText, QStringLiteral( "Ctrl+G,Ctrl+H,Ctrl+I" ) );
+  // With no assignment to mirror, the unrepresentable request is reported again.
+  unsupported.setHotkeyStatus( "wayland", HotkeyBackend::State::Bound, {}, {}, true );
   QVERIFY( main->text().contains( "Unavailable", Qt::CaseInsensitive ) );
   QVERIFY( !main->text().contains( "Assigned" ) );
+  QVERIFY( unsupportedEditor->text().isEmpty() == false );
+  // With the mirror dropped the field goes back to the stored combination, whose
+  // raw text the dialog hands back unchanged.
+  QCOMPARE( unsupportedEditor->text(), QStringLiteral( "Ctrl+Alt+G" ) );
+  QVERIFY( !unsupportedEditor->isReadOnly() );
 }
 
 void TstHotkeys::preferencesExplainRendererParity()
@@ -3849,7 +3904,9 @@ void TstHotkeys::selectionStatusRowRendersSnapshots()
   enabled->setChecked( true );
   SelectionStatus snapshot{ WaylandSelectionSource::State(state), reason, seen };
   auto render = [&] { dialog.setHotkeyStatus( "wayland", HotkeyBackend::State::Bound, {}, {{"scan-popup", "Portal selected trigger"}}, true, snapshot ); };
-  render(); QCOMPARE( label->text(), QString( "Assigned by the desktop: Portal selected trigger · " ) + suffix );
+  render(); QCOMPARE( label->text(), suffix );
+  QCOMPARE( editor->text(), QString( "Portal selected trigger" ) );
+  QVERIFY( editor->isReadOnly() );
   QCOMPARE( label->textFormat(), Qt::PlainText );
   for( char const * name : { "mainWindowHotkeyStatus", "clipboardHotkeyStatus" } )
   {
@@ -3858,9 +3915,9 @@ void TstHotkeys::selectionStatusRowRendersSnapshots()
   }
   auto const before = editor->getHotKey().toKeySequence(); QString const display = editor->text();
   snapshot = { WaylandSelectionSource::State::Available, {}, false }; render();
-  QCOMPARE( label->text(), QString( "Assigned by the desktop: Portal selected trigger · selection not observed yet" ) );
+  QCOMPARE( label->text(), QString( "selection not observed yet" ) );
   snapshot.primarySelectionSeen = true; render();
-  QCOMPARE( label->text(), QString( "Assigned by the desktop: Portal selected trigger · primary selection supported" ) );
+  QCOMPARE( label->text(), QString( "primary selection supported" ) );
   QVERIFY( enabled->isChecked() ); QCOMPARE( editor->text(), display );
   QCOMPARE( editor->getHotKey().toKeySequence(), before );
   QCOMPARE( dialog.getPreferences().scanPopupHotkey.rawText, QString( "Ctrl+Meta+D" ) );
@@ -3872,8 +3929,8 @@ void TstHotkeys::scanPopupRowPlatformMatrix_data()
   QTest::newRow( "windows" ) << QString( "windows" ) << false << QString( "Not used outside Wayland sessions" );
   QTest::newRow( "cocoa" ) << QString( "cocoa" ) << false << QString( "Not used outside Wayland sessions" );
   QTest::newRow( "offscreen" ) << QString( "offscreen" ) << false << QString( "Not used outside Wayland sessions" );
-  QTest::newRow( "wayland" ) << QString( "wayland" ) << true << QString( "Assigned by the desktop: Portal selected trigger · selection unavailable: manager removed — clipboard is used instead" );
-  QTest::newRow( "wayland-egl" ) << QString( "wayland-egl" ) << true << QString( "Assigned by the desktop: Portal selected trigger · selection unavailable: manager removed — clipboard is used instead" );
+  QTest::newRow( "wayland" ) << QString( "wayland" ) << true << QString( "selection unavailable: manager removed — clipboard is used instead" );
+  QTest::newRow( "wayland-egl" ) << QString( "wayland-egl" ) << true << QString( "selection unavailable: manager removed — clipboard is used instead" );
 }
 void TstHotkeys::scanPopupRowPlatformMatrix()
 {
@@ -4001,13 +4058,22 @@ void TstHotkeys::scanPopupRowBaseStatuses()
   cfg.preferences.scanPopupHotkey.rawText = "Ctrl+G,Ctrl+H,Ctrl+I";
   Preferences invalid( nullptr, cfg );
   auto invalidEnabled = invalid.findChild<QCheckBox *>( "enableScanPopupHotkey" );
-  auto invalidLabel = invalid.findChild<QLabel *>( "scanPopupHotkeyStatus" ); QVERIFY( invalidEnabled && invalidLabel );
+  auto invalidLabel = invalid.findChild<QLabel *>( "scanPopupHotkeyStatus" );
+  auto invalidEditor = invalid.findChild<HotKeyEdit *>( "scanPopupHotkey" );
+  QVERIFY( invalidEnabled && invalidLabel && invalidEditor );
   invalid.setHotkeyStatus( "wayland", B::Bound, {}, {}, true, snapshot ); invalidEnabled->setChecked( true );
   for( int i = 0; i != 2; ++i )
   {
     invalid.setHotkeyStatus( "wayland", B::Bound, {}, {{"scan-popup", "stale"}}, true, snapshot );
-    QCOMPARE( invalidLabel->text(), QString( "Unavailable on Wayland: Only one or two key combinations are supported. · primary selection supported" ) );
-    QVERIFY( !invalidLabel->text().contains( "stale" ) ); QVERIFY( invalidEnabled->isChecked() );
+    // A reported assignment wins over a stored request the desktop never took, so
+    // the field mirrors what the portal reported and the row keeps only the
+    // selection state.
+    QCOMPARE( invalidLabel->text(), QString( "primary selection supported" ) );
+    QCOMPARE( invalidEditor->text(), QString( "stale" ) );
+    QVERIFY( invalidEditor->isReadOnly() );
+    // The unrepresentable stored text is still what OK hands back, unrewritten.
+    QCOMPARE( invalid.getPreferences().scanPopupHotkey.rawText, QString( "Ctrl+G,Ctrl+H,Ctrl+I" ) );
+    QVERIFY( invalidEnabled->isChecked() );
   }
 }
 
@@ -4039,7 +4105,6 @@ void TstHotkeys::hotkeyRowsFollowTheirCheckboxes()
   QVERIFY( clipEditor->isEnabled() );
   QVERIFY2( clipStatus->text() != QString( "Disabled" ), qPrintable( clipStatus->text() ) );
   QVERIFY( !clipStatus->text().isEmpty() );
-
   // Unticking takes both away again.
   clipBox->click();
   QVERIFY( !clipBox->isChecked() );
@@ -4052,7 +4117,10 @@ void TstHotkeys::hotkeyRowsFollowTheirCheckboxes()
   QCOMPARE( clipStatus->text(), QString( "Disabled" ) );
   clipBox->setChecked( true );
   QVERIFY( clipEditor->isEnabled() );
-  QCOMPARE( clipStatus->text(), QString( "Assigned by the desktop: Ctrl+C" ) );
+  // The assignment lives in the field now, so the row has nothing left to repeat.
+  QVERIFY( clipStatus->text().isEmpty() );
+  QCOMPARE( clipEditor->text(), QString( "Ctrl+C" ) );
+  QVERIFY( clipEditor->isReadOnly() );
   clipBox->setChecked( false );
   QVERIFY( !clipEditor->isEnabled() );
   QCOMPARE( clipStatus->text(), QString( "Disabled" ) );

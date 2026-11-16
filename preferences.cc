@@ -91,6 +91,16 @@ Preferences::Preferences( QWidget * parent, Config::Class & cfg_ ):
   connect( ui.enableScanPopupHotkey, &QCheckBox::toggled,
            this, &Preferences::hotkeyRowToggled );
 
+  // A chord typed into a row is a request the backend has not seen yet: re-derive
+  // the row from the edit instead of leaving the previous assignment standing as
+  // if the field had no effect.
+  connect( ui.mainWindowHotkey, &QLineEdit::textChanged,
+           this, &Preferences::hotkeyRowToggled );
+  connect( ui.clipboardHotkey, &QLineEdit::textChanged,
+           this, &Preferences::hotkeyRowToggled );
+  connect( ui.scanPopupHotkey, &QLineEdit::textChanged,
+           this, &Preferences::hotkeyRowToggled );
+
   connect( ui.altKey, SIGNAL( clicked( bool ) ),
            this, SLOT( wholeAltClicked( bool ) ) );
   connect( ui.ctrlKey, SIGNAL( clicked( bool ) ),
@@ -652,7 +662,11 @@ bool Preferences::eventFilter( QObject * watched, QEvent * event )
   if( event->type() == QEvent::KeyPress )
   {
     int const key = static_cast<QKeyEvent *>( event )->key();
-    if( key && key != Qt::Key_unknown && key != Qt::Key_Shift && key != Qt::Key_Control &&
+    // A read-only editor mirrors the desktop's assignment and records nothing, so
+    // pressing a key in it is not an edit to hand back on OK.
+    HotKeyEdit * const editor = qobject_cast< HotKeyEdit * >( watched );
+    if( ( !editor || !editor->isReadOnly() ) && key && key != Qt::Key_unknown &&
+        key != Qt::Key_Shift && key != Qt::Key_Control &&
         key != Qt::Key_Alt && key != Qt::Key_AltGr && key != Qt::Key_Meta )
     {
       if( watched == ui.mainWindowHotkey ) mainHotkeyEdited = true;
@@ -754,8 +768,42 @@ void Preferences::refreshHotkeyRows()
     { "scan-popup", ui.scanPopupHotkey, ui.enableScanPopupHotkey,
       ui.scanPopupHotkeyStatus, cfg.preferences.scanPopupHotkey, scanPopupHotkeyEdited },
   };
-  auto display = [&]( Row const & row ) {
+  // The desktop's assignment is the only value that is true once it exists, so the
+  // editor mirrors it instead of offering a chord it cannot apply (KDE keeps its
+  // own stored binding and ignores the requested trigger). A row the desktop has
+  // not assigned anything for stays editable: there the request is still the only
+  // thing GoldenDict can offer. `mirrored` reports which of the two happened.
+  auto display = [&]( Row const & row, bool & mirrored ) {
+    mirrored = false;
+    // A row that stopped mirroring goes back to the stored request, unless the
+    // user typed something this dialog must not discard.
+    if( row.editor->isReadOnly() && !row.edited )
+    {
+      row.editor->setReadOnly( false );
+      row.editor->setHotKey( row.stored );
+    }
     if( !row.enabled->isChecked() ) { row.label->setText( tr( "Disabled" ) ); return; }
+    if( active )
+      for( auto const & binding : bindings )
+        if( binding.id == row.id && !binding.triggerDescription.isEmpty() )
+        {
+          if( row.edited )
+          {
+            // A report never overwrites what the user typed: the request stays in
+            // the editor and the row says which value is which. The reported
+            // trigger is printed as reported -- never parsed, never compared.
+            row.label->setText( tr( "Requested %1 — not applied yet; the desktop has %2" )
+                                  .arg( row.editor->text(), binding.triggerDescription ) );
+            return;
+          }
+          row.editor->setReadOnly( true );
+          row.editor->setMirrorText( binding.triggerDescription );
+          // The field now carries the assignment, so a line repeating it would be
+          // the duplicate this page is trying to stop printing.
+          row.label->clear();
+          mirrored = true;
+          return;
+        }
     QString reason, trigger;
     Config::HotKey key = row.editor->getHotKey();
     // An enabled row whose key has never been recorded is not an unavailable
@@ -766,17 +814,6 @@ void Preferences::refreshHotkeyRows()
     { row.label->setText( tr( "Unavailable on Wayland: %1" ).arg( reason ) ); return; }
     if( wayland && !HotkeySyntax::preferredTrigger( key, &trigger, &reason ) )
     { row.label->setText( tr( "Unavailable on Wayland: %1" ).arg( reason ) ); return; }
-    if( active )
-      for( auto const & binding : bindings )
-        if( binding.id == row.id && !binding.triggerDescription.isEmpty() )
-        {
-          // Name the value as the desktop's assignment. Printing the bare
-          // description above this editor made two different chords read as one
-          // setting stated twice, and a bare chord followed by the next row's
-          // state read as that chord's state.
-          row.label->setText( tr( "Assigned by the desktop: %1" ).arg( binding.triggerDescription ) );
-          return;
-        }
     if( wayland && configureAvailable )
     { row.label->setText( tr( "Not assigned by the portal — use Configure shortcuts" ) ); return; }
     row.label->setText( state == HotkeyBackend::State::Bound && !wayland ? tr( "Active" ) :
@@ -795,6 +832,8 @@ void Preferences::refreshHotkeyRows()
         QSignalBlocker blocker( row.enabled );
         row.enabled->setChecked( false );
         row.editor->setEnabled( false );
+        row.editor->setReadOnly( false );
+        row.label->setVisible( true );
         row.label->setText( platform == QLatin1String( "xcb" )
           ? tr( "Not used on X11 — the Held keys setting on the Scan Popup tab applies" )
           : tr( "Not used outside Wayland sessions" ) );
@@ -805,14 +844,17 @@ void Preferences::refreshHotkeyRows()
     // with its box ticked (or the reverse), whatever order signals arrive in.
     row.editor->setEnabled( row.enabled->isChecked() );
     if( wayland )
-      // The editor only proposes; the desktop owns the assignment and can rewrite
-      // it in its own shortcut settings, so the two must not look like one value.
-      row.editor->setToolTip( tr( "The desktop assigns the active shortcut. This value is the requested "
-                                  "shortcut; the active one is shown below and is changed in the "
-                                  "desktop's own shortcut settings." ) );
-    display( row );
+      // The editor only proposes until the desktop assigns; after that it mirrors
+      // the assignment, so the two can never show different chords.
+      row.editor->setToolTip( tr( "The desktop assigns the active shortcut and owns it once assigned. "
+                                  "While no shortcut is assigned, this value is the requested one." ) );
+    row.label->setVisible( true );
+    bool mirrored = false;
+    display( row, mirrored );
     if( wayland && row.id == QLatin1String( "scan-popup" ) && row.enabled->isChecked() )
-      row.label->setText( row.label->text() + QStringLiteral( " · " ) + suffix );
+      row.label->setText( row.label->text().isEmpty() ? suffix
+                                                     : row.label->text() + QStringLiteral( " · " ) + suffix );
+    row.label->setVisible( !row.label->text().isEmpty() );
   }
   ui.configureShortcuts->setVisible( wayland );
   ui.configureShortcuts->setEnabled( wayland && configureAvailable );

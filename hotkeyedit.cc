@@ -3,6 +3,7 @@
 
 #include "hotkeyedit.hh"
 #include <QKeyEvent>
+#include <QSignalBlocker>
 
 #ifdef Q_OS_WIN
 #include <windows.h>
@@ -23,7 +24,23 @@ void HotKeyEdit::setHotKey( Config::HotKey const & hk )
   currentKey1 = hk.key1;
   currentKey2 = hk.key2;
 
+  // Loading a stored value is not an edit: it must not look like one to a
+  // listener that re-derives a row from what the user typed.
+  QSignalBlocker blocker( this );
   renderCurrentValue();
+}
+
+void HotKeyEdit::setMirrorText( QString const & text )
+{
+  currentModifiers = Qt::KeyboardModifiers();
+  currentKey1 = 0;
+  currentKey2 = 0;
+  continuingCombo = false;
+
+  // A mirror is published, not typed: it must not look like an edit to hand back
+  // on OK, and it must not re-enter the row refresh that published it.
+  QSignalBlocker blocker( this );
+  setText( text );
 }
 
 Config::HotKey HotKeyEdit::getHotKey() const
@@ -59,6 +76,15 @@ void HotKeyEdit::renderCurrentValue()
 
 void HotKeyEdit::keyPressEvent( QKeyEvent * event )
 {
+  // A read-only editor mirrors the combination the desktop assigned. It is not a
+  // recorder, so a keystroke must not rewrite the mirrored text (or the internal
+  // combination behind it) into something the desktop never granted.
+  if( isReadOnly() )
+  {
+    event->ignore();
+    return;
+  }
+
   int key = event->key();
   Qt::KeyboardModifiers modifiers = event->modifiers() & ~Qt::KeypadModifier;
 
@@ -120,6 +146,12 @@ void HotKeyEdit::keyPressEvent( QKeyEvent * event )
 
 void HotKeyEdit::keyReleaseEvent( QKeyEvent * event )
 {
+  if( isReadOnly() )
+  {
+    event->ignore();
+    return;
+  }
+
   switch( event->key() )
   {
     case 0:

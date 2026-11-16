@@ -22,6 +22,14 @@ public:
   HotKeyEdit( QWidget * parent = 0 );
 
   void setHotKey( Config::HotKey const & );
+
+  /// Shows a value this widget cannot record: a portal trigger description is
+  /// localized display text, so it can neither be parsed into the internal
+  /// combination nor offered back as a binding request. The combination is
+  /// cleared, so getHotKey() never reports the mirror as a recorded shortcut.
+  /// Callers make the widget read-only first.
+  void setMirrorText( QString const & text );
+
   Config::HotKey getHotKey() const;
 
 protected:
