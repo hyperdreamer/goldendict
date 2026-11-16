@@ -769,7 +769,14 @@ void Preferences::refreshHotkeyRows()
     if( active )
       for( auto const & binding : bindings )
         if( binding.id == row.id && !binding.triggerDescription.isEmpty() )
-        { row.label->setText( binding.triggerDescription ); return; }
+        {
+          // Name the value as the desktop's assignment. Printing the bare
+          // description above this editor made two different chords read as one
+          // setting stated twice, and a bare chord followed by the next row's
+          // state read as that chord's state.
+          row.label->setText( tr( "Assigned by the desktop: %1" ).arg( binding.triggerDescription ) );
+          return;
+        }
     if( wayland && configureAvailable )
     { row.label->setText( tr( "Not assigned by the portal — use Configure shortcuts" ) ); return; }
     row.label->setText( state == HotkeyBackend::State::Bound && !wayland ? tr( "Active" ) :
@@ -797,6 +804,12 @@ void Preferences::refreshHotkeyRows()
     // The editor follows its own checkbox, so a row can never stay disabled
     // with its box ticked (or the reverse), whatever order signals arrive in.
     row.editor->setEnabled( row.enabled->isChecked() );
+    if( wayland )
+      // The editor only proposes; the desktop owns the assignment and can rewrite
+      // it in its own shortcut settings, so the two must not look like one value.
+      row.editor->setToolTip( tr( "The desktop assigns the active shortcut. This value is the requested "
+                                  "shortcut; the active one is shown below and is changed in the "
+                                  "desktop's own shortcut settings." ) );
     display( row );
     if( wayland && row.id == QLatin1String( "scan-popup" ) && row.enabled->isChecked() )
       row.label->setText( row.label->text() + QStringLiteral( " · " ) + suffix );
