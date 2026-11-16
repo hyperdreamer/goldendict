@@ -511,6 +511,7 @@ the enablement of an existing button.
 | `Response(0)` carrying an unrequested ID | `BindShortcuts` | `failGeneration("…unknown shortcut id")` |
 | malformed `a(sa{sv})` payload | `ListShortcuts`, `BindShortcuts`, `ShortcutsChanged` | `failGeneration("…invalid data: …")` |
 | owner change while waiting | any | `failed("Portal service owner changed")` → `Unavailable`, `supported=false` |
+| owner appears or replaces the lost one | any | probe the new owner and re-bind the retained request; no `CreateSession` when nothing was requested |
 | `Session.Closed` while waiting | any | `Unavailable` |
 | rebind/`unbind()` while waiting | any | `cancelRequests()` → `Request.Close`; retired generation suppresses the reply |
 | late `CreateSession` reply after cancellation | `MachineAnswered` | buffered `session_handle` still closed during `CleanupMs` |
@@ -638,6 +639,13 @@ The fake portal needs three additive extensions; nothing existing changes.
     `unbind()`; release the method reply and assert exactly one `Session.Close` for
     the buffered handle and no state resurrection. This is the retained-cleanup
     probe review 3 B5 asked for.
+18. `portalOwnerReappearanceRebindsTheRetainedRequest` /
+    `portalAppearanceWithNoRetainedRequestCreatesNoSession` — withdraw the fake
+    portal's name and register a fresh fake: the backend re-probes and re-binds the
+    retained request to `Bound` with one session and one bind on the new instance,
+    the display republished and `configureAvailabilityChanged()` fired once per
+    transition; a backend that never requested bindings creates no session and
+    publishes no transition when a portal appears.
 18. Existing expectations that D3 intentionally changes: `reportedTriggersAreDisplayOnly`
     (`tests/tst_portal_hotkeys/tst_portal_hotkeys.cc:1585-1598`) supplies one entry
     with a non-empty trigger and one with an empty trigger and currently expects

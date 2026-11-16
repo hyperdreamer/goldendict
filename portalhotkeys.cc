@@ -1446,8 +1446,13 @@ void PortalBackend::ownerChanged( QString const &, QString const & newOwner )
     if ( !d || d->destroying )
         return;
 
+    QPointer< PortalBackend > alive( this );
+    const QString previousOwner = d->owner;
     const bool lost = newOwner.isEmpty()
-        || ( !d->owner.isEmpty() && d->owner != newOwner );
+        || ( !previousOwner.isEmpty() && previousOwner != newOwner );
+    // Any different name is a different portal instance, including the first one
+    // to appear after the backend was built against an empty name.
+    const bool replaced = !newOwner.isEmpty() && previousOwner != newOwner;
     // A vanished owner needs no Close and must never route one to its successor.
     if ( lost )
     {
@@ -1459,13 +1464,25 @@ void PortalBackend::ownerChanged( QString const &, QString const & newOwner )
     {
         d->supported = false;
         const quint64 generation = d->generation;
-        QPointer< PortalBackend > alive( this );
         publishConfigureAvailability();
         if ( !alive || generation != d->generation )
             return;
         if ( d->state != HotkeyBackend::State::Unsupported
              && d->state != HotkeyBackend::State::Closed )
             failGeneration( QStringLiteral( "Portal service owner changed" ), false );
+        // A stateChanged receiver may have retired this backend while the loss was
+        // being announced; the re-probe below must not touch freed state.
+        if ( !alive )
+            return;
+    }
+    // The portal session belongs to the instance that created it, so a replacement
+    // cannot serve the retired one. Probe the new instance and bind the retained
+    // request again instead of leaving global shortcuts dead until the application
+    // restarts. A request nobody made creates no session, so no consent UI appears.
+    if ( replaced && !d->desired.isEmpty() )
+    {
+        const QVector< HotkeyBinding > retained = d->desired;
+        beginGeneration( retained );
     }
 }
 

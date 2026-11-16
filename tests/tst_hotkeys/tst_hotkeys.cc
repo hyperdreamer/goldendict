@@ -662,6 +662,8 @@ private slots:
   void unassignedBindingLabelAndConfigureEnablement();
   void systemSettingsEditIsLabelledNotConflated();
   void configureAvailabilityFollowsBindCompletion();
+  void portalOwnerReappearanceRebindsTheRetainedRequest();
+  void portalAppearanceWithNoRetainedRequestCreatesNoSession();
   void lateCreateSessionSuccessClosesItsSessionAfterCancellation();
   void unsupportedBackendStillReportsState();
   void unsupportedFactory();
@@ -1884,7 +1886,7 @@ void TstHotkeys::configureAvailabilityFollowsBindCompletion()
 
   portal.reset( new TestSupport::FakePortal );
   QVERIFY2( portal->start( privateBus.fixtureConnection(), 2 ), qPrintable( portal->errorString() ) );
-  backend.bind( desired );
+  // The new owner is probed and the retained request re-bound without a bind() call.
   QVERIFY( QTest::qWaitFor( [ & ] { return backend.state() == State::Bound; }, 1500 ) );
   QVERIFY( backend.isSupported() );
   QVERIFY( backend.isConfigureAvailable() );
@@ -1907,6 +1909,111 @@ void TstHotkeys::configureAvailabilityFollowsBindCompletion()
             QStringLiteral( "ConfigureShortcuts requires an available session" ) );
   QCOMPARE( portal->count( QStringLiteral( "ConfigureShortcuts" ) ), configureCalls );
   QCOMPARE( portal->protocolViolations(), QStringList() );
+}
+
+void TstHotkeys::portalOwnerReappearanceRebindsTheRetainedRequest()
+{
+  using State = HotkeyBackend::State;
+  TestSupport::PrivateSessionBus privateBus;
+  QString reason;
+  QVERIFY2( privateBus.start( &reason ), qPrintable( reason ) );
+  auto portal = std::make_unique< TestSupport::FakePortal >();
+  QVERIFY2( portal->start( privateBus.fixtureConnection(), 2 ), qPrintable( portal->errorString() ) );
+
+  QDBusConnection client = privateBus.connection();
+  PortalBackend backend( client );
+  QVector< HotkeyBinding > const desired{
+    { QStringLiteral( "main-window" ), QStringLiteral( "Main window" ), QStringLiteral( "CTRL+ALT+g" ) }
+  };
+  QSignalSpy availability( &backend, &HotkeyBackend::configureAvailabilityChanged );
+  QSignalSpy states( &backend, &HotkeyBackend::stateChanged );
+  QVector< PortalBindingDisplay > reported;
+  connect( &backend, &HotkeyBackend::bindingsChanged, this,
+           [ & ]( QVector< PortalBindingDisplay > const & values ) { reported = values; } );
+
+  QVERIFY( QTest::qWaitFor( [ & ] { return backend.state() == State::Ready; }, 1500 ) );
+  backend.bind( desired );
+  QVERIFY( QTest::qWaitFor( [ & ] { return backend.state() == State::Bound; }, 1500 ) );
+  QVERIFY( backend.isConfigureAvailable() );
+  QCOMPARE( portal->count( QStringLiteral( "CreateSession" ) ), 1 );
+  QCOMPARE( portal->count( QStringLiteral( "BindShortcuts" ) ), 1 );
+
+  // A replaced portal cannot serve the session the previous instance owned. The
+  // retained request has to reach the new instance without the application being
+  // restarted, otherwise the user's shortcuts stay dead until the next launch.
+  portal->loseService();
+  QVERIFY( QTest::qWaitFor( [ & ] { return backend.state() == State::Unavailable; }, 1500 ) );
+  // The loss is reported as an owner change, not as a second probe of a name that
+  // has no owner.
+  QCOMPARE( states.last().at( 1 ).toString(), QStringLiteral( "Portal service owner changed" ) );
+  QVERIFY( !backend.isSupported() );
+  QVERIFY( !backend.isConfigureAvailable() );
+
+  reported.clear();
+  portal.reset( new TestSupport::FakePortal );
+  QVERIFY2( portal->start( privateBus.fixtureConnection(), 2 ), qPrintable( portal->errorString() ) );
+
+  QVERIFY( QTest::qWaitFor( [ & ] { return backend.state() == State::Bound; }, 2000 ) );
+  QVERIFY( backend.isSupported() );
+  QVERIFY( backend.isConfigureAvailable() );
+  // One session and one bind on the new instance: no duplicate attempt, and no
+  // BindShortcuts on the session that died with the old owner.
+  QCOMPARE( portal->count( QStringLiteral( "CreateSession" ) ), 1 );
+  QCOMPARE( portal->count( QStringLiteral( "BindShortcuts" ) ), 1 );
+  QCOMPARE( portal->bindCountForSession( portal->sessionPath() ), 1 );
+  QVERIFY( QTest::qWaitFor( [ & ] { return !reported.isEmpty(); }, 1500 ) );
+  QCOMPARE( reported.first().id, QStringLiteral( "main-window" ) );
+  QCOMPARE( availability.count(), 3 ); // bound, lost, bound again
+  QVERIFY( portal->protocolViolations().isEmpty() );
+}
+
+void TstHotkeys::portalAppearanceWithNoRetainedRequestCreatesNoSession()
+{
+  using State = HotkeyBackend::State;
+  TestSupport::PrivateSessionBus privateBus;
+  QString reason;
+  QVERIFY2( privateBus.start( &reason ), qPrintable( reason ) );
+  QDBusConnection client = privateBus.connection();
+  QVERIFY( client.connect( QString(), QStringLiteral( "/gd_test" ),
+                           QStringLiteral( "org.goldendict.Test" ), QStringLiteral( "Barrier" ),
+                           this, SLOT( wireBarrier( uint ) ) ) );
+
+  // No portal at construction: nothing has been requested, so nothing may be
+  // created or bound when one appears later.
+  PortalBackend backend( client );
+  QVERIFY( QTest::qWaitFor( [ & ] { return backend.state() == State::Unavailable; }, 1500 ) );
+  QVERIFY( !backend.isSupported() );
+  QSignalSpy states( &backend, &HotkeyBackend::stateChanged );
+  QSignalSpy availability( &backend, &HotkeyBackend::configureAvailabilityChanged );
+
+  TestSupport::FakePortal portal;
+  QVERIFY2( portal.start( privateBus.fixtureConnection(), 2 ), qPrintable( portal.errorString() ) );
+  QVERIFY( QTest::qWaitFor( [ & ] {
+    return !privateBus.fixtureConnection().interface()
+              ->serviceOwner( TestSupport::FakePortal::serviceName() )
+              .value()
+              .isEmpty();
+  }, 1000 ) );
+
+  // Flush the client's own connection before asserting a non-event.
+  const uint marker = ++nextMarker;
+  QDBusMessage barrier = QDBusMessage::createSignal(
+      QStringLiteral( "/gd_test" ), QStringLiteral( "org.goldendict.Test" ), QStringLiteral( "Barrier" ) );
+  barrier << marker;
+  QVERIFY( client.send( barrier ) );
+  QVERIFY( QTest::qWaitFor( [ this, marker ]() { return seenMarker == marker; }, 1000 ) );
+  QTest::qWait( 100 );
+
+  QCOMPARE( portal.count( QStringLiteral( "CreateSession" ) ), 0 );
+  QCOMPARE( portal.count( QStringLiteral( "BindShortcuts" ) ), 0 );
+  QCOMPARE( backend.state(), State::Unavailable );
+  // An appearance the backend has nothing to ask for is not a state transition.
+  QCOMPARE( states.count(), 0 );
+  QCOMPARE( availability.count(), 0 );
+  QVERIFY( !backend.isSupported() );
+  QVERIFY( client.disconnect( QString(), QStringLiteral( "/gd_test" ),
+                              QStringLiteral( "org.goldendict.Test" ), QStringLiteral( "Barrier" ),
+                              this, SLOT( wireBarrier( uint ) ) ) );
 }
 
 void TstHotkeys::lateCreateSessionSuccessClosesItsSessionAfterCancellation()

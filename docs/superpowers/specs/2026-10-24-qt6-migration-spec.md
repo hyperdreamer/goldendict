@@ -1716,7 +1716,9 @@ fallback. Hover translation/focus restoration stay disabled on Wayland.
 Use service `org.freedesktop.portal.Desktop`, path `/org/freedesktop/portal/desktop`,
 interface `org.freedesktop.portal.GlobalShortcuts`. Read version as uint via D-Bus
 Properties.Get. Subscribe to Activated, ShortcutsChanged, Session.Closed and service
-owner loss before creating/binding sessions. Marshal `a(sa{sv})` through an explicitly
+owner loss before creating/binding sessions. A service owner that appears or replaces
+the lost one is probed again and the retained request re-bound on the new instance; a
+backend holding no requested bindings creates no session. Marshal `a(sa{sv})` through an explicitly
 registered QtDBus structure/list; shortcut entry is `{QString id,QVariantMap properties}`,
 not a stringified QVariant. `session_handle` in CreateSession results is a **string**
 validated as an object path; Bind/List inputs carry QDBusObjectPath.

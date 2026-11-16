@@ -416,6 +416,7 @@ Every existing request, generation, owner, and cleanup guard remains active unde
 | `Response(0)` carries an unrequested ID | `BindShortcuts` | protocol failure through `failGeneration("...unknown shortcut id")` |
 | Malformed `a(sa{sv})` payload | `ListShortcuts`, `BindShortcuts`, or `ShortcutsChanged` | protocol failure through `failGeneration("...invalid data: ...")` |
 | Service owner changes while waiting | any | fail with `Portal service owner changed`; transition to `Unavailable` and set `supported=false` |
+| A service owner appears or replaces the lost one | any | probe the new owner and re-bind the retained request; a backend holding no request issues no `CreateSession` |
 | `Session.Closed` arrives while waiting | any | transition to `Unavailable` |
 | Rebind or `unbind()` arrives while waiting | any | `cancelRequests()` issues `Request.Close`; retired-generation guards suppress late delivery |
 | Late `CreateSession` success after cancellation | machine-answered request | retained handle is closed during `CleanupMs`; it never becomes current |
@@ -497,12 +498,20 @@ refuses with the unavailable-session explanation and sends no ConfigureShortcuts
     `tests/tst_portal_hotkeys/tst_portal_hotkeys.cc:1585-1598`: with one non-empty and one empty
     trigger, expect `Partial` and the unassigned label for the second ID. `boundEntries` remains
     verbatim; only the suite expectation changes.
+19. `portalOwnerReappearanceRebindsTheRetainedRequest` and
+    `portalAppearanceWithNoRetainedRequestCreatesNoSession`: over the private bus, bind, withdraw the
+    fake portal's name, then register a fresh fake. Assert the backend reaches `Bound` again with no
+    `bind()` call — one `CreateSession` and one `BindShortcuts` on the new instance, exactly one bind
+    for that session, the display republished, and `configureAvailabilityChanged()` exactly three times
+    (bound, lost, bound) — and that the loss explanation stays `Portal service owner changed`. With no
+    retained request (no `bind()` ever issued), assert a portal appearing creates no session and emits
+    no state or capability transition.
 
 Final per-suite inventory, with no change to either test project file:
 
 - `tst_portal_hotkeys` (numbers 1-9 and 18): real portal request ordering, private-bus wiring, session
   lifecycle, the activity rule through both reply paths, and case 18 as an update to an existing test.
-- `tst_hotkeys` (numbers 10-17): the install-gate decision and memory, the source-shape call check,
+- `tst_hotkeys` (numbers 10-17 and 19): the install-gate decision and memory, the source-shape call check,
   and the `Preferences` rendering contract. It already links `hotkeybackend.cc`, `portalhotkeys.cc`,
   `preferences.cc`, `preferences.ui`, and `tests/support/fixtures.cc`.
 
@@ -518,6 +527,9 @@ Run each mutation in a disposable copy, assert the named test fails, restore the
 | Delete the `UserConsent && established` early return in `expired()` | 1 |
 | Apply `timer.stop()` to every policy | 2 |
 | Clear `candidates` in `cancel()` | 17 |
+| Delete the replaced-owner re-probe block | 19 |
+| Drop the retained-request guard from the re-probe | 19 |
+| Treat a vanished owner as a replacement | 19 |
 | Skip the retired-branch `close(session, SessionInterface)` in `deliver()` | 17 |
 | Classify Bind by ID presence | 6 |
 | Classify ShortcutsChanged by ID presence | 7 |

@@ -733,6 +733,7 @@ UNSUPPORTED ──service present──▶ SESSION_CREATING ──Response(sessi
 SESSION_READY ──BindShortcuts(once)──▶ BINDING ──Response(subset)──▶ BOUND | PARTIAL | DENIED
 BOUND/PARTIAL ──edit──▶ Request.Close(outstanding) + Session.Close(old) ──▶ SESSION_CREATING
 any ──ServiceUnregistered / session closed / error──▶ UNAVAILABLE
+UNAVAILABLE ──new or replaced service owner──▶ SESSION_CREATING (retained request only)
 shutdown ──Session.Close──▶ closed
 ```
 
@@ -759,6 +760,11 @@ Rules:
 6. Activation tokens are forwarded unchanged to `activated(id, token)`.
 7. Shutdown closes the session; session closure, service loss and denial are normal
    states with UI consequences, logged once.
+8. A portal owner that appears or replaces the lost one is a fresh instance and cannot
+   serve the retired session. When the backend still holds a requested binding set it
+   re-probes that owner and re-binds the retained set on the new instance — no
+   application restart, and never a second bind on the dead session. With no requested
+   bindings no session is created, so no consent UI appears.
 
 `tst_portal_hotkeys` runs against a fake portal on a private D-Bus session and covers:
 fast and delayed responses, denial, partial binding, `Request.Close` before response,
@@ -891,7 +897,7 @@ groups, preferences dialogs, and the four hotkey preference states.
 | Scheme job cancelled/destroyed | `req->cancel()`, disconnect, device destroyed with the job |
 | Portal absent/denied/version < 1 | Hotkeys disabled with an explanation; clipboard scanning and explicit lookup remain |
 | `BindShortcuts` subset/empty | Bindings reported unavailable; new session only when the user edits |
-| Portal request timeout / session closed / service loss | `UNAVAILABLE`, bindings cleared, UI updated, single log line, no retry loop |
+| Portal request timeout / session closed / service loss | `UNAVAILABLE`, bindings cleared, UI updated, single log line; no retry loop — only a fresh service owner re-probes the retained request |
 | Website frame blocked by `X-Frame-Options` | Frame stays empty; log + preferences hint to use inline mode |
 | Article navigates while scripts are queued | Generation bump drops stale inbound and outbound events |
 | Save cancelled / navigated | Temp directory removed; no partial output |
