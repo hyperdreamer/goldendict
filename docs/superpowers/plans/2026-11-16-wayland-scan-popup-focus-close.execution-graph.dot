@@ -1,0 +1,18 @@
+digraph wayland_scan_popup_focus_close {
+  rankdir=LR;
+  node [shape=box, style=rounded];
+  subgraph cluster_popup_dismiss {
+    label = "lane popup-dismiss";
+    T-001 [label="1. Establish the pure rules and production-linked matrix suite\nadvanced"];
+    T-002 [label="2. Implement and prove the closer event lifecycle\nadvanced"];
+    T-003 [label="3. Wire the closer and opening requests into ScanPopup\nadvanced"];
+    T-004 [label="4. Register the module and enforce the closed suite inventory\nadvanced"];
+    T-005 [label="5. Document the focus behavior and evidence limits\nfast"];
+    T-006 [label="6. Run the application and complete acceptance gate\nstandard"];
+    T-001 -> T-002;
+    T-002 -> T-003;
+    T-003 -> T-004;
+    T-004 -> T-005;
+    T-005 -> T-006;
+  }
+}

@@ -1,0 +1,142 @@
+schema_version: 1
+source_plan:
+  path: docs/superpowers/plans/2026-11-16-wayland-scan-popup-focus-close.md
+  sha256: 8ff0cbde75d084c34423dd27fca310dcc91858fea93ecd6bfe1b84f81ba08eca
+lanes:
+  - id: popup-dismiss
+    task_ids: [T-001, T-002, T-003, T-004, T-005, T-006]
+tasks:
+  - id: T-001
+    plan_task: 1
+    title: "Establish the pure rules and production-linked matrix suite"
+    lane: popup-dismiss
+    sequence: 1
+    implementer_tier: advanced
+    depends_on: []
+    ownership: ["popupdismiss.hh", "popupdismiss.cc", "tests/tst_popup_dismiss/tst_popup_dismiss.cc", "tests/tst_popup_dismiss/tst_popup_dismiss.pro"]
+    exclusive_resources: []
+    interfaces:
+      produces:
+        - id: popupdismiss.rules
+          signature_sha256: 9432141e29b57576f073a4b43a1fe1d1a5000b603bc765915e2650070c2d4a49
+        - id: popupdismiss.suite
+          signature_sha256: d15d6ab8e2621dcd6c46311ced3ba954efa051035aee9eb4825d02f46f2aa185
+      consumes:
+    validation:
+      - argv: ["qmake6", "tests/tst_popup_dismiss/tst_popup_dismiss.pro", "-o", "tests/tst_popup_dismiss/Makefile"]
+        expect_exit: 0
+      - argv: ["make", "-C", "tests/tst_popup_dismiss", "-j8"]
+        expect_exit: 0
+  - id: T-002
+    plan_task: 2
+    title: "Implement and prove the closer event lifecycle"
+    lane: popup-dismiss
+    sequence: 2
+    implementer_tier: advanced
+    depends_on: [T-001]
+    ownership: ["popupdismiss.hh", "popupdismiss.cc", "tests/tst_popup_dismiss/**"]
+    exclusive_resources: []
+    interfaces:
+      produces:
+        - id: popupdismiss.closer
+          signature_sha256: c3830671390551465c7f52bdcd61fcdd5c460902fd624d7ced6f07275e7caacd
+      consumes:
+        - id: popupdismiss.rules
+          signature_sha256: 9432141e29b57576f073a4b43a1fe1d1a5000b603bc765915e2650070c2d4a49
+    validation:
+      - argv: ["qmake6", "tests/tst_popup_dismiss/tst_popup_dismiss.pro", "-o", "tests/tst_popup_dismiss/Makefile"]
+        expect_exit: 0
+      - argv: ["make", "-C", "tests/tst_popup_dismiss", "-j8"]
+        expect_exit: 0
+  - id: T-003
+    plan_task: 3
+    title: "Wire the closer and opening requests into ScanPopup"
+    lane: popup-dismiss
+    sequence: 3
+    implementer_tier: advanced
+    depends_on: [T-002]
+    ownership: ["scanpopup.hh", "scanpopup.cc", "tests/tst_popup_dismiss/**"]
+    exclusive_resources: []
+    interfaces:
+      produces:
+        - id: scanpopup.wiring
+          signature_sha256: cdfbd360a79410fafc379c93766270460507aaef999e2918e3f5d7340d16511e
+      consumes:
+        - id: popupdismiss.rules
+          signature_sha256: 9432141e29b57576f073a4b43a1fe1d1a5000b603bc765915e2650070c2d4a49
+        - id: popupdismiss.closer
+          signature_sha256: c3830671390551465c7f52bdcd61fcdd5c460902fd624d7ced6f07275e7caacd
+    validation:
+      - argv: ["qmake6", "tests/tst_popup_dismiss/tst_popup_dismiss.pro", "-o", "tests/tst_popup_dismiss/Makefile"]
+        expect_exit: 0
+      - argv: ["make", "-C", "tests/tst_popup_dismiss", "-j8"]
+        expect_exit: 0
+  - id: T-004
+    plan_task: 4
+    title: "Register the module and enforce the closed suite inventory"
+    lane: popup-dismiss
+    sequence: 4
+    implementer_tier: advanced
+    depends_on: [T-003]
+    ownership: ["goldendict.pro", "tests/tests.pro", "tests/tst_popup_dismiss/**"]
+    exclusive_resources: []
+    interfaces:
+      produces:
+        - id: build.registration
+          signature_sha256: a0c0de225c811445256fe1b19d54a6a0b18ae61a78eb1c5d319ac376d4ca4e14
+      consumes:
+        - id: popupdismiss.closer
+          signature_sha256: c3830671390551465c7f52bdcd61fcdd5c460902fd624d7ced6f07275e7caacd
+        - id: popupdismiss.suite
+          signature_sha256: d15d6ab8e2621dcd6c46311ced3ba954efa051035aee9eb4825d02f46f2aa185
+    validation:
+      - argv: ["qmake6", "tests/tests.pro", "-o", "tests/Makefile"]
+        expect_exit: 0
+      - argv: ["make", "-C", "tests", "-j8"]
+        expect_exit: 0
+      - argv: ["env", "QT_QPA_PLATFORM=xcb", "xvfb-run", "-a", "timeout", "900", "make", "-C", "tests", "check"]
+        expect_exit: 0
+  - id: T-005
+    plan_task: 5
+    title: "Document the focus behavior and evidence limits"
+    lane: popup-dismiss
+    sequence: 5
+    implementer_tier: fast
+    depends_on: [T-004]
+    ownership: ["docs/wayland-limitations.md"]
+    exclusive_resources: []
+    interfaces:
+      produces:
+        - id: docs.limits
+          signature_sha256: 5ed519ba6751f0028bb043602f05439a4b1e1d401d281c15fade21ef878cfdb5
+      consumes:
+        - id: scanpopup.wiring
+          signature_sha256: cdfbd360a79410fafc379c93766270460507aaef999e2918e3f5d7340d16511e
+    validation:
+      - argv: ["grep", "-q", "requests keyboard activation when it opens", "docs/wayland-limitations.md"]
+        expect_exit: 0
+  - id: T-006
+    plan_task: 6
+    title: "Run the application and complete acceptance gate"
+    lane: popup-dismiss
+    sequence: 6
+    implementer_tier: standard
+    depends_on: [T-005]
+    ownership: []
+    exclusive_resources: ["repo-build-tree"]
+    interfaces:
+      produces:
+        - id: acceptance.report
+          signature_sha256: 195456bdfec667eaa77764bbfb366dc6d8c27956a49eb05fb50fd965e0540120
+      consumes:
+        - id: build.registration
+          signature_sha256: a0c0de225c811445256fe1b19d54a6a0b18ae61a78eb1c5d319ac376d4ca4e14
+        - id: docs.limits
+          signature_sha256: 5ed519ba6751f0028bb043602f05439a4b1e1d401d281c15fade21ef878cfdb5
+        - id: popupdismiss.suite
+          signature_sha256: d15d6ab8e2621dcd6c46311ced3ba954efa051035aee9eb4825d02f46f2aa185
+    validation:
+      - argv: ["qmake6", "goldendict.pro", "-o", "Makefile"]
+        expect_exit: 0
+      - argv: ["make", "-j8"]
+        expect_exit: 0
