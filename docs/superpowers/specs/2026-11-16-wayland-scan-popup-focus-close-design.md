@@ -1,6 +1,6 @@
 # Wayland scan popup: close when it loses focus
 
-Status: design revision 7, for review. Run `pm-run-20261116-123313-27afee37`,
+Status: design revision 8, for review. Run `pm-run-20261116-123313-27afee37`,
 topic `wayland-scan-popup-focus-close`.
 Review history: R1 → 14 findings; R2 → 7; R3 → 13; R4 → 15 (1 blocker, which the
 activation-state model could not answer); R5 → 5 (0 blockers). Revision 5 replaced that
@@ -14,7 +14,11 @@ popup widget Qt reports, starting the transient chain at that popup's own window
 ordinary dialog (which is also given a transient parent) can never be mistaken for a menu;
 `isTransientOf()` is strict about identity; and the menu fixtures now assert the real
 focus identity on the popup window, which is what makes deleting the `OwnPopup` branch
-fatal. §13 is the finding-to-change ledger.
+fatal. Revision 8 closes R7: transient ancestry is gone from the classifier entirely, so
+a dialog can never be taken for a menu whatever its transient parent; an owned menu is now
+recognised by identity *plus* the popup window type, which is the discriminator Qt itself
+provides; and the application-inactive branch has a runtime fixture that delivers the real
+signal to the real connection. §13 is the finding-to-change ledger.
 
 **Scope limit of this document.** It specifies a design, not a test implementation.
 Most of the behaviour lives in `ScanPopup`, a translation unit no suite links (it needs
@@ -238,11 +242,11 @@ bool armedAfterShow( QWindow const * ownWindow, QWindow const * focusWindow );
 /// being taken for one of its own menus. (R4-m1)
 bool isOwnedPopup( QWidget const * owner, QWidget const * candidate );
 
-/// True when `window` has `ancestor` in its transient-parent chain, **strictly**:
-/// `window == ancestor` is false. Null-safe. Used only from an owned popup's own window
-/// upwards, so an ordinary dialog — which is also given a transient parent — can never
-/// be classified as one of the popup's menus. (R5-M1, R6-M1)
-bool isTransientOf( QWindow const * window, QWindow const * ancestor );
+/// True when `type` names a popup widget window — a `QMenu`, a combo dropdown, a
+/// context menu — and therefore never a dialog, whose type is `Qt::Dialog`. This is the
+/// only discriminator the classifier uses; transient ancestry is deliberately not used,
+/// because Qt gives ordinary dialogs a transient parent too. (R6-M1, R7-B1)
+bool isPopupWindowType( Qt::WindowType type );
 
 /// Watches one top-level window's focus and hides it when the rule says so.
 ///
@@ -322,27 +326,27 @@ if( !window ) return FocusDestination::Foreign;          // the window is gone
 if( !focusWindow ) return FocusDestination::None;
 if( focusWindow == window->windowHandle() ) return FocusDestination::OwnWindow;
 
-// A menu or combo dropdown is recognised only through the popup widget Qt reports,
-// and only when that popup belongs to us. The transient-parent chain is consulted
-// from the popup's own window, never from an arbitrary window to ours: an ordinary
-// dialog is also given a transient parent, and must stay Foreign so that D8 holds.
+// A menu or combo dropdown is recognised by identity alone: the popup widget Qt
+// reports must belong to us, and the focused window must be that popup's own window
+// and of popup type. Transient ancestry is NOT consulted — Qt gives ordinary dialogs a
+// transient parent too, so an ancestry walk would classify a dialog as a menu and keep
+// an unpinned popup visible (R7-B1). A nested submenu is the active popup itself, so
+// identity covers it without a chain.
 QWidget * const activePopup = QApplication::activePopupWidget();
 if( isOwnedPopup( window, activePopup ) )
 {
   QWindow * const popupHandle = activePopup->windowHandle();
-  if( popupHandle &&
-      ( focusWindow == popupHandle || isTransientOf( focusWindow, popupHandle ) ) )
+  if( popupHandle && focusWindow == popupHandle &&
+      isPopupWindowType( focusWindow->type() ) )
     return FocusDestination::OwnPopup;
 }
 
 return FocusDestination::Foreign;
 ```
 
-`isTransientOf()` walks `QWindow::transientParent()` upwards and is **strict** about
-identity, so an owner can never be its own transient ancestor. Because the walk starts at
-the popup's own window, it covers a nested submenu (whose chain reaches the outer menu and
-then the owner) without ever classifying a dialog as a menu — the property D8 depends on.
-(R5-M1, R6-M1, R6-M2)
+Nothing here reads a parent chain, so there is no ancestry edge case to reason about: a
+window is one of the popup's menus only if Qt itself reports it as the active popup and
+its own window holds focus. (R5-M1, R6-M2, R7-B1, R7-M3)
 
 `dismiss( reason )` returns immediately when `dismissing` is set, otherwise sets it,
 logs, calls the handler under a `QPointer` guard, and clears the flag only if the closer
@@ -465,11 +469,11 @@ different window. (R4-m1)
 `armedAfterShow`: same handle → true; different handle → false; null own handle (no
 native handle yet) → false; null focus window → false.
 
-`isTransientOf`: the same window on both sides → **false** (strict identity); a direct
-transient child → true; a nested transient grandchild → true; an unrelated window →
-false; null on either side → false. The strict identity is what stops a chain-only
-recognition from matching the owner itself, and it is the mutant that keeps the mapping
-honest. (R5-M1, R6-M2)
+`isPopupWindowType`: `Qt::Popup` → true; `Qt::ToolTip` → false (not a menu the popup
+owns); `Qt::Dialog` → **false**, which is the discriminator that keeps a dialog from being
+classified as one of the popup's menus; `Qt::Tool` → false; `Qt::Window` → false. The
+runtime fixtures then assert the real window types: a `QMenu`-like `Qt::Popup` widget is
+accepted and a `QDialog` is not. (R7-B1)
 
 ### 8.2 Runtime behaviour of the production `FocusLossCloser`
 
@@ -495,22 +499,28 @@ transitions it relies on instead of assuming them: each step waits for
    menu as `Foreign` and hides immediately, which this assertion catches. Focus is then
    moved to `second`, and the popup must hide. (R5-M1, R6-M2)
 3a. **a nested owned menu is still `OwnPopup`** — a submenu `Qt::Popup` widget is opened
-    from the first menu; the fixture asserts `focusWindow() == submenu.windowHandle()`,
-    `activePopupWidget() == &submenu`, and `isTransientOf( submenu.windowHandle(),
-    menu.windowHandle() )`, so a two-level chain is exercised rather than asserted by
-    construction. The popup survives while the submenu holds focus, and hides when focus
-    moves to `second`.
-4. **opening the popup's own dialog hides it** — a `QDialog` parented to `first` is shown,
-    with `QGuiApplication::focusWindow() == dialog.windowHandle()` asserted first. This
-    dialog also has `first`'s handle as its transient parent, so a rule that recognised
-    menus by transient ancestry alone would keep the popup; the fixture therefore pins
-    D8 as well as the recognition scope: the handler runs once, `first` is hidden and the
-    dialog stays visible. (R6-M1)
+    from the first menu; the fixture asserts `focusWindow() == submenu.windowHandle()` and
+    `activePopupWidget() == &submenu`, i.e. the *innermost* popup is the active one and
+    holds focus, which is what the identity-only classifier requires. The popup survives
+    while the submenu holds focus, and hides when focus moves to `second`. (R7-M3)
+4. **opening the popup's own dialog hides it** — `first` is given production-like
+    `Qt::Tool` flags, and a `QDialog` parented to it is shown, with
+    `QGuiApplication::focusWindow() == dialog.windowHandle()` asserted first and the
+    dialog's window type asserted to be `Qt::Dialog`. A classifier that used transient
+    ancestry, or that omitted the popup-type discriminator, would classify this dialog as
+    `OwnPopup` and keep `first`; the fixture therefore pins D8 and the classifier scope:
+    the handler runs once, `first` is hidden and the dialog stays visible. (R6-M1, R7-M2)
 5. **focus returning to the popup keeps it** — after 3, the menu is closed; the focus
    transition back to `first` is asserted; the handler never ran and `first` is visible.
-6. **the application losing focus hides it** — the `ApplicationInactive` branch cannot be
-   driven without a second process on this host; the pure matrix covers it, and the
-   runtime layer states that it makes no claim here (§8.4).
+6. **the application losing focus hides it, through the production connection** — with
+   `first` armed, visible and unpinned, the application-state signal is delivered to the
+   real application object with
+   `QMetaObject::invokeMethod( qApp, "applicationStateChanged", Q_ARG( Qt::ApplicationState,
+   Qt::ApplicationInactive ) )`, which runs the production slot and not a copy of it. The
+   handler must run once. The same drive with `setPinned( true )`, and again with an
+   unarmed window, must not dismiss. Deleting the `applicationStateChanged` connection
+   leaves this fixture green-free: nothing would run and the first assertion fails.
+   (R7-M4)
 7. **re-show arms only on a real activation** — after a hide, `first` is shown while
    `second` keeps focus (asserted); activating a third window then does not dismiss
    `first`.
@@ -549,6 +559,10 @@ and the assignment line inside that region). (R4-M11)
 1. `scanpopup.hh` includes `popupdismiss.hh`, declares the
    `PopupDismiss::FocusLossCloser` member, and adds **no** `event(` / `changeEvent(`
    override.
+1b. `popupdismiss.cc`: the closer connects `QGuiApplication::applicationStateChanged`
+   to its own handler with `this` as the receiver, and that handler dismisses only on
+   `Qt::ApplicationInactive`. Deleting the connection fails this assertion; the runtime
+   fixture in §8.2(6) fails too, so the check has a behavioural twin. (R7-M4)
 1a. `popupdismiss.cc`: the `Show` branch assigns `armed` from
    `PopupDismiss::armedAfterShow( window->windowHandle(),
    QGuiApplication::focusWindow() )` and the `Hide` branch sets `armed = false`. Deleting
@@ -710,4 +724,13 @@ requirement, and the acceptance commands.
 | finding | severity | change |
 | --- | --- | --- |
 | the transient-chain shortcut also recognised ordinary dialogs as `OwnPopup`, contradicting D8 | major | §6.2 recognises a menu **only** when `activePopupWidget()` belongs to the popup, and starts the chain at that popup's own window; `isTransientOf()` is strict about identity; §8.2(4) pins that a dialog with the popup as transient parent still hides (R6-M1) |
-| fixtures 3/3a could pass while `OwnPopup` was never taken | major | §8.2(3,3a) now assert `QGuiApplication::focusWindow()` is the popup/submenu handle, so deleting the `OwnPopup` branch classifies it as `Foreign` and the "must not hide" assertion fails; §8.1 makes `isTransientOf( x, x )` false (R6-M2) |
+| fixtures 3/3a could pass while `OwnPopup` was never taken | major | §8.2(3,3a) now assert `QGuiApplication::focusWindow()` is the popup/submenu handle, so deleting the `OwnPopup` branch classifies it as `Foreign` and the "must not hide" assertion fails (R6-M2) |
+
+### Round 7 → 8
+
+| finding | severity | change |
+| --- | --- | --- |
+| a dialog whose transient parent is an owned menu was still classified `OwnPopup` | **blocker** | transient ancestry is removed from the classifier; `OwnPopup` requires the owned active popup's own window to hold focus **and** `isPopupWindowType()` to be true, so `Qt::Dialog` can never match (§6.1, §6.2, §8.1) (R7-B1) |
+| the dialog fixture did not assert the transient relationship it claimed to kill | major | §8.2(4) now uses production-like `Qt::Tool` flags, asserts the dialog's focus and its `Qt::Dialog` type, so the ancestry-only mutant is red regardless of what Qt sets as transient parent (R7-M2) |
+| the nested-menu fixture short-circuited the chain branch | major | the chain branch no longer exists; §8.2(3a) asserts the innermost popup is the active one and holds focus, which is exactly what the identity-only classifier needs (R7-M3) |
+| the `applicationStateChanged` connection was untested | major | §8.2(6) delivers the real signal to the real application object and requires the production slot to act, with pinned and unarmed negatives; §8.3(1b) pins the connection (R7-M4) |
