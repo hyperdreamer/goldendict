@@ -182,7 +182,7 @@ tasks:
     sequence: 8
     implementer_tier: standard
     depends_on: [T-007]
-    ownership: []
+    ownership: ["tests/tst_resource_payload/**"]
     exclusive_resources: []
     interfaces:
       produces: []
@@ -240,7 +240,7 @@ tasks:
     sequence: 10
     implementer_tier: advanced
     depends_on: [T-009]
-    ownership: []
+    ownership: ["tests/tst_resource_payload/**"]
     exclusive_resources: []
     interfaces:
       produces: []
@@ -269,7 +269,7 @@ tasks:
     sequence: 11
     implementer_tier: advanced
     depends_on: [T-010]
-    ownership: []
+    ownership: ["tests/tst_resource_payload/**"]
     exclusive_resources: []
     interfaces:
       produces: []
@@ -298,7 +298,7 @@ tasks:
     sequence: 12
     implementer_tier: advanced
     depends_on: [T-011]
-    ownership: []
+    ownership: ["tests/tst_resource_payload/**", "tests/fixtures/imagepayload/**"]
     exclusive_resources: []
     interfaces:
       produces: []
