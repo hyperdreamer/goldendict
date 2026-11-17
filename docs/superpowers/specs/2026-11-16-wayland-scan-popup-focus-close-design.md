@@ -1,6 +1,6 @@
 # Wayland scan popup: close when it loses focus
 
-Status: design revision 6, for review. Run `pm-run-20261116-123313-27afee37`,
+Status: design revision 7, for review. Run `pm-run-20261116-123313-27afee37`,
 topic `wayland-scan-popup-focus-close`.
 Review history: R1 → 14 findings; R2 → 7; R3 → 13; R4 → 15 (1 blocker, which the
 activation-state model could not answer); R5 → 5 (0 blockers). Revision 5 replaced that
@@ -9,7 +9,12 @@ timer, no suppression state. Revision 6 closes R5: the owned-popup mapping now f
 the focused window's transient-parent chain (so nested menus classify correctly and the
 fixture fails instead of skipping), the arming-after-show rule moved into a pure function
 with its own mutation-pinning assertion, and the last three partials are scoped or
-guarded. §13 is the finding-to-change ledger.
+guarded. Revision 7 closes R6: an owned popup is now recognised **only** through the
+popup widget Qt reports, starting the transient chain at that popup's own window, so an
+ordinary dialog (which is also given a transient parent) can never be mistaken for a menu;
+`isTransientOf()` is strict about identity; and the menu fixtures now assert the real
+focus identity on the popup window, which is what makes deleting the `OwnPopup` branch
+fatal. §13 is the finding-to-change ledger.
 
 **Scope limit of this document.** It specifies a design, not a test implementation.
 Most of the behaviour lives in `ScanPopup`, a translation unit no suite links (it needs
@@ -233,9 +238,10 @@ bool armedAfterShow( QWindow const * ownWindow, QWindow const * focusWindow );
 /// being taken for one of its own menus. (R4-m1)
 bool isOwnedPopup( QWidget const * owner, QWidget const * candidate );
 
-/// True when `window` is `ancestor` or has it in its transient-parent chain. Null-safe;
-/// recognises the popup widgets a menu or combo dropdown is reported as, including
-/// nested menus. (R5-M1)
+/// True when `window` has `ancestor` in its transient-parent chain, **strictly**:
+/// `window == ancestor` is false. Null-safe. Used only from an owned popup's own window
+/// upwards, so an ordinary dialog — which is also given a transient parent — can never
+/// be classified as one of the popup's menus. (R5-M1, R6-M1)
 bool isTransientOf( QWindow const * window, QWindow const * ancestor );
 
 /// Watches one top-level window's focus and hides it when the rule says so.
@@ -316,27 +322,27 @@ if( !window ) return FocusDestination::Foreign;          // the window is gone
 if( !focusWindow ) return FocusDestination::None;
 if( focusWindow == window->windowHandle() ) return FocusDestination::OwnWindow;
 
-// A menu or combo dropdown is recognised by either signal the platform provides:
-// the popup it reports, or the transient-parent chain from the focused window up to
-// the popup's own window. Nested menus satisfy the chain even when the reported
-// active popup is not the focused one.
+// A menu or combo dropdown is recognised only through the popup widget Qt reports,
+// and only when that popup belongs to us. The transient-parent chain is consulted
+// from the popup's own window, never from an arbitrary window to ours: an ordinary
+// dialog is also given a transient parent, and must stay Foreign so that D8 holds.
 QWidget * const activePopup = QApplication::activePopupWidget();
-if( isOwnedPopup( window, activePopup ) &&
-    focusWindow == activePopup->windowHandle() )
-  return FocusDestination::OwnPopup;
-if( isTransientOf( focusWindow, window->windowHandle() ) )
-  return FocusDestination::OwnPopup;
+if( isOwnedPopup( window, activePopup ) )
+{
+  QWindow * const popupHandle = activePopup->windowHandle();
+  if( popupHandle &&
+      ( focusWindow == popupHandle || isTransientOf( focusWindow, popupHandle ) ) )
+    return FocusDestination::OwnPopup;
+}
 
 return FocusDestination::Foreign;
 ```
 
-`isTransientOf()` walks `QWindow::transientParent()` from the focused window upwards and
-reports whether it reaches the popup's own window. That is the chain Qt sets for menus
-and dropdowns on both `xcb` and Wayland, and it is why nested menus and a menu whose
-own focus window differs from `activePopupWidget()` are still classified as `OwnPopup`.
-Both signals are required, not optional: the runtime fixture asserts that a real owned
-menu satisfies at least one of them, so the mapping cannot silently degrade to
-`Foreign`. (R5-M1)
+`isTransientOf()` walks `QWindow::transientParent()` upwards and is **strict** about
+identity, so an owner can never be its own transient ancestor. Because the walk starts at
+the popup's own window, it covers a nested submenu (whose chain reaches the outer menu and
+then the owner) without ever classifying a dialog as a menu — the property D8 depends on.
+(R5-M1, R6-M1, R6-M2)
 
 `dismiss( reason )` returns immediately when `dismissing` is set, otherwise sets it,
 logs, calls the handler under a `QPointer` guard, and clears the flag only if the closer
@@ -459,10 +465,11 @@ different window. (R4-m1)
 `armedAfterShow`: same handle → true; different handle → false; null own handle (no
 native handle yet) → false; null focus window → false.
 
-`isTransientOf`: the focused window itself → true; a direct transient child → true; a
-nested transient grandchild → true; an unrelated window → false; null on either side →
-false. This is what keeps nested menus classified as `OwnPopup` without depending on
-which window the platform reports as the active popup. (R5-M1)
+`isTransientOf`: the same window on both sides → **false** (strict identity); a direct
+transient child → true; a nested transient grandchild → true; an unrelated window →
+false; null on either side → false. The strict identity is what stops a chain-only
+recognition from matching the owner itself, and it is the mutant that keeps the mapping
+honest. (R5-M1, R6-M2)
 
 ### 8.2 Runtime behaviour of the production `FocusLossCloser`
 
@@ -478,19 +485,27 @@ transitions it relies on instead of assuming them: each step waits for
    `QTRY_COMPARE` the handler ran once and `first` is hidden.
 2. **pinned does not hide** — the same drive with `setPinned( true )`; the handler never
    runs and the window stays visible.
-3. **a menu of the popup's own keeps it, and the mapping is proven, not skipped** —
+3. **a menu of the popup's own keeps it, and the mapping is really exercised** —
    `first` activated; an owned `QWidget` with `setWindowFlags( Qt::Popup )` shown. The
-   fixture asserts the **recognition predicate** the production code uses: either
-   `activePopupWidget()` is that widget and `focusWindow()` is its handle, or
-   `isTransientOf( focusWindow(), first->windowHandle() )` is true. If neither holds, the
-   fixture **fails** — that is a platform fact the design depends on, not an environment
-   excuse to skip. While that holds, the handler never runs. (R5-M1)
-3a. **a nested owned menu is still `OwnPopup`** — a second `Qt::Popup` widget is opened
-    from the first menu (or parented to it) and the recognition predicate is asserted
-    again, so a chain that is two levels deep cannot be mistaken for `Foreign`.
-4. **opening the popup's own dialog hides it** — a dialog parented to `first` is shown;
-   assert the focus transition to the dialog and `QTRY_COMPARE` the handler ran once,
-   with `first` hidden and the dialog still visible.
+   fixture asserts `QApplication::activePopupWidget() == &menu` **and**
+   `QGuiApplication::focusWindow() == menu.windowHandle()`; if either is false the
+   fixture **fails**, because recognition through the owner's own handle would let the
+   production `OwnPopup` branch be deleted while the test still passed. With focus
+   genuinely on the menu, the handler must not run: deleting that branch classifies the
+   menu as `Foreign` and hides immediately, which this assertion catches. Focus is then
+   moved to `second`, and the popup must hide. (R5-M1, R6-M2)
+3a. **a nested owned menu is still `OwnPopup`** — a submenu `Qt::Popup` widget is opened
+    from the first menu; the fixture asserts `focusWindow() == submenu.windowHandle()`,
+    `activePopupWidget() == &submenu`, and `isTransientOf( submenu.windowHandle(),
+    menu.windowHandle() )`, so a two-level chain is exercised rather than asserted by
+    construction. The popup survives while the submenu holds focus, and hides when focus
+    moves to `second`.
+4. **opening the popup's own dialog hides it** — a `QDialog` parented to `first` is shown,
+    with `QGuiApplication::focusWindow() == dialog.windowHandle()` asserted first. This
+    dialog also has `first`'s handle as its transient parent, so a rule that recognised
+    menus by transient ancestry alone would keep the popup; the fixture therefore pins
+    D8 as well as the recognition scope: the handler runs once, `first` is hidden and the
+    dialog stays visible. (R6-M1)
 5. **focus returning to the popup keeps it** — after 3, the menu is closed; the focus
    transition back to `first` is asserted; the handler never ran and `first` is visible.
 6. **the application losing focus hides it** — the `ApplicationInactive` branch cannot be
@@ -689,3 +704,10 @@ requirement, and the acceptance commands.
 | goal 4 still promises menu survival while the `xcb` `Tool` pointer paths can hide it | partial | §3(4) scoped to this rule and cross-referenced to §4 (R4-3) |
 | direct `hideWindow()` callers bypass the guard | partial | §6.1/§7 state that `hideWindow()` is not idempotent and that only this closer guarantees one call per decision (R4-10) |
 | the observed window was a raw pointer | partial | `window` is a `QPointer< QWidget >`; §6.1 and §7 document the inert-after-destruction behaviour (R4-11) |
+
+### Round 6 → 7
+
+| finding | severity | change |
+| --- | --- | --- |
+| the transient-chain shortcut also recognised ordinary dialogs as `OwnPopup`, contradicting D8 | major | §6.2 recognises a menu **only** when `activePopupWidget()` belongs to the popup, and starts the chain at that popup's own window; `isTransientOf()` is strict about identity; §8.2(4) pins that a dialog with the popup as transient parent still hides (R6-M1) |
+| fixtures 3/3a could pass while `OwnPopup` was never taken | major | §8.2(3,3a) now assert `QGuiApplication::focusWindow()` is the popup/submenu handle, so deleting the `OwnPopup` branch classifies it as `Foreign` and the "must not hide" assertion fails; §8.1 makes `isTransientOf( x, x )` false (R6-M2) |
