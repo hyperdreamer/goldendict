@@ -321,7 +321,12 @@ State transitions are explicit about their reset points:
   `Hide` it clears the suppressor and calls `dismissHandler`. `settling` guards
   re-entrancy, because `dismissHandler` hides the window synchronously.
 * `suppress( culprit )` removes the previous suppressor's filter and `destroyed`
-  connection when the culprit differs, then records and watches the new one.
+  connection when the culprit differs, then records and watches the new one. A null
+  culprit (no active popup and no active modal, which the guard computation cannot
+  produce today but a future call site could) still arms settlement and simply watches
+  nothing, so the grace stays bounded.
+* The closer must be a **member** of its window's owner, so that it is destroyed before
+  the QWidget base of the window: no settlement can then touch a half-destroyed window.
 * The destructor removes the window filter, the suppressor filter and connection, and
   stops the timer, so a pending settlement can never call a handler after teardown.
 
@@ -476,27 +481,35 @@ fixture drives the production closer and none re-implements its logic.
    focus, which Qt implements with a keyboard grab and which cannot be driven
    deterministically under a bare `Xvfb`. (R2-M4)
 5. **native owned-popup teardown does not strand the popup** — the popup and an owned
-   `Qt::Popup` widget are shown, the owned popup is then closed while `second` receives
-   focus; `QTRY_COMPARE` the handler ran once. This fixture proves the settlement path
-   after an owned popup disappears; it deliberately makes no claim about which window
-   reported active while the popup was open.
+   `Qt::Popup` widget are shown and the owned popup is closed; `second` is then activated
+   explicitly, establishing its own precondition instead of assuming where focus landed.
+   The dismissal there is the popup's **immediate** rule — no owned popup is active any
+   more — so `QTRY_COMPARE` the handler ran once. This fixture proves the popup is not
+   left stranded after an owned popup disappears; it makes no claim about which window
+   reported active while the popup was open. (R2-M4)
 6. **a deactivation before any activation is ignored** — `first` shown while `second` is
    active; `QVERIFY( !first->isActiveWindow() )` establishes the state, then a synthetic
    `QEvent::WindowDeactivate` is delivered to `first`; no hide.
 7. **re-show resets the state** — after a hide, `first` is shown again while `second`
    remains active (asserted inactive first, as in 6); a synthetic deactivation is
    ignored.
-8. **settlement ordering, both ways** (R2-M2):
-   - *activation first*: suppress via an owned dialog, then activate `first` (the
-     popup) inside the grace; `QTRY_VERIFY` after twice the grace that the handler never
-     ran;
-   - *activation later than the first callback opportunity*: suppress, let at least one
-     event-loop turn pass with the popup still inactive, then deliver the activation
-     before the grace expires; the handler never runs. If the implementation ignored the
-     grace and hid on the first turn, this fixture fails.
+8. **settlement ordering, both ways** (R2-M2). The suppressor here is an owned
+   `Qt::Popup` widget, not a modal dialog: a window-modal dialog parented to the popup
+   blocks the popup's own activation, so it cannot be used to prove a returning focus.
+
+   - *activation before any settlement callback can matter*: open the owned popup, deliver
+     a synthetic `QEvent::WindowDeactivate` to `first` (suppression armed), close the owned
+     popup, then activate `first` immediately and `QVERIFY( QTest::qWaitForWindowActive(
+     first ) )` so the precondition is established rather than assumed. `QTRY_VERIFY`
+     after twice the grace that the handler never ran.
+   - *activation later than the first callback opportunity*: the same drive, but one
+     event-loop turn (and a `QTest::qWait( 0 )`) is allowed to pass with the popup still
+     inactive before `first` is activated, again asserting the activation succeeded. The
+     handler never runs. An implementation that hides on the first turn instead of at the
+     grace deadline fails this fixture.
 9. **a late activation after the grace has expired does not resurrect the popup** — the
-   popup is hidden by settlement; a later activation leaves it hidden (the stated,
-   X11-consistent outcome).
+   same suppression is left to expire with the popup inactive, so it is hidden; a later
+   activation of `first` leaves it hidden (the stated, X11-consistent outcome).
 10. **settlement lifecycle** (R2-M3): a second suppression after a completed settlement;
     destruction of the suppressor while armed; destruction of the window with a
     settlement armed. In the last case the fixture drains the event loop past the grace
