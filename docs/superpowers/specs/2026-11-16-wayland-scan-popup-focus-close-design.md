@@ -1,11 +1,11 @@
 # Wayland scan popup: close when it loses focus
 
-Status: design revision 3, for review. Run `pm-run-20261116-123313-27afee37`,
+Status: design revision 4, for review. Run `pm-run-20261116-123313-27afee37`,
 topic `wayland-scan-popup-focus-close`.
-Review history: R1 → 14 findings (0 blockers, 8 major, 6 minor); R2 → 7 findings
-(0 blockers, 6 major, 1 minor), of which R1-1, R1-6 and R1-8 were re-opened as
-partially resolved. This revision answers all seven R2 findings; §13 is the
-finding-to-change ledger for both rounds.
+Review history: R1 → 14 findings (0 blockers, 8 major, 6 minor); R2 → 7 (0 blockers,
+6 major, 1 minor); R3 → 13 (0 blockers, 8 major, 5 minor). This revision answers all of
+R3, and it removes two whole problem classes by narrowing the guard to what parity
+actually needs (§1 D8). §13 is the finding-to-change ledger for all three rounds.
 
 **Scope limit of this document.** It specifies a design, not a test implementation.
 Most of the behaviour lives in `ScanPopup`, a translation unit no suite links (it needs
@@ -24,7 +24,8 @@ running it, not by reading it.
 | detection (D3) | **window activation events**, not pointer polling | The existing proximity polling cannot work on Wayland: `QCursor::pos()` is not the global pointer there, and a client has no pointer grab (`scanpopup.cc:299, 1205`). Deactivation is the event the compositor actually delivers. |
 | placement (D4) | new module `popupdismiss.{hh,cc}` | `ScanPopup` is unlinkable in a test; two pure rules plus a small watchable `QObject` keep the decision and the event plumbing linkable, in the same style as `platformwindow.{hh,cc}`. |
 | re-focus on later words (D5) | **the new policy asks nothing on a later word**; only a transition from hidden to visible asks | A clipboard change arrives while the user may be typing elsewhere; re-requesting focus on every later word would fight the user. Pre-existing requests that already happen (the `xcb` `giveFocus` block, the `xcb` `Tool` re-raise, the hotkey token) are preserved untouched and listed in §6.4. |
-| suppressed deactivation (D6) | a suppression **starts a bounded focus settlement**: the dismissal decision is taken after a short grace, cancelled by any activation inside the popup's own chain, and never by a bare "is a modal open" test | A modal dialog stays in Qt's modal stack while it is merely unfocused, so a stack test strands the popup. A zero-delay callback cannot win a race against a returning activation, so the grace is explicit. (R1-M1, R2-M1, R2-M2) |
+| modal dialogs are **not** a suppression cause (D8) | opening the popup's own dialog hides the popup, exactly as X11's `Qt::Popup` does | X11 parity is the operator's criterion, and `Qt::Popup` closes when any other window takes the keyboard — including a dialog the popup itself opened. Suppressing for modals created two rounds of problems (`activeModalWidget()` stays registered while merely unfocused, and an owned dialog chain is not observable), so the guard is limited to the one case parity genuinely cannot tolerate: the popup's own **menus and dropdowns**, which are the same window's UI, not another window's. (R2-M1, R3-M1) |
+| suppressed menu deactivation (D6) | a suppression **starts a bounded settlement**: the dismissal decision is taken at a fixed deadline, cancelled by an activation of the popup | A zero-delay callback cannot win a race against a returning activation, and Wayland offers no "focus has settled" signal. A fixed, documented deadline is testable at both sides, and an activation later than it finds the popup already hidden — the same outcome X11 produces. (R1-M1, R2-M1, R2-M2, R3-M2) |
 | application integration (D7) | `popupdismiss.{hh,cc}` are added to `goldendict.pro`'s enumerated `HEADERS`/`SOURCES`, and the acceptance run includes an application build | `goldendict.pro` enumerates its sources (`goldendict.pro:426, 573`); a new module is not discovered automatically, so a green helper suite could hide an unlinkable application. (R1-M4) |
 
 ## 2. Background
@@ -32,7 +33,10 @@ running it, not by reading it.
 On X11 the unpinned popup is created with `Qt::Popup` (`platformwindow.cc:38`,
 `defaultX11Flags` — the preserved default of the code this replaced). A `Qt::Popup`
 window is given the keyboard by Qt and is closed by Qt itself as soon as it loses the
-popup grab: click any other window and the popup is gone.
+popup grab: click any other window — or open a dialog from it — and the popup is gone.
+The same `Qt::Popup` form is what a build without the X11-only customization uses on
+every platform (`scanpopup.cc:433-440`, `platformwindow.cc:118-119`), so the Windows and
+macOS defaults have that dismissal too.
 
 On Wayland the same call site returns something else on purpose:
 `PlatformWindow::popupFlags()` returns `Qt::Tool | Qt::FramelessWindowHint |
@@ -42,8 +46,8 @@ moves the keyboard focus and the popup stays where it is.
 
 The dismissal paths that exist today:
 
-* **Qt's own popup close**, on `xcb` only, because only there the window is a
-  `Qt::Popup`;
+* **Qt's own popup close**, wherever the window is a `Qt::Popup` — always on `xcb`, and
+  on a build without the X11-only customization;
 * **Esc**, via `escapePressed()` (`scanpopup.cc:1170-1174`) — which first asks the
   article view to close an open search panel and only then hides the window, and which
   requires the popup to have keyboard focus to be delivered at all;
@@ -77,7 +81,11 @@ Focus today:
 * A popup opened by a **global hotkey** already asks for activation using the portal's
   activation token: `mainwindow.cc:3325-3336` calls
   `PlatformWindow::applyActivation( scanPopup.get(), token )` before delivering the
-  word, including when the popup is already visible.
+  word. For the `scan-popup` binding the call site first materialises a native handle
+  (`scanPopup->winId()`, `mainwindow.cc:3335`), so a token can be installed; the
+  `clipboard-lookup` binding calls the same helper without materialising one, and
+  `applyActivation()` then reports `NoHandle` (`platformwindow.cc:160-172`) and installs
+  no token. Both bindings' behaviour is preserved as it is.
 
 So on Wayland the clipboard-triggered popup never has focus, which is why a
 deactivation-based close would be dead code for exactly the case the reporter hit.
@@ -89,13 +97,13 @@ or decline … nothing in this migration promises that a window becomes focused"
 ## 3. Goals
 
 1. An unpinned scan popup on Wayland behaves like the X11 one: it takes the keyboard
-   when it opens, and the moment that keyboard focus goes anywhere else it disappears
-   immediately, using the same hide path as Esc.
+   when it opens, and the moment that keyboard focus goes anywhere else it disappears,
+   using the same hide path as Esc.
 2. A pinned popup never auto-hides, on any platform.
 3. X11 does not regress: the default stored window form is still a `Qt::Popup` and Qt
    still owns its dismissal.
-4. No popup can be left visible, unfocused and undismissable, neither by its own
-   suppression of a deactivation nor by a focus that silently returns. (R1-M1, R2-M1)
+4. No popup can be left visible, unfocused and undismissable — not while one of its own
+   menus is open, and not after that menu closes. (R1-M1, R2-M1, R3-M1)
 5. The parts that can be proven on this host are proven by execution; the part that
    needs a live compositor is documented as a limit, not claimed as a result.
 
@@ -124,53 +132,49 @@ When the popup is already visible, a new word updates the content and the new po
 requests nothing. (D5)
 
 A **pinned, already visible** popup keeps its current re-raise
-(`scanpopup.cc:688-696`). A **pinned, hidden** popup is shown without a new focus
+(`scanpopup.cc:689-696`). A **pinned, hidden** popup is shown without a new focus
 request, exactly as today: the new rule excludes pinned windows, and the `giveFocus`
 argument is false on Linux. The design does not add activation to that path.
 
-### 5.2 Closing
+### 5.2 Closing: the immediate rule
 
-The popup hides when all of these hold:
+The popup hides, immediately and synchronously, when all of these hold:
 
 1. it is visible;
 2. it is not pinned;
 3. it received activation since it was last shown (`focusedSinceShown`);
-4. no popup widget of its own is open (a `QMenu`, a combo dropdown, a context menu);
-5. no modal dialog of its own is up.
+4. **no popup widget of its own is open** — a `QMenu`, a combo dropdown, a context menu.
+
+There is deliberately **no modal-dialog exception** (D8): a dialog belongs to another
+window, and X11's `Qt::Popup` closes when one takes the keyboard. This rule is therefore
+the parity rule, not a new policy.
 
 The dismiss action is the existing `hideWindow()` (`scanpopup.cc:1176-1186`), so the
 mouse interception stops, `closeMenu()` is emitted, the word field is deselected and the
 popup hides (`hide()` at `scanpopup.cc:1185`). Nothing else is added to that path.
 
-### 5.3 A suppressed deactivation settles instead of sticking
+### 5.3 A suppressed menu deactivation settles instead of sticking
 
-Conditions 4 and 5 suppress the immediate decision when a menu or dialog of the popup's
-own took the keyboard. Suppression is never the end of the story: it starts a **focus
-settlement** with three rules.
+Condition 4 is the only suppression: while one of the popup's own menus or dropdowns is
+open, the popup is still on screen and still in use, and the owner's deactivation is not
+the user leaving. That suppression starts a **focus settlement**:
 
-1. **Armed.** A suppression arms settlement and records the suppressing window
-   (`suppressor`), which is watched from then on.
-2. **Cancelled by the popup's own chain.** Any activation of the popup itself, or of a
-   window the popup owns, cancels the pending settlement and keeps the popup. This is
-   what protects the ordinary "close my dialog and keep typing in the popup" flow.
-3. **Settled.** Settlement ends in a dismissal decision, taken at the first of:
-   * an activation of *another* application window (a window that does not belong to the
-     popup): decisively outside the chain, so hiding is immediate;
-   * the grace deadline (`PopupDismiss::settleGraceMs`, 100 ms) after the suppressor's
-     own `WindowDeactivate`, `Hide`, `Close` or destruction.
+1. **Armed.** Suppression arms settlement and records the menu widget (`suppressor`),
+   which is watched from then on.
+2. **Cancelled by an activation of the popup.** Any activation of the popup — or of
+   another popup widget it owns, which continues the same menu interaction — cancels the
+   pending settlement and keeps the popup.
+3. **Decided at the deadline.** Settlement ends at `PopupDismiss::settleGraceMs` (100 ms)
+   after the suppressor's own `WindowDeactivate`, `Hide`, `Close` or destruction,
+   whichever was last. The decision is: hide when the popup is visible, unpinned, still
+   armed, not itself active, and no menu of its own is active.
 
-The settled decision is not "is a modal still open" — Qt keeps a merely unfocused
-dialog in its modal stack, so that test would strand the popup. It is "did focus come
-back to the popup's own chain": hide when the popup is visible, unpinned, still armed,
-not itself the active window, and no window of its own is the active window.
-
-**Focus that is temporarily unknown is never a decision point.** Between the suppressor
-transition and the settled decision the popup is kept, even though nothing currently
-holds the keyboard; if an activation arrives inside the grace it wins, and if none
-arrives the grace expires and the popup is hidden. The grace is bounded work, not a
-promise about the compositor: a later activation cannot resurrect a hidden popup, which
-is the same outcome X11 produces when the popup closes on the dialog's own activation.
-(R1-M1, R2-M1, R2-M2)
+**The deadline is a decision point, not a wait for focus** (D6, R3-M2). The platform
+gives no "focus has settled" event, so the alternative would be an unbounded wait. An
+activation that arrives after the deadline finds the popup already hidden; that is the
+same outcome X11 produces for a popup whose focus left, and it is accepted explicitly
+rather than pretended away. The tests exercise both sides of the deadline: an activation
+inside the grace keeps the popup, and an activation after it does not resurrect it.
 
 ### 5.4 Unpinning is a new opening
 
@@ -187,8 +191,7 @@ platform takes over, as it does today. (R1-M3)
 * A deactivation for a popup that was never activated is ignored. This is what makes the
   compositor-refusal case honest: no focus was granted, so there is nothing to lose.
 * A deactivation while already hidden or pinned is ignored.
-* A deactivation caused by a menu, a combo dropdown or a modal dialog that belongs to the
-  popup is suppressed and then settled per §5.3.
+* A deactivation caused by the popup's own menu is suppressed and then settled per §5.3.
 
 ## 6. Architecture
 
@@ -197,7 +200,7 @@ platform takes over, as it does today. (R1-M3)
 ```cpp
 namespace PopupDismiss {
 
-/// How long a suppression waits for focus before the settled decision.
+/// Deadline of a settled decision after a suppressed menu deactivation.
 constexpr int settleGraceMs = 100;
 
 /// What one deactivation observation means for the popup.
@@ -208,26 +211,23 @@ struct Context {
   bool visible = false;
   bool pinned = false;
   bool focusedSinceShown = false;
-  bool ownPopupOpen = false;   ///< one of the popup's own popup widgets is active
-  bool ownModalOpen = false;   ///< one of the popup's own modal dialogs is active
+  bool ownMenuOpen = false;   ///< one of the popup's own popup widgets is active
 };
 
-/// Immediate rule: Hide iff
-/// visible && !pinned && focusedSinceShown && !ownPopupOpen && !ownModalOpen.
+/// Immediate rule: Hide iff visible && !pinned && focusedSinceShown && !ownMenuOpen.
 Action onWindowDeactivate( Context const & context );
 
-/// Settled rule, evaluated once the grace expired or focus left the chain.
-/// Hide iff visible && !pinned && focusedSinceShown
-///          && !ownWindowActive && !focusInOwnChain.
+/// Settled rule, evaluated once at the deadline.
+/// Hide iff visible && !pinned && focusedSinceShown && !ownWindowActive && !ownMenuActive.
 Action onFocusSettled( bool visible, bool pinned, bool focusedSinceShown,
-                       bool ownWindowActive, bool focusInOwnChain );
+                       bool ownWindowActive, bool ownMenuActive );
 
 /// True when the window does not already receive the keyboard from the platform:
 /// every window type except Qt::Popup. Window hints never change the answer.
 bool needsExplicitActivation( Qt::WindowFlags flags );
 
-/// True when `candidate` is `owner` or a descendant of it. Null-safe; decides
-/// whether an active popup widget, modal dialog or active window belongs to this popup.
+/// True when `candidate` is `owner` or a descendant of it. Null-safe; decides whether
+/// an active popup widget belongs to this popup.
 bool isOwnedBy( QWidget const * owner, QWidget const * candidate );
 
 /// Watches one top-level window and hides it when the rules say so.
@@ -250,19 +250,20 @@ protected:
   bool eventFilter( QObject * watched, QEvent * event ) override;
 
 private:
-  void suppress( QWidget * culprit );   ///< remember and watch the owned transient
-  void armSettlement();                ///< start the bounded grace
+  void suppress( QWidget * menu );          ///< remember and watch the owned menu
+  void armSettlement();                    ///< (re)start the bounded grace
   void cancelSettlement( char const * why );
-  void settle();                       ///< the settled decision, once per grace
+  void settle( char const * why );         ///< the settled decision, once per grace
+  void dismiss( char const * why );        ///< guarded handler invocation
 
-  QWidget * const window;              ///< observed top-level window, never null
+  QWidget * const window;                  ///< observed top-level window, never null
   bool pinned = false;
   bool focusedSinceShown = false;
   bool settlementArmed = false;
-  bool settling = false;               ///< guards re-entrancy of settle()
-  QPointer< QWidget > suppressor;      ///< owned popup/modal that caused the suppression
+  bool dismissing = false;                 ///< re-entrancy guard for the handler
+  QPointer< QWidget > suppressor;          ///< owned menu that caused the suppression
   QMetaObject::Connection suppressorGone;
-  QTimer settlementTimer;              ///< single-shot, bound to this object's lifetime
+  QTimer settlementTimer;                  ///< single-shot, member, bound to this object
   std::function< void() > dismissHandler;
 };
 
@@ -274,14 +275,18 @@ Decisions that keep the module honest:
 * **No platform gate.** The flags change at runtime (pin toggle), so a construction-time
   platform test would be wrong. On a `Qt::Popup` window the closer is inert in practice —
   Qt closes the popup first — and both paths end in the same idempotent `hideWindow()`.
-* **Nothing but the two rules decides.** `Context` construction is the only place that
-  reads `QApplication::activePopupWidget()` / `activeModalWidget()`; the settled rule reads
-  `window->isActiveWindow()` and `QApplication::activeWindow()`.
-* **Every deferred callback is lifetime-bound.** The settlement timer is a `QTimer` member
-  with `setSingleShot( true )` whose `timeout` is connected to this object, so destroying
-  the closer destroys the timer and cancels the pending decision; `settle()` also returns
-  early when `window` is hidden or gone. No `singleShot` lambda captures a raw `this`
-  without a context object.
+* **One place reads application state.** `Context` construction is the only place that
+  reads `QApplication::activePopupWidget()`; the settled rule reads
+  `window->isActiveWindow()` and `QApplication::activePopupWidget()` again, never the
+  modal stack (D8).
+* **One dismissal path with one guard.** Both rules call `dismiss()`, which sets
+  `dismissing` before invoking the handler and clears it afterwards, so a handler that
+  synchronously causes another activation or deactivation cannot re-enter it and
+  `hideWindow()` is never called twice for one decision. (R3-M8)
+* **Every deferred callback is lifetime-bound.** `settlementTimer` is a member with
+  `setSingleShot( true )` whose `timeout` is connected to this object, so destroying the
+  closer destroys the timer and cancels the pending decision. No context-free lambda
+  captures `this`.
 * **Logging** is one `qCDebug` line per decision on the category
   `goldendict.popup.dismiss`, naming the rule and the field that decided it. It logs
   *requests and decisions*, never window titles or looked-up words, and it cannot explain
@@ -290,76 +295,64 @@ Decisions that keep the module honest:
 ### 6.2 `FocusLossCloser` state machine
 
 The closer installs itself as an event filter on `window` and on the suppressor while one
-is recorded. It never consumes an event; it always returns `false`. It needs no
-application-wide filter and no focus signal: the settlement deadline is what bounds every
-suppressed case, and the only event that can change the outcome before then is an
-activation of the popup's own chain, which arrives at the closer itself.
+is recorded. It never consumes an event; it always returns `false`.
 
 | Watched object | Event | Condition | Effect |
 | --- | --- | --- | --- |
-| window | `Show` | — | `focusedSinceShown = window->isActiveWindow()`; clear suppressor; cancel settlement |
-| window | `Hide` | — | `focusedSinceShown = false`; clear suppressor; cancel settlement |
+| window | `Show` | — | `focusedSinceShown = window->isActiveWindow()`; clear suppressor; `cancelSettlement( "shown" )` |
+| window | `Hide` | — | `focusedSinceShown = false`; clear suppressor; `cancelSettlement( "hidden" )` |
 | window | `WindowActivate` | — | `focusedSinceShown = true`; clear suppressor; `cancelSettlement( "popup active" )` |
-| window | `WindowDeactivate` | rule → `Ignore` because own popup/modal is active | `suppress( culprit )` |
+| window | `WindowDeactivate` | rule → `Ignore` because an owned menu is active | `suppress( menu )` |
 | window | `WindowDeactivate` | rule → `Ignore` otherwise | nothing |
-| window | `WindowDeactivate` | rule → `Hide` | `focusedSinceShown = false`; clear suppressor; call `dismissHandler` |
+| window | `WindowDeactivate` | rule → `Hide` | `focusedSinceShown = false`; clear suppressor; `dismiss( "deactivated" )` |
 | suppressor | `WindowDeactivate`, `Hide`, `Close` | — | `armSettlement()` |
 | suppressor | any other | — | nothing |
 | suppressor | `destroyed` (via `suppressorGone`) | — | clear suppressor; `armSettlement()` |
 | settlement timer | `timeout` | — | `settle( "grace expired" )` |
 
-State transitions are explicit about their reset points:
+State transitions and their reset points:
 
-* `armSettlement()` sets `settlementArmed = true` and starts the single-shot timer; a
-  second call while armed restarts the grace rather than stacking decisions.
+* `armSettlement()` sets `settlementArmed = true` and starts the single-shot timer; a call
+  while armed **restarts** the grace rather than stacking a second decision, so the last
+  suppressor transition owns the deadline.
 * `cancelSettlement( why )` clears `settlementArmed`, stops the timer and logs the reason.
-  It runs on the three activation cases above and on `Show`/`Hide` of the window.
-* `settle( why )` runs exactly once per armed settlement — on the timer, never earlier —
-  first clears `settlementArmed` and stops the timer, then evaluates
+* `settle( why )` runs once per armed settlement, at the deadline only: it clears
+  `settlementArmed`, stops the timer, evaluates
   `onFocusSettled( window->isVisible(), pinned, focusedSinceShown,
-  window->isActiveWindow(), isOwnedBy( window, QApplication::activeWindow() ) )`; on
-  `Hide` it clears the suppressor and calls `dismissHandler`. `settling` guards
-  re-entrancy, because `dismissHandler` hides the window synchronously.
-* `suppress( culprit )` removes the previous suppressor's filter and `destroyed`
-  connection when the culprit differs, then records and watches the new one. A null
-  culprit (no active popup and no active modal, which the guard computation cannot
-  produce today but a future call site could) still arms settlement and simply watches
-  nothing, so the grace stays bounded.
-* The closer must be a **member** of its window's owner, so that it is destroyed before
-  the QWidget base of the window: no settlement can then touch a half-destroyed window.
+  window->isActiveWindow(), isOwnedBy( window, QApplication::activePopupWidget() ) )`,
+  and on `Hide` clears the suppressor and calls `dismiss()`.
+* `dismiss( why )` returns immediately when `dismissing` is already true, otherwise sets
+  it, calls `dismissHandler`, and clears it — including when the handler hides the window
+  and the resulting `Hide` arrives synchronously.
+* `suppress( menu )` removes the previous suppressor's filter and `destroyed` connection
+  when the culprit differs, then records and watches the new one. A null culprit (no
+  active popup widget — not reachable through today's guard computation) still arms
+  settlement and watches nothing, so the deadline stays bounded.
 * The destructor removes the window filter, the suppressor filter and connection, and
-  stops the timer, so a pending settlement can never call a handler after teardown.
-
-Guards are computed at decision time, from live application state:
-
-```cpp
-QWidget * const popup = QApplication::activePopupWidget();
-QWidget * const modal = QApplication::activeModalWidget();
-Context const context{ window->isVisible(), pinned, focusedSinceShown,
-                       isOwnedBy( window, popup ), isOwnedBy( window, modal ) };
-```
-
-A modal dialog or menu opened by the *main* window is not owned by the popup, so it does
-not suppress the hide — which matches X11, where a `Qt::Popup` closes when any other
-window takes the keyboard. The settled rule deliberately does **not** consult the modal
-stack: a dialog that is still open but no longer focused must not keep the popup alive.
+  stops the timer, so a pending settlement can never call a handler after teardown. The
+  closer must be a **member** of its window's owner, so it is destroyed before the
+  QWidget base of the window.
 
 ### 6.3 Wiring in `ScanPopup`
 
 Ordering matters twice here, and both are pinned by assertions (§8.3).
 `setWindowFlags()` on a visible widget hides it, and that hide can deliver events
-synchronously, so no flag change may happen before the closer knows the new pin state.
+synchronously, so no flag change may happen before the closer knows the new pin state,
+and the closer must know the *stored* pin state before the constructor's own flag change.
 
 1. `scanpopup.hh`: `#include "popupdismiss.hh"`, member
    `std::unique_ptr< PopupDismiss::FocusLossCloser > focusLossCloser;`. No `event()` or
    `changeEvent()` override is added.
-2. Constructor, in this order:
+2. Constructor, in this order — all four steps are asserted:
    a. create the closer on `this` immediately after `ui.setupUi( this )`, and install the
       dismiss handler `[ this ] { hideWindow(); }`;
-   b. immediately after `ui.pinButton->setChecked( cfg.pinPopupWindow )`
-      (`scanpopup.cc:184`) and **before** the `if ( cfg.pinPopupWindow )` block that
-      first calls `setWindowFlags()` (`scanpopup.cc:186-200`), call
-      `focusLossCloser->setPinned( ui.pinButton->isChecked() )`.
+   b. `ui.pinButton->setChecked( cfg.pinPopupWindow )` (`scanpopup.cc:184`) runs as today;
+   c. **after** that line and **before** the `if ( cfg.pinPopupWindow )` block that first
+      calls `setWindowFlags()` (`scanpopup.cc:186-200`), call
+      `focusLossCloser->setPinned( ui.pinButton->isChecked() )` — the argument is the
+      button's newly restored state, not a literal;
+   d. only then may a `setWindowFlags()` call run.
+   (R1-M2, R3-M6)
 3. `pinButtonClicked( bool checked )` (`scanpopup.cc:1077-1105`): its **first complete
    statement** is `focusLossCloser->setPinned( checked );`, before the `if ( checked )`
    statement and therefore before either branch's `setWindowFlags()`. (R1-M2, R2-M6)
@@ -378,11 +371,12 @@ synchronously, so no flag change may happen before the closer knows the new pin 
    }
    ```
 
-   Nothing else in that function changes: the `#ifdef ENABLE_SPWF_CUSTOMIZATION` block
-   and both `else if` branches keep their current conditions and actions, so the function
-   still contains exactly three `activateWindow()` calls — the hidden-window branch
-   (`:675`), the pinned-visible branch (`:694`) and the `xcb` `Tool` branch (`:702`) —
-   each attributed to one branch. (R2-M5)
+   Nothing else in that function changes: the `#ifdef ENABLE_SPWF_CUSTOMIZATION` block —
+   including its `giveFocus = true;` assignment for an unpinned `xcb` popup
+   (`scanpopup.cc:665-671`) — and both `else if` branches keep their current conditions
+   and actions, so the function still contains exactly three `activateWindow()` calls: the
+   hidden-window branch (`:675`), the pinned-visible branch (`:694`) and the `xcb` `Tool`
+   branch (`:702`), each attributed to one branch. (R2-M5, R3-M7)
 6. `goldendict.pro`: add `popupdismiss.hh` to the enumerated `HEADERS` list and
    `popupdismiss.cc` to `SOURCES`. (D7)
 
@@ -396,7 +390,7 @@ Wayland always gets the managed tool window.
 
 | platform | stored form | resulting flags | focus request **on open** | dismissal |
 | --- | --- | --- | --- | --- |
-| Wayland | any | `Tool \| Frameless \| StaysOnTop` | **new rule** (unpinned); hotkey paths also apply their token (pre-existing) | **new rule** + §5.3 settlement |
+| Wayland | any | `Tool \| Frameless \| StaysOnTop` | **new rule** (unpinned); hotkey paths also request activation, with a token only where a native handle exists (pre-existing) | **new rule** + §5.3 settlement |
 | xcb (X11 build) | `default` or `Popup` | `Qt::Popup` | pre-existing `giveFocus` block, unpinned only; the new rule answers false | Qt's own popup close |
 | xcb (X11 build) | `Tool` | `Tool \| Frameless \| StaysOnTop` | pre-existing `giveFocus` block **and** the new rule (both unpinned) | **new rule** + proximity/leave timer (pre-existing) |
 | Windows / macOS | n/a (`SPWF_default` when the X11-only customization is absent) | `Qt::Popup` | Windows: `giveFocus = true` for the two clipboard/hotkey word paths; the new rule answers false | Qt's own popup close |
@@ -410,19 +404,20 @@ that the X11 behaviour change is a stated decision rather than an accident. (R1-
 
 | situation | behaviour |
 | --- | --- |
-| `activePopupWidget()`, `activeModalWidget()` or `activeWindow()` returns null | that guard is false; the rules decide on the remaining fields (a null active window means focus is nowhere in the application, so the settled rule hides) |
-| closer constructed before the window has a native handle | no handle is needed: only widget events, `isActiveWindow()` and focus signals are read |
+| `activePopupWidget()` returns null | the guard is false, which is correct: no menu of the popup's is open |
+| closer constructed before the window has a native handle | no handle is needed: only widget events and `isActiveWindow()` are read |
 | `Show` while already active | `focusedSinceShown = true`; a later deactivation hides |
 | `Show` while not active (compositor declined, or shown behind) | `focusedSinceShown = false`; a deactivation is ignored until an activation arrives |
 | pin toggled while visible | `setPinned` runs before the flag change; a pinned popup ignores deactivation from then on |
 | unpin while visible | §5.4: the replacement window is treated as a new opening and follows §5.1's rule |
-| the popup deactivates because its own dialog opened | suppressed; settlement armed; the dialog is watched |
-| the suppressor deactivates, hides, closes or is destroyed | settlement: an activation of the popup's chain inside the grace keeps it, otherwise it hides at the grace deadline (`settleGraceMs`, never later) |
-| focus returns to the popup after its dialog closes, quickly or after one event-loop turn | the activation cancels settlement whenever it arrives inside the grace; a later activation finds the popup already hidden, exactly as X11 behaves |
-| a second suppression arrives while a settlement is armed | the grace restarts; the previous suppressor's watch is removed when the culprit changes |
+| the popup opens its own dialog | no exception: it deactivates and hides, exactly as X11 (D8) |
+| the popup opens its own menu or dropdown | suppressed; settlement armed; the menu is watched |
+| the menu closes and focus returns to the popup | the activation cancels settlement whenever it arrives inside the deadline; after the deadline the popup is already hidden (the accepted bounded race, D6) |
+| a second menu is opened while a settlement is armed | the previous suppressor's watch is removed when the culprit changes; the last menu owns the restartable deadline |
 | the suppressor is destroyed while settlement is armed | the `destroyed` connection re-arms settlement; the timer belongs to the closer, so no dangling pointer is used |
 | the closer or its window is destroyed with a settlement armed | the timer member is destroyed and the destructor removes the window and suppressor filters, so no handler runs after teardown |
-| deactivation during `hideWindow()` | `isVisible()` is already false or the resulting `Hide` resets the flag; `settling` prevents re-entry; the handler is idempotent |
+| a handler that hides the window synchronously causes another activation/deactivation | `dismissing` makes the second decision a no-op; `hideWindow()` is called once per decision |
+| deactivation during `hideWindow()` | `isVisible()` is already false or the resulting `Hide` resets the flag; `dismissing` prevents re-entry; the handler is idempotent |
 | pointer-poll dismissal racing the deactivation | both call `hideWindow()`; it is idempotent |
 | a popup opened while another GoldenDict window holds focus | the request is still made; the compositor decides |
 | activation refused by the compositor | no activation, so no decision: the popup stays. Clicking it gives it focus, after which a click elsewhere hides it, and Esc reaches it (closing an open search panel first, as `escapePressed()` already does) |
@@ -434,17 +429,18 @@ New suite `tests/tst_popup_dismiss/`, the 21st required suite, linking the produ
 
 ### 8.1 Rule matrices (data-driven)
 
-`onWindowDeactivate` over all five fields: `Hide` for the one satisfying row, and one row
-per single `Ignore` cause — hidden, pinned, never focused, own popup active, own modal
-active — plus two combination rows and one row per *omitted* guard. The matrix
-distinguishes an omitted guard, an inverted predicate and a swapped logical operator; it
-does **not** claim that reordering the `&&` operands is observable, because it is not.
+`onWindowDeactivate` over its four fields: `Hide` for the satisfying row, one row per
+single `Ignore` cause — hidden, pinned, never focused, own menu active — plus two
+combination rows and one row per *omitted* guard. The matrix distinguishes an omitted
+guard, an inverted predicate and a swapped logical operator; it does not claim that
+reordering the `&&` operands is observable, because it is not.
 
 `onFocusSettled` over its five fields: `Hide` for the satisfying row; `Ignore` when the
-popup is active again, pinned, unarmed, hidden, or when the active window is inside the
-popup's own chain. Two rows exist specifically for the R2 finding: focus outside the
-chain while a *modal is still registered* (the settled rule has no modal input and must
-hide), and focus on an owned dialog (must keep).
+popup is active again, pinned, hidden, or when a menu of its own is still active. Two
+rows exist for the settled exception: a menu that is still active keeps the popup, and a
+popup that is not active with no menu open hides. The rule intentionally has **no**
+"unarmed" input — the arming gate belongs to the closer, and the controller-level
+fixtures in §8.2(9,10) prove it, so no matrix row pretends to. (R3-M5)
 
 `needsExplicitActivation`: `Qt::Popup` → false; `Qt::Popup` with `FramelessWindowHint`
 or `StaysOnTop` hints → still false; `Qt::Tool`,
@@ -452,69 +448,70 @@ or `StaysOnTop` hints → still false; `Qt::Tool`,
 `Qt::Dialog`, `Qt::Tool | X11BypassWindowManagerHint` → true.
 
 `isOwnedBy`: null/null, self/self, a child popup widget, a grandchild, a sibling, an
-unrelated top-level, and a dialog parented to a different window.
+unrelated top-level, and a menu parented to a different window.
 
 ### 8.2 Runtime behaviour of the production `FocusLossCloser`
 
 On the `xcb` + `xvfb` acceptance display (§8.5), with real top-level widgets; every
-fixture drives the production closer and none re-implements its logic.
+fixture drives the production closer and none re-implements its logic. Every fixture that
+claims a suppression states and asserts its preconditions — the window visible, unpinned,
+activated — and asserts **zero dismissals before the transition it is about**, so a
+production mutant that hides too early fails even when the final count is right.
+(R3-M3)
 
 1. **hides on a real deactivation** — closer on `first` with a counting handler that
-   hides it; `first` shown and activated (`QTest::qWaitForWindowActive`), then `second`
-   shown and activated; `QTRY_COMPARE` the handler ran once and `first` is hidden.
+   hides it; `first` shown and activated (`QTest::qWaitForWindowActive`), preconditions
+   asserted, then `second` shown and activated; `QTRY_COMPARE` the handler ran once and
+   `first` is hidden.
 2. **pinned does not hide** — the same drive with `setPinned( true )`; the handler never
    runs and the window stays visible.
-3. **an owned window-modal dialog suppresses, and the popup is dismissed once focus
-   leaves its chain** — a `Qt::WindowModal` `QDialog` parented to `first` is shown; await
-   `QTest::qWaitForWindowActive( &dialog )` and assert `!first->isActiveWindow()`; then
-   activate the sibling `second` (allowed: window-modality blocks the dialog's parent
-   chain, and the fixture asserts the activation rather than assuming it).
-   `QTRY_COMPARE` the handler ran once, **and assert that the dialog is still visible and
-   still `QApplication::activeModalWidget()`** — the settled rule must dismiss while a
-   merely unfocused modal remains registered. (R2-M1)
-4. **an owned popup suppresses the immediate decision** — a `QWidget` with
-   `setWindowFlags( Qt::Popup )` parented to `first` is shown; assert
-   `QApplication::activePopupWidget()` is that widget. Then deliver a **synthetic**
-   `QEvent::WindowDeactivate` to `first` and assert the handler did **not** run: this is
-   the fixture that proves the production `Context` construction reports the owned popup
-   (a hard-wired `false` hides here and fails). It claims nothing about native popup
-   focus, which Qt implements with a keyboard grab and which cannot be driven
-   deterministically under a bare `Xvfb`. (R2-M4)
-5. **native owned-popup teardown does not strand the popup** — the popup and an owned
-   `Qt::Popup` widget are shown and the owned popup is closed; `second` is then activated
-   explicitly, establishing its own precondition instead of assuming where focus landed.
-   The dismissal there is the popup's **immediate** rule — no owned popup is active any
-   more — so `QTRY_COMPARE` the handler ran once. This fixture proves the popup is not
-   left stranded after an owned popup disappears; it makes no claim about which window
-   reported active while the popup was open. (R2-M4)
-6. **a deactivation before any activation is ignored** — `first` shown while `second` is
-   active; `QVERIFY( !first->isActiveWindow() )` establishes the state, then a synthetic
-   `QEvent::WindowDeactivate` is delivered to `first`; no hide.
-7. **re-show resets the state** — after a hide, `first` is shown again while `second`
-   remains active (asserted inactive first, as in 6); a synthetic deactivation is
-   ignored.
-8. **settlement ordering, both ways** (R2-M2). The suppressor here is an owned
-   `Qt::Popup` widget, not a modal dialog: a window-modal dialog parented to the popup
-   blocks the popup's own activation, so it cannot be used to prove a returning focus.
-
-   - *activation before any settlement callback can matter*: open the owned popup, deliver
-     a synthetic `QEvent::WindowDeactivate` to `first` (suppression armed), close the owned
-     popup, then activate `first` immediately and `QVERIFY( QTest::qWaitForWindowActive(
-     first ) )` so the precondition is established rather than assumed. `QTRY_VERIFY`
-     after twice the grace that the handler never ran.
-   - *activation later than the first callback opportunity*: the same drive, but one
-     event-loop turn (and a `QTest::qWait( 0 )`) is allowed to pass with the popup still
-     inactive before `first` is activated, again asserting the activation succeeded. The
-     handler never runs. An implementation that hides on the first turn instead of at the
-     grace deadline fails this fixture.
-9. **a late activation after the grace has expired does not resurrect the popup** — the
-   same suppression is left to expire with the popup inactive, so it is hidden; a later
-   activation of `first` leaves it hidden (the stated, X11-consistent outcome).
-10. **settlement lifecycle** (R2-M3): a second suppression after a completed settlement;
-    destruction of the suppressor while armed; destruction of the window with a
-    settlement armed. In the last case the fixture drains the event loop past the grace
-    and asserts the dismiss callback ran zero times after teardown.
-11. **unrelated popups are not owned** — `isOwnedBy` is exhaustive in 8.1; the runtime
+3. **an owned menu suppresses, and the guard is really consulted** — `first` activated,
+   an owned `QWidget` with `setWindowFlags( Qt::Popup )` shown and asserted as
+   `QApplication::activePopupWidget()`; a **synthetic** `QEvent::WindowDeactivate`
+   delivered to `first` while `first` is visible, unpinned and armed; assert the handler
+   ran **zero** times. A production `Context` that hard-wired `ownMenuOpen` to false hides
+   here and fails. The fixture claims nothing about native popup focus, which Qt
+   implements with a keyboard grab and which cannot be driven deterministically under a
+   bare `Xvfb`. (R2-M4, R3-M3, R3-M4)
+4. **opening the popup's own dialog hides it** — a modal `QDialog` parented to `first` is
+   shown; `QTRY_COMPARE` the handler ran once, proving D8's parity rule and that no modal
+   guard survives in production.
+5. **settlement after a menu closes: activation inside the grace keeps the popup** —
+   suppress as in 3, close the menu, then activate `first` and
+   `QVERIFY( QTest::qWaitForWindowActive( first ) )` so the precondition is established
+   rather than assumed; `QTRY_VERIFY` after twice the grace that the handler never ran. A
+   zero-delay implementation has already hidden `first`, so the activation assertion
+   fails first.
+6. **settlement after a menu closes: activation later than the first callback
+   opportunity** — the same drive, but one event-loop turn and a `QTest::qWait( 0 )` pass
+   with the popup inactive before `first` is activated inside the grace, asserting the
+   activation succeeded; the handler never runs. An implementation that decides on the
+   first turn instead of the deadline fails.
+7. **settlement after a menu closes: no activation at all** — the same drive with no
+   activation; assert the popup is still visible after `settleGraceMs / 2` and hidden
+   after `settleGraceMs * 2`. That brackets the deadline from both sides instead of
+   trusting a single wait. (R3-M2)
+8. **a late activation does not resurrect a settled popup** — after 7, activating `first`
+   leaves it hidden; the fixture asserts the activation request is issued and the window
+   stays hidden, without claiming the compositor granted it.
+9. **the deadline restarts on a second suppression** — suppress with `menuA`, close
+   `menuA`, open and close `menuB` inside the grace, then assert the popup is still
+   visible at `settleGraceMs / 2` after the second close and hidden after
+   `settleGraceMs * 2`, with the handler called exactly once. (R3-M5)
+10. **suppressor destruction and teardown are bounded** — (a) delete the suppressor while
+    armed and assert the popup is hidden by the deadline; (b) destroy the window with a
+    settlement armed, drain the event loop past the deadline, and assert the dismiss
+    callback ran zero times after teardown. (R3-M5)
+11. **a deactivation before any activation is ignored** — `first` shown while `second` is
+    active; `QVERIFY( !first->isActiveWindow() )` establishes the state, then a synthetic
+    `QEvent::WindowDeactivate` is delivered; no hide.
+12. **re-show resets the state** — after a hide, `first` is shown again while `second`
+    remains active (asserted inactive first, as in 11); a synthetic deactivation is
+    ignored.
+13. **the handler is not re-entered** — a handler that synchronously sends a
+    `WindowActivate` and a `WindowDeactivate` back to `first` is installed; the drive of
+    1 must still call it exactly once. (R3-M8)
+14. **unrelated popups are not owned** — `isOwnedBy` is exhaustive in 8.1; the runtime
     layer does not claim to prove it, because a second, unrelated `Qt::Popup` grab cannot
     be driven deterministically under a bare `Xvfb`.
 
@@ -530,30 +527,39 @@ that reason, and §8.5 states that a skipped fixture does not satisfy acceptance
 `ScanPopup` cannot be linked into a suite, so its wiring is pinned by reading the sources
 with the branch-scoped style of `tst_hotkeys` (`selectionBlock`, `selectionBranch`,
 `selectionStatements`, `selectionDirectActions`, `selectionOrdered`). The suite carries
-its own copies of those small helpers. Each assertion names the mutant it kills.
+its own copies of those small helpers, and every assertion names the mutant it kills.
 
 1. `scanpopup.hh` includes `popupdismiss.hh`, declares the
    `PopupDismiss::FocusLossCloser` member, and adds **no** `event(` / `changeEvent(`
    override.
-2. Constructor: `PopupDismiss::FocusLossCloser` is constructed on `this`,
-   `setDismissHandler` names `hideWindow`, and `setPinned` appears **before** the first
-   `setWindowFlags` (statement order within the constructor block).
-3. `pinButtonClicked`: the **first complete statement** of the body —
-   `selectionStatements( body ).first()`, which keeps control flow, not
-   `selectionDirectActions()` which filters it — is `setPinned( checked );`. Moving the
-   call after the whole `if ( checked )` statement but before `show()` still fails this
-   assertion. (R2-M6)
+2. Constructor, as one ordered expectation over the constructor block:
+   `ui.setupUi( this )` → `ui.pinButton->setChecked( cfg.pinPopupWindow )` →
+   `focusLossCloser->setPinned( ui.pinButton->isChecked() )` → the first
+   `setWindowFlags(`. The setPinned argument text is asserted, so a literal `false` fails,
+   and the position assertion is relative to `setChecked`, so moving the call above it
+   fails as well. (R3-M6)
+3. `pinButtonClicked`: the **first complete statement** of the body — the first element
+   of `selectionStatements( body )`, which keeps control flow, not
+   `selectionDirectActions()` which filters it — is the full statement
+   `focusLossCloser->setPinned( checked );` after whitespace normalisation. Moving the
+   call below the whole `if ( checked )` statement but above `show()` still fails.
+   (R2-M6, R3-m3)
 4. `engagePopup`, inside the `if ( !isVisible() )` branch only:
    - the full condition text `if ( giveFocus || ( !ui.pinButton->isChecked() &&
      PopupDismiss::needsExplicitActivation( windowFlags() ) ) )` is present;
    - its consequent contains `activateWindow();` then `raise();` in that order;
    - `show();` **precedes** that guarded block in the branch's statement list, so moving
-     the whole block above `show()` fails;
+     the block above `show()` fails;
    - the function contains exactly **three** `activateWindow()` calls, attributed one
      each to the hidden-window branch, the pinned-visible branch
-     (`scanpopup.cc:688-696`) and the pre-existing `#ifdef ENABLE_SPWF_CUSTOMIZATION`
+     (`scanpopup.cc:689-696`) and the pre-existing `#ifdef ENABLE_SPWF_CUSTOMIZATION`
      `xcb` `Tool` branch. A fourth, unconditional call fails the count; deleting a
-     preserved call fails the attribution. (R2-M5)
+     preserved call fails the attribution;
+   - the preserved assignment `giveFocus = true;` still exists inside the
+     `#ifdef ENABLE_SPWF_CUSTOMIZATION` block, guarded by
+     `QGuiApplication::platformName() == "xcb" && !ui.pinButton->isChecked()`, so removing
+     the pre-existing activation for the default `Qt::Popup` path fails.
+     (R2-M5, R3-M7)
 5. Unpin branch: after the shared `show()`, the activation request is guarded by
    `!checked && PopupDismiss::needsExplicitActivation( windowFlags() )`.
 6. `goldendict.pro`: `popupdismiss.hh` is in the `HEADERS` assignment and
@@ -564,9 +570,9 @@ its own copies of those small helpers. Each assertion names the mutant it kills.
 ### 8.4 What is not proven here
 
 The compositor's decision, and native popup-mode focus. No fixture can force KWin to grant
-or refuse activation, and none is written that pretends to; likewise a native `Qt::Popup`
-keyboard grab is proved only through the synthetic-`Context` fixture in §8.2(4) and the
-settlement fixtures, never claimed as a native owner-deactivation observation.
+or refuse activation, and none is written that pretends to; a native `Qt::Popup` keyboard
+grab is proved only through the synthetic-context fixture (§8.2(3)) and the settlement
+fixtures, never claimed as a native owner-deactivation observation.
 `docs/wayland-limitations.md` records the platform limit.
 
 ### 8.5 Acceptance commands
@@ -591,8 +597,9 @@ green. (R1-M4)
 `docs/wayland-limitations.md`:
 
 * §2's limit list gains the popup rule: the scan popup asks for activation when it opens
-  and closes when it loses focus; a refused activation leaves it open, and giving it
-  focus (a click) restores both Esc and click-away dismissal.
+  and closes when it loses focus — including when one of its own dialogs takes the
+  keyboard, as on X11; a refused activation leaves it open, and giving it focus (a click)
+  restores both Esc and click-away dismissal.
 * §3 keeps its "activation is best-effort" paragraph and adds that a refused request
   means the popup is dismissed manually, which is the documented consequence rather than
   a regression.
@@ -605,13 +612,15 @@ No README change: its Wayland summary does not claim the popup dismisses itself.
 | --- | --- |
 | a clipboard-triggered popup takes the keyboard from what the user is typing in | accepted by the operator as the price of X11 parity (D1); it is what `Qt::Popup` does on xcb today |
 | a compositor refuses focus, so nothing changes for the user | documented (§9); clicking the popup makes it dismissable, and the log records the request, not a refusal |
-| hiding while a menu or dialog is open | suppressed, then settled per §5.3, tested at rule and runtime level |
-| the popup is stranded by its own suppression | settlement with a bounded grace, plus the fixture that dismisses while the dialog is still registered as modal (R2-M1) |
-| a returning focus loses the race and the popup disappears under the user | the grace plus activation-cancels rule, with both orderings fixtured (R2-M2) |
+| the popup closes while a menu of its own is open | suppressed by the one guard parity needs, then settled at the deadline (§5.3) |
+| the popup is stranded after its menu closes | settlement with a deadline, fixtured from both sides and with a restarted deadline (§8.2(5–10)) |
+| a returning focus arrives later than the deadline and the popup is already gone | the accepted bounded race (D6), stated here and fixtured beyond the deadline (§8.2(7,8)); this is also the X11 outcome |
+| a dialog opened from the popup closes it | intended parity (D8), fixtured (§8.2(4)) |
 | a settlement callback runs after teardown | the timer and both filters are members of the closer; the destructor clears them, fixtured (§8.2(10)) |
+| the handler is re-entered by its own synchronous effects | `dismissing` guards both decision paths, fixtured (§8.2(13)) |
 | a deactivation delivered during the open transition closes the popup immediately | the rule requires `focusedSinceShown`, which only an activation sets |
 | the closer swallowing an event | it returns `false` for every event |
-| a regression on X11 | the default form is still `Qt::Popup` (`tst_platformwindow` pins the flags); the only X11 behaviour change is the stated `Tool`-form addition in §6.4 |
+| a regression on X11 | the default form is still `Qt::Popup` (`tst_platformwindow` pins the flags) and the preserved `giveFocus` assignment is asserted; the only X11 behaviour change is the stated `Tool`-form addition in §6.4 |
 | a new module that the application never links | `goldendict.pro` entries plus the application build in the acceptance command (D7) |
 
 ## 11. Out of scope
@@ -634,14 +643,14 @@ missing registration surfaces.
 
 | finding | severity | change |
 | --- | --- | --- |
-| suppressed deactivation strands the popup | major | §5.3 settlement, §6.2, §8.2(3) — **further corrected in R2** |
+| suppressed deactivation strands the popup | major | settlement introduced (§5.3), further reshaped in R2/R3 |
 | `setPinned` after `setWindowFlags` | major | §6.3(3) first statement; §8.3(3) |
 | unpin while visible cannot hide | major | §5.4 + §6.3(4); §8.3(5) |
 | `goldendict.pro` registration missing | major | D7, §6.3(6), §8.3(6), §8.5 |
-| modal fixture cannot activate a sibling | major | §8.2(3) |
-| source assertions too weak | major | §8.3(4) — **extended in R2** |
+| modal fixture cannot activate a sibling | major | the modal case is now the simple parity fixture §8.2(4) (D8) |
+| source assertions too weak | major | §8.3, extended in R2/R3 |
 | activation policy contradicts preserved `xcb` branches | major | §2 facts, §6.4 table, D5/§4 |
-| no runtime proof of `ownPopupOpen` | major | §8.2(4) — **restructured in R2** |
+| no runtime proof of `ownPopupOpen` | major | §8.2(3), restructured in R2/R3 |
 | pinned-open and Windows/macOS descriptions | minor | §5.1, §6.4 |
 | `tests.pro` does not select `xcb` | minor | §8.5 |
 | declined-activation fallback overstated | minor | §7 last row, §5.5, §9 |
@@ -653,10 +662,28 @@ missing registration surfaces.
 
 | finding | severity | change |
 | --- | --- | --- |
-| modal-stack test still strands the popup | major | §5.3 settled rule is "did focus come back to the chain", not "is a modal open"; §6.1 `onFocusSettled`; §8.2(3) asserts the dialog is still the active modal widget when the popup is dismissed |
-| zero-delay settlement cannot beat a returning activation | major | §5.3 bounded grace + activation-cancels; §6.1 `settleGraceMs` + `QTimer` member; §8.2(8,9) both orderings fixture plus the late-activation case |
-| deferred-work lifecycle incomplete | major | §6.1 timer member with `this` lifetime, §6.2 reset points, destructor, `suppressorGone`; §8.2(10) teardown and re-suppression fixtures |
-| owned-popup fixture assumes native popup activation | major | §8.2(4) synthetic `Context` proof, §8.2(5) separate native teardown proof, §8.4 states the non-claim |
-| "exactly twice" `activateWindow()` rejects valid wiring | major | §6.3(5) and §8.3(4): exactly three calls, one per permitted branch, with attribution |
-| two ordering mutants survive the assertions | major | §8.3(3) first *statement* (control flow kept); §8.3(4) `show()` precedes the guarded block |
-| three wrong references | minor | §6.3 refers to §8.3; `show()` at `scanpopup.cc:1102`; `hideWindow()` range 1176-1186 including `hide()` at `:1185` |
+| modal-stack test strands the popup | major | superseded by D8: modals are no longer a suppression cause |
+| zero-delay settlement cannot beat a returning activation | major | deadline + activation-cancels, restated as an accepted bounded race (D6) |
+| deferred-work lifecycle incomplete | major | §6.1 timer member, §6.2 reset points and destructor, §8.2(9,10) |
+| owned-popup fixture assumes native popup activation | major | §8.2(3) synthetic context proof; native claims removed |
+| "exactly twice" `activateWindow()` | major | exactly three, attributed (§6.3(5), §8.3(4)) |
+| two ordering mutants survive | major | §8.3(3) first complete statement; §8.3(4) `show()` precedes the block |
+| three wrong references | minor | corrected |
+
+### Round 3 → revision 4
+
+| finding | severity | change |
+| --- | --- | --- |
+| only one suppressor is watched, so an owned-dialog chain can strand the popup | major | D8 removes modal suppression entirely; the only suppressor is a menu, and a menu chain keeps `activePopupWidget()` owned (§6.2 `ownMenuActive`) |
+| a returning activation after 100 ms still races | major | made an explicit accepted bounded race (D6), fixtured on both sides and beyond the deadline (§8.2(5–8)) |
+| fixtures do not assert preconditions or zero early dismissals | major | §8.2 preamble; §8.2(3) states visible/unpinned/armed and zero dismissals; (4) is the parity proof |
+| synthetic deactivation does not make a window inactive | major | §8.2(3) is a context-construction proof, not a native-transition proof; the ordering fixtures (5–7) use a real menu close and assert the activation instead |
+| lifecycle fixtures do not distinguish restart from the running timer | major | §8.2(9) restarted deadline with assertions at half and twice the grace; (10) destruction and teardown |
+| constructor assertion ignores `setChecked` and the argument | major | §8.3(2) full ordered expectation including the argument text |
+| the preserved `xcb` `giveFocus` assignment is not pinned | major | §8.3(4) last bullet |
+| no dismissal-in-progress guard on the immediate path | major | `dismiss()` with `dismissing`, §6.1/§6.2, fixtured in §8.2(13) |
+| §5.2 wording contradicts the settled rule | minor | §5.2 labelled the immediate rule; §5.3 states the exception |
+| `settle()` signature inconsistent | minor | §6.1/§6.2 both use `settle( char const * why )` |
+| first-statement assertion text differs from the implementation | minor | §8.3(3) states the full receiver-bearing statement and normalisation |
+| background claims `Qt::Popup` only on `xcb` | minor | §2 corrected to match §6.4 |
+| hotkey token claim too broad | minor | §2 distinguishes the `scan-popup` binding (`winId()` then token) from `clipboard-lookup` (`NoHandle`, no token) |
