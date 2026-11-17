@@ -34,6 +34,32 @@ bool armedAfterShow( QWindow const * ownWindow, QWindow const * focusWindow );
 bool isOwnedPopup( QWidget const * owner, QWidget const * candidate );
 bool isPopupWindowType( Qt::WindowType type );
 
+class FocusLossCloser : public QObject {
+  Q_OBJECT
+public:
+  explicit FocusLossCloser( QWidget * window, QObject * parent = nullptr );
+  ~FocusLossCloser() override;
+
+  void setPinned( bool pinned );
+  bool isPinned() const;
+  void setDismissHandler( std::function< void() > handler );
+
+protected:
+  bool eventFilter( QObject * watched, QEvent * event ) override;
+
+private:
+  FocusDestination destinationOf( QWindow const * focusWindow ) const;
+  void dismiss( char const * reason );
+
+  QPointer< QWidget > window;
+  bool pinned = false;
+  bool armed = false;
+  bool dismissing = false;
+  QMetaObject::Connection focusConnection;
+  QMetaObject::Connection stateConnection;
+  std::function< void() > dismissHandler;
+};
+
 } // namespace PopupDismiss
 
 #endif // GOLDENDICT_POPUPDISMISS_HH_INCLUDED
