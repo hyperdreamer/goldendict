@@ -15,6 +15,8 @@
 #include "history.hh"
 #include "dictionarybar.hh"
 #include "mainstatusbar.hh"
+#include "popupdismiss.hh"
+#include <memory>
 #ifdef HAVE_X11
 #include "scanflag.hh"
 #endif
@@ -133,6 +135,7 @@ private:
   Instances::Groups const & groups;
   History & history;
   Ui::ScanPopup ui;
+  std::unique_ptr< PopupDismiss::FocusLossCloser > focusLossCloser;
   ArticleView * definition;
   QAction escapeAction, switchExpandModeAction, focusTranslateLineAction;
   QAction openSearchAction;

@@ -77,6 +77,8 @@ ScanPopup::ScanPopup( QWidget * parent,
   blueStarIcon( ":/icons/star_blue.png" )
 {
   ui.setupUi( this );
+  focusLossCloser = std::make_unique< PopupDismiss::FocusLossCloser >( this );
+  focusLossCloser->setDismissHandler( [ this ] { hideWindow(); } );
 
   openSearchAction.setShortcut( QKeySequence( "Ctrl+F" ) );
 
@@ -182,6 +184,7 @@ ScanPopup::ScanPopup( QWidget * parent,
   connect( ui.onTopButton, SIGNAL( clicked( bool ) ), this, SLOT( alwaysOnTopClicked( bool ) ) );
 
   ui.pinButton->setChecked( cfg.pinPopupWindow );
+  focusLossCloser->setPinned( ui.pinButton->isChecked() );
 
   if ( cfg.pinPopupWindow )
   {
@@ -670,7 +673,8 @@ void ScanPopup::engagePopup( bool forcePopup, bool giveFocus )
       giveFocus = true;
 #endif
 
-    if ( giveFocus )
+    if ( giveFocus || ( !ui.pinButton->isChecked() &&
+                       PopupDismiss::needsExplicitActivation( windowFlags() ) ) )
     {
       activateWindow();
       raise();
@@ -1076,6 +1080,7 @@ void ScanPopup::on_pronounceButton_clicked()
 
 void ScanPopup::pinButtonClicked( bool checked )
 {
+  focusLossCloser->setPinned( checked );
   if ( checked )
   {
     uninterceptMouse();
@@ -1100,6 +1105,12 @@ void ScanPopup::pinButtonClicked( bool checked )
   }
 
   show();
+
+  if ( !checked && PopupDismiss::needsExplicitActivation( windowFlags() ) )
+  {
+    activateWindow();
+    raise();
+  }
 
   if( checked )
     pinnedGeometry = saveGeometry();

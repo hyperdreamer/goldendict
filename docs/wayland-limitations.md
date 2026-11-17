@@ -47,6 +47,17 @@ remain separate behaviours. A selection alone does not open a new shortcut-drive
 popup. Automatic selection popups and held-modifier emulation on Wayland are outside
 this change. Hover translation and X11 focus restoration remain X11-only.
 
+An unpinned scan popup requests keyboard activation when it opens and closes as soon
+as focus leaves its own interaction, including when a dialog it opened takes the
+keyboard, as on X11. Its own menus and combo dropdowns keep the popup open, and
+pinned popups never auto-hide. If the compositor refuses activation, the popup
+remains open; click it to give it focus, after which clicking away hides it and Esc
+closes an open search panel first, or otherwise hides the popup.
+
+Automated tests cover the shared popup rule and its signal handlers on xcb. The
+compositor's focus decision and a genuine application-inactive transition require a
+live session and are not claimed here.
+
 Coverage is limited to the ext protocol. wlroots compositors (sway, hyprland and labwc)
 expose `zwlr_data_control_v1`; support is deferred. Its generated pair and bind attempt
 can later fit behind the same source interface without changing the pure selection
@@ -99,6 +110,10 @@ honour or decline, and there is no mechanism here that forces it. Nothing in thi
 migration promises that a window becomes focused, so a declined request is expected
 behaviour rather than a regression. Correspondingly, hover translation and X11 focus
 restoration stay X11-only (see §2).
+
+For the scan popup, a refused activation request means it must be dismissed manually,
+as described in §2. This is the documented consequence of best-effort activation
+rather than a regression.
 
 ## 4. Print/PDF: frozen snapshot, no HTML reflow
 
