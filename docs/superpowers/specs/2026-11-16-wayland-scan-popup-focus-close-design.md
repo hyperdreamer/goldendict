@@ -1,12 +1,15 @@
 # Wayland scan popup: close when it loses focus
 
-Status: design revision 5, for review. Run `pm-run-20261116-123313-27afee37`,
+Status: design revision 6, for review. Run `pm-run-20261116-123313-27afee37`,
 topic `wayland-scan-popup-focus-close`.
-Review history: R1 → 14 findings; R2 → 7; R3 → 13; R4 → 15 (1 blocker, 10 major,
-4 minor). Revisions 2–4 kept patching an activation-state model; this revision replaces
-it with an **event-driven focus-destination model**, which removes the blocker, the
-timer, all suppression state and eleven of R4's findings by construction. §13 is the
-finding-to-change ledger.
+Review history: R1 → 14 findings; R2 → 7; R3 → 13; R4 → 15 (1 blocker, which the
+activation-state model could not answer); R5 → 5 (0 blockers). Revision 5 replaced that
+model with an **event-driven focus-destination model** — no activation-state reads, no
+timer, no suppression state. Revision 6 closes R5: the owned-popup mapping now follows
+the focused window's transient-parent chain (so nested menus classify correctly and the
+fixture fails instead of skipping), the arming-after-show rule moved into a pure function
+with its own mutation-pinning assertion, and the last three partials are scoped or
+guarded. §13 is the finding-to-change ledger.
 
 **Scope limit of this document.** It specifies a design, not a test implementation.
 Most of the behaviour lives in `ScanPopup`, a translation unit no suite links (it needs
@@ -104,7 +107,9 @@ or decline … nothing in this migration promises that a window becomes focused"
 4. After it has been activated, no popup is left visible and unfocused: not when focus
    moves to another window, another application, or a dialog the popup opened, and not
    while and after one of its own menus is used. A popup that was never activated stays
-   as it is (the documented refusal case).
+   as it is (the documented refusal case). This is a promise about **this rule**; the
+   pre-existing pointer-proximity paths keep their behaviour, which on the `xcb` `Tool`
+   form can already hide a popup while one of its menus is open (§4). (R4-3)
 5. The parts that can be proven on this host are proven by execution; the part that
    needs a live compositor is documented as a limit, not claimed as a result.
 
@@ -219,10 +224,19 @@ Action onFocusMoved( bool visible, bool pinned, bool armed,
 /// every window type except Qt::Popup. Window hints never change the answer.
 bool needsExplicitActivation( Qt::WindowFlags flags );
 
+/// The arming value a `Show` establishes: the window is armed only if focus is
+/// already its own, which is the case when no activation event follows the show.
+bool armedAfterShow( QWindow const * ownWindow, QWindow const * focusWindow );
+
 /// True when `candidate` is a popup widget *belonging to* `owner`: owned, and not
 /// `owner` itself. Null-safe. The self-exclusion keeps a Qt::Popup-form popup from
 /// being taken for one of its own menus. (R4-m1)
 bool isOwnedPopup( QWidget const * owner, QWidget const * candidate );
+
+/// True when `window` is `ancestor` or has it in its transient-parent chain. Null-safe;
+/// recognises the popup widgets a menu or combo dropdown is reported as, including
+/// nested menus. (R5-M1)
+bool isTransientOf( QWindow const * window, QWindow const * ancestor );
 
 /// Watches one top-level window's focus and hides it when the rule says so.
 ///
@@ -247,7 +261,7 @@ private:
   FocusDestination destinationOf( QWindow const * focusWindow ) const;
   void dismiss( char const * reason );
 
-  QWidget * const window;            ///< observed top-level window, never null
+  QPointer< QWidget > window;        ///< observed top-level window; nulls on destruction
   bool pinned = false;
   bool armed = false;
   bool dismissing = false;           ///< re-entrancy guard for the handler
@@ -265,16 +279,19 @@ Decisions that keep the module honest:
   focus-window identity and application state only. (R4-B1)
 * **No timer, no suppression state.** Arming is the only state besides pinning, and it
   is set and cleared by two events. (D9)
-* **Connections are context-bound.** Both `QObject::connect` calls pass `this` as the
-  receiver, so Qt removes them when the closer is destroyed; the destructor also
-  disconnects explicitly and removes the Show/Hide filter. A slot that destroys the
-  closer is legal: `dismiss()` uses a `QPointer` guard and returns without touching any
-  member afterwards. (R4-M10)
+* **Every reference is guarded.** The observed window is a `QPointer`, so a handler that
+  deletes the window leaves the closer usable and inert instead of dereferencing freed
+  memory. Both `QObject::connect` calls pass `this` as the receiver, so Qt removes them
+  when the closer is destroyed; the destructor also disconnects explicitly and removes
+  the Show/Hide filter. A slot that destroys the closer is legal: `dismiss()` re-checks a
+  `QPointer` to itself and returns without touching any member afterwards.
+  (R4-M10, R4-11)
 * **One dismissal path, guarded.** Both the focus slot and the application-state slot
   call `dismiss()`, which returns immediately while `dismissing`, and clears the flag
-  only if the object still exists after the handler returned. `hideWindow()` is
-  therefore called at most once per decision, even though it is not itself idempotent —
-  it emits `closeMenu()` before hiding. (R4-M9)
+  only if the object still exists after the handler returned. `hideWindow()` is *not*
+  idempotent — it emits `closeMenu()` on every call — so the closer guarantees at most
+  one call per decision and adds nothing to the pre-existing callers, which keep their
+  behaviour unchanged. (R4-M9, R4-10)
 * **Logging** is one `qCDebug` line per decision on the category
   `goldendict.popup.dismiss`, naming the rule and the destination that decided it. It
   logs *decisions*, never window titles or looked-up words, and it cannot explain a
@@ -284,7 +301,7 @@ Decisions that keep the module honest:
 
 | Source | Event | Condition | Effect |
 | --- | --- | --- | --- |
-| window | `Show` | — | `armed = ( window->windowHandle() != nullptr && QGuiApplication::focusWindow() == window->windowHandle() )` |
+| window | `Show` | — | `armed = armedAfterShow( window->windowHandle(), QGuiApplication::focusWindow() )` |
 | window | `Hide` | — | `armed = false` |
 | `QGuiApplication` | `focusWindowChanged( QWindow * )` | destination `OwnWindow` | `armed = true`; nothing else |
 | `QGuiApplication` | `focusWindowChanged( QWindow * )` | destination `OwnPopup` | nothing — the interaction continues, `armed` is unchanged |
@@ -295,13 +312,31 @@ Decisions that keep the module honest:
 `destinationOf()` is the only place that maps a `QWindow` to a destination:
 
 ```cpp
+if( !window ) return FocusDestination::Foreign;          // the window is gone
 if( !focusWindow ) return FocusDestination::None;
 if( focusWindow == window->windowHandle() ) return FocusDestination::OwnWindow;
-if( isOwnedPopup( window, QApplication::activePopupWidget() ) &&
-    focusWindow == QApplication::activePopupWidget()->windowHandle() )
+
+// A menu or combo dropdown is recognised by either signal the platform provides:
+// the popup it reports, or the transient-parent chain from the focused window up to
+// the popup's own window. Nested menus satisfy the chain even when the reported
+// active popup is not the focused one.
+QWidget * const activePopup = QApplication::activePopupWidget();
+if( isOwnedPopup( window, activePopup ) &&
+    focusWindow == activePopup->windowHandle() )
   return FocusDestination::OwnPopup;
+if( isTransientOf( focusWindow, window->windowHandle() ) )
+  return FocusDestination::OwnPopup;
+
 return FocusDestination::Foreign;
 ```
+
+`isTransientOf()` walks `QWindow::transientParent()` from the focused window upwards and
+reports whether it reaches the popup's own window. That is the chain Qt sets for menus
+and dropdowns on both `xcb` and Wayland, and it is why nested menus and a menu whose
+own focus window differs from `activePopupWidget()` are still classified as `OwnPopup`.
+Both signals are required, not optional: the runtime fixture asserts that a real owned
+menu satisfies at least one of them, so the mapping cannot silently degrade to
+`Foreign`. (R5-M1)
 
 `dismiss( reason )` returns immediately when `dismissing` is set, otherwise sets it,
 logs, calls the handler under a `QPointer` guard, and clears the flag only if the closer
@@ -394,8 +429,9 @@ that the X11 behaviour change is a stated decision rather than an accident. (R1-
 | the menu closes and focus returns to the popup | `focusWindowChanged( own handle )`: kept and re-armed |
 | a second menu opens after the first closed | each move is its own event; no suppressor bookkeeping exists to get out of date |
 | the handler hides the window synchronously | the resulting `Hide` clears `armed`; `dismissing` prevents a nested decision |
-| the handler destroys the closer or the window | tolerated: `dismiss()` returns under a `QPointer` guard, and Qt removes the connections |
-| other code paths call `hideWindow()` | unchanged; the closer adds no requirement on them (§4) |
+| the handler destroys the closer | tolerated: `dismiss()` re-checks a `QPointer` to itself and touches nothing afterwards |
+| the handler destroys the window | tolerated: the window is a `QPointer`, so a null check makes the closer inert and Qt removes the connections |
+| other code paths call `hideWindow()` | unchanged; the closer adds no requirement on them and never calls it more than once per decision (§4, §6.1) |
 | activation refused by the compositor | no activation event, so nothing is armed: the popup stays. Clicking it gives it focus, after which focus leaving hides it, and Esc reaches it (closing an open search panel first, as `escapePressed()` already does) |
 
 ## 8. Test strategy
@@ -420,6 +456,14 @@ that reordering `&&` operands is observable, because it is not.
 popup widget, a grandchild, a sibling, an unrelated top-level, and a menu parented to a
 different window. (R4-m1)
 
+`armedAfterShow`: same handle → true; different handle → false; null own handle (no
+native handle yet) → false; null focus window → false.
+
+`isTransientOf`: the focused window itself → true; a direct transient child → true; a
+nested transient grandchild → true; an unrelated window → false; null on either side →
+false. This is what keeps nested menus classified as `OwnPopup` without depending on
+which window the platform reports as the active popup. (R5-M1)
+
 ### 8.2 Runtime behaviour of the production `FocusLossCloser`
 
 On the `xcb` + `xvfb` acceptance display (§8.5). Every fixture drives the production
@@ -434,12 +478,16 @@ transitions it relies on instead of assuming them: each step waits for
    `QTRY_COMPARE` the handler ran once and `first` is hidden.
 2. **pinned does not hide** — the same drive with `setPinned( true )`; the handler never
    runs and the window stays visible.
-3. **a menu of the popup's own keeps it** — `first` activated; an owned `QWidget` with
-   `setWindowFlags( Qt::Popup )` shown, with `QApplication::activePopupWidget() ==
-   &menu` asserted; the platform focus transition to the menu asserted
-   (`focusWindow() == menu.windowHandle()`) or, if this QPA does not report the popup as
-   the focus window, the fixture `QSKIP`s with that reason rather than pretending. While
-   that holds, the handler never runs.
+3. **a menu of the popup's own keeps it, and the mapping is proven, not skipped** —
+   `first` activated; an owned `QWidget` with `setWindowFlags( Qt::Popup )` shown. The
+   fixture asserts the **recognition predicate** the production code uses: either
+   `activePopupWidget()` is that widget and `focusWindow()` is its handle, or
+   `isTransientOf( focusWindow(), first->windowHandle() )` is true. If neither holds, the
+   fixture **fails** — that is a platform fact the design depends on, not an environment
+   excuse to skip. While that holds, the handler never runs. (R5-M1)
+3a. **a nested owned menu is still `OwnPopup`** — a second `Qt::Popup` widget is opened
+    from the first menu (or parented to it) and the recognition predicate is asserted
+    again, so a chain that is two levels deep cannot be mistaken for `Foreign`.
 4. **opening the popup's own dialog hides it** — a dialog parented to `first` is shown;
    assert the focus transition to the dialog and `QTRY_COMPARE` the handler ran once,
    with `first` hidden and the dialog still visible.
@@ -451,6 +499,15 @@ transitions it relies on instead of assuming them: each step waits for
 7. **re-show arms only on a real activation** — after a hide, `first` is shown while
    `second` keeps focus (asserted); activating a third window then does not dismiss
    `first`.
+7a. **a popup shown while it already holds focus is armed by the show itself** — the
+    closer is constructed while `first` is visible and its handle is the focus window
+    (`QTRY_COMPARE( QGuiApplication::focusWindow(), first.windowHandle() )`); `first` is
+    then hidden and shown again, and the fixture asserts the focus identity is still
+    `first` at the moment of the second show. Moving focus to `second` must dismiss it,
+    which is impossible unless the `Show` handler armed the window — the only other
+    arming path (`focusWindowChanged`) did not fire for it. If the QPA clears focus when
+    a window hides, this fixture reports that as a failure of the platform assumption the
+    design relies on, never as a silent pass. (R5-M2)
 8. **a handler that causes another focus move is not re-entered** — a handler that
    synchronously activates `second` and re-activates `first` is installed; the drive of 1
    still calls it exactly once.
@@ -477,6 +534,11 @@ and the assignment line inside that region). (R4-M11)
 1. `scanpopup.hh` includes `popupdismiss.hh`, declares the
    `PopupDismiss::FocusLossCloser` member, and adds **no** `event(` / `changeEvent(`
    override.
+1a. `popupdismiss.cc`: the `Show` branch assigns `armed` from
+   `PopupDismiss::armedAfterShow( window->windowHandle(),
+   QGuiApplication::focusWindow() )` and the `Hide` branch sets `armed = false`. Deleting
+   the `Show` assignment, or replacing its argument with a literal, fails this assertion;
+   the pure function's own behaviour is covered by the matrix in §8.1. (R5-M2)
 2. Constructor, as one ordered expectation over the constructor block:
    `ui.setupUi( this )` → construction of `PopupDismiss::FocusLossCloser` on `this` →
    `setDismissHandler` naming `hideWindow` → `ui.pinButton->setChecked( cfg.pinPopupWindow )`
@@ -617,3 +679,13 @@ requirement, and the acceptance commands.
 | `Qt::Popup` claimed for every `xcb` form | minor | §2 qualified by stored form |
 | `NoHandle` stated unconditionally | minor | §2 now says "only when no handle exists yet" |
 | goal 4 contradicts the refusal case | minor | §3(4) qualified to "after it has been activated" |
+
+### Round 5 → 6
+
+| finding | severity | change |
+| --- | --- | --- |
+| `OwnPopup` recognised only by `activePopupWidget()` identity, and the fixture could skip that | major | §6.2 recognises an owned popup by the focused window's transient-parent chain **or** the reported popup, via the new pure `isTransientOf()`; §8.1 tests the chain; §8.2(3,3a) assert the recognition predicate on real windows and **fail** rather than skip, including a nested menu (R5-M1) |
+| no fixture for `Show` while focus already equals the popup handle | major | §6.1 adds the pure `armedAfterShow()`; §8.1 covers it; §8.2(7a) drives it with an asserted focus identity; §8.3(1a) pins its use in the `Show` branch (R5-M2) |
+| goal 4 still promises menu survival while the `xcb` `Tool` pointer paths can hide it | partial | §3(4) scoped to this rule and cross-referenced to §4 (R4-3) |
+| direct `hideWindow()` callers bypass the guard | partial | §6.1/§7 state that `hideWindow()` is not idempotent and that only this closer guarantees one call per decision (R4-10) |
+| the observed window was a raw pointer | partial | `window` is a `QPointer< QWidget >`; §6.1 and §7 document the inert-after-destruction behaviour (R4-11) |
