@@ -1,6 +1,6 @@
 # Scan popup crash on an empty resource payload
 
-Status: revised after design review round 1
+Status: revised after design review rounds 1 and 2
 Date: 2026-11-16
 Run: pm-run-20261116-203148-068023b6
 Target: `refs/heads/master` at `30a7111d750ea1aac214b208172640e0dd10befd`
@@ -37,8 +37,8 @@ f.read( &data.front(), data.size() );   // front() on an empty vector
 
 Evidence, independent of the stack text:
 
-- `run + 0x348` (`0x3571a2`) calls `File::loadFromFile`, and the recorded frame
-  `run + 0x350` (`0x3571a8`) is exactly the return address of that call.
+- `run + 0x342` (`0x3571a2`) calls `File::loadFromFile`; the recorded frame
+  `run + 0x348` (`0x3571a8`) is exactly the return address of that call.
 - `File::loadFromFile` branches at `0x1bc1e0` to its cold assertion block at
   `0xe2ad1` when the vector is empty; the recorded frame `0xe2af1` is that block's
   return address.
@@ -104,14 +104,14 @@ the payload below.
 | Image | `dsl.cc:2034-2062` | Same decode and BMP-copy shape. |
 | Image | `gls.cc:1384-1414` | Same. |
 | Image | `stardict.cc:1678-1708` | Same. |
-| Image | `slob.cc:1686-1712` | BMP copy only (decodes from the local resource string). |
-| Image | `zim.cc:1601-1627` | BMP copy only. |
-| Archive resource | `slob.cc:1717-1718` | Empty stored entry copied through `front()`. |
-| Archive resource | `zim.cc:1632-1633` | Same. |
-| Compressed resource | `bgl.cc:1046-1071` | Empty name/compressed/decompressed buffers read or passed to `front()`/`uncompress`. |
+| Image | `slob.cc:1686-1712` | Decodes from the non-empty resource string, but the `GdTiff` fallback at `slob.cc:1693` passes the still-empty `data` vector as a pointer; the BMP copy can also be empty. |
+| Image | `zim.cc:1601-1627` | Same fallback at `zim.cc:1608` and the same BMP copy. |
+| Archive resource | `slob.cc:1715-1718` | Defensive only: `slob.cc:1669` rejects an empty resource string first, and `nameData` is always present here. |
+| Archive resource | `zim.cc:1630-1633` | Defensive only: `zim.cc:1584` rejects an empty resource string first. |
+| Compressed resource | `bgl.cc:1045-1078` | Empty name, compressed, or decompressed buffers read or passed to `front()`/`uncompress`; a zero-length name must still consume its trailing offset, and a valid empty stream must stay a successful empty resource. |
 
-The article-image size probe at `dsl.cc:1001-1011` is excluded: it is not a payload
-producer, and its `imgdata` is guarded by the image loader that fills it.
+The article-image size probe at `dsl.cc:1001-1011` is excluded because
+`dsl.cc:987` guards `imgdata` before the pointer is formed.
 
 ## Design
 
@@ -160,7 +160,7 @@ QByteArray tiffToBmp( char const * bytes, std::size_t size );
 ```
 
 Callers keep their mutex and their current source: `data` in dsl/gls/stardict/xdxf,
-the local resource string in slob/zim. They assign only a non-empty result:
+the non-empty local resource string in slob/zim. They assign only a non-empty result:
 
 ```cpp
 QByteArray const bmp = ImagePayload::tiffToBmp( source.data(), source.size() );
@@ -176,25 +176,34 @@ in dsl/gls/stardict, empty in slob/zim), while empty input never forms a pointer
 ### Remaining sites
 
 - `file.cc:57-66`: resize from the file size, then read only when the vector is
-  non-empty. `sounddir.cc` gets the same guard.
+  non-empty. `sounddir.cc:376-386` gets the same guard.
 - `epwing.cc`: `Payload::assign( data, buffer.constData(), buffer.size() )`.
-- `slob.cc` / `zim.cc` archive resources: `Payload::assign( data, resource.data(),
-  resource.size() )`.
-- `bgl.cc`: guard the three payloads at their own sizes — skip a zero-length name,
-  a zero-length compressed block, and a zero-length decompressed buffer instead of
-  reading or decompressing them.
+- `slob.cc`/`zim.cc` archive resources: `Payload::assign( data, resource.data(),
+  resource.size() )` as defensive cleanup.
+- `bgl.cc:1045-1078`, in this order:
+  - read the name length and the name bytes only when the name length is non-zero;
+  - **always** read the trailing `uint32` offset, so an empty-name record cannot
+    desynchronise the directory;
+  - read the compressed block only when its length is non-zero;
+  - decompress a zero-length output into a one-byte scratch buffer instead of
+    `data.front()`, and keep the existing success rule: a valid stream whose
+    produced length matches the advertised length sets `hasAnyData`, including
+    when that length is zero.
 
 ### Empty-payload behaviour, exactly
 
-No `hasAnyData` line and no reader semantics change. The per-mechanism outcome is:
+No `hasAnyData` line and no reader semantics change. The outcomes are:
 
-| Mechanism | Empty outcome | `dataSize()` |
+| Case | Outcome | `dataSize()` |
 | --- | --- | --- |
-| MDD stylesheet | Raw resource existed, so `hasAnyData` was already set at `mdx.cc:900`; the isolated payload is empty. | `0` (successful empty stylesheet) |
-| GLS/StarDict/SLOB/ZIM/website stylesheet | `hasAnyData` is set after the payload block as today. | `0` |
-| Image conversion | `hasAnyData` is set after the resource block as today; an empty payload is an empty successful resource. | `0` |
-| `File::loadFromFile` callers | The caller's existing `data.size() > 0` test decides; the MDD request treats an empty local file as no data, exactly as it treats any empty resource. | `-1` at the MDD call site |
-| Archive/compressed resource | Existing success flag rules; a zero-length entry no longer aborts. | unchanged per site |
+| MDD stylesheet transformed to empty | `hasAnyData` was already set at `mdx.cc:900` from the raw resource; the isolated payload is empty. | `0` |
+| MDD request, empty local file | `File::loadFromFile` returns empty; the request's existing `data.size() > 0` test leaves the flag unset. | `-1` |
+| GLS/StarDict/SLOB/ZIM/website stylesheet transformed to empty | `hasAnyData` is set after the payload block as today. | `0` |
+| SLOB/ZIM initially empty resource | Rejected by `slob.cc:1669` / `zim.cc:1584` before any payload work, exactly as today. | `-1` |
+| Image resource, empty or undecodable | The block leaves the payload as today and the resource block sets success. | `0` |
+| Archive resource, empty stored entry | Defensive only; the enclosing backend rejects an empty resource first. | `-1` |
+| BGL valid empty stream | Decompression succeeds with a zero advertised length; success is published. | `0` |
+| BGL corrupt or truncated stream | `uncompress` fails; success is not published. | `-1` |
 
 The specification pins each row to its source line before implementation.
 
@@ -215,37 +224,62 @@ A new no-display suite, `tests/tst_resource_payload`.
 - `QTEST_GUILESS_MAIN` (no `QApplication`, no display).
 - Compiled with `QMAKE_CXXFLAGS += -D_GLIBCXX_ASSERTIONS`, matching the Arch package,
   so the pre-repair empty accesses abort exactly as the reported coredump did.
-- Suite-local `Config` substitutes (as `tst_btree_index` does) and a minimal concrete
-  `Dictionary::Class` fixture implementing the four pure virtuals, so
-  `setIsolatedCssPayload()` can be exercised without Chromium.
+- Suite-local `Config` substitutes (as `tst_btree_index` does).
+- A minimal concrete `Dictionary::Class` fixture implementing **all six** pure
+  virtuals with their real signatures: `getName`, `getProperties`,
+  `getArticleCount`, `getWordCount`, `prefixMatch`, and `getArticle`; the first four
+  return inert values and the two request methods return instant empty requests.
 - `dictionary.hh` is listed in `HEADERS` so its `Q_OBJECT` classes are MOCed.
 - Link closure: `dictionary.cc`, `file.cc`, `fsencoding.cc`, `mutex.cc`, `utf8.cc`,
   `wstring.cc`, `wstring_qt.cc`, `wildcard.cc`, `folding.cc`, `gddebug.cc`,
-  `zipfile.cc`, `splitfile.cc`, `imagepayload.cc`, the suite source; Qt core and gui;
-  `-lz`.
+  `zipfile.cc`, `splitfile.cc`, `imagepayload.cc`, `tiff.cc` (with
+  `!CONFIG(no_extra_tiff_handler): LIBS += -ltiff`, exactly as `tst_utf8_wstring`
+  does), the suite source; Qt core and gui; `-lz`.
 
 Cases:
 
-1. `payloadAssign_emptyLeavesVectorEmpty` — fails by abort before the repair.
-2. `payloadAssign_copiesExactBytes`
-3. `payloadAssign_replacesLongerContent`
-4. `payloadAppend_emptyIsNoOp`
-5. `payloadAppend_appendsExactly`
-6. `loadFromFile_zeroByteFileIsEmpty` — the reported abort; fails before the repair.
-7. `loadFromFile_readsExactBytes`
-8. `setIsolatedCssPayload_commentOnlyYieldsEmpty`
-9. `setIsolatedCssPayload_pageOnlyYieldsEmpty`
-10. `setIsolatedCssPayload_prefixesOrdinaryRules`
-11. `tiffToBmp_emptyInputYieldsEmpty`
-12. `tiffToBmp_undecodableInputYieldsEmpty`
-13. `tiffToBmp_producesBmpFromValidTiff` — the fixture is generated at runtime with
-    `QImageWriter` when TIFF writing is available (the Qt TIFF plugin is installed on
-    this host); otherwise the case is pinned by an immutable TIFF fixture under
-    `tests/fixtures/imagepayload/`.
+| # | Case | Class |
+| --- | --- | --- |
+| 1 | `payloadAssign_emptyLeavesVectorEmpty` | failing-first |
+| 2 | `payloadAssign_copiesExactBytes` | control |
+| 3 | `payloadAssign_replacesLongerContent` | control |
+| 4 | `payloadAppend_emptyIsNoOp` | failing-first |
+| 5 | `payloadAppend_appendsExactly` | control |
+| 6 | `loadFromFile_zeroByteFileIsEmpty` | failing-first (the reported abort) |
+| 7 | `loadFromFile_readsExactBytes` | control |
+| 8 | `setIsolatedCssPayload_commentOnlyYieldsEmpty` | failing-first |
+| 9 | `setIsolatedCssPayload_pageOnlyYieldsEmpty` | failing-first |
+| 10 | `setIsolatedCssPayload_prefixesOrdinaryRules` | control |
+| 11 | `tiffToBmp_emptyInputYieldsEmpty` | control |
+| 12 | `tiffToBmp_undecodableInputYieldsEmpty` | control |
+| 13 | `tiffToBmp_producesBmpFromValidTiff` | control |
 
-Cases 1 and 6 are run individually in the failing-first phase; the remaining cases are
-baseline-preserving controls. The abort signature is the same `__glibcxx_assert_fail`
-on `std::vector<char>::front()`.
+The failing-first cases run individually in the extraction phase; the controls must
+pass in both phases. Case 13 generates its TIFF at runtime with `QImageWriter` (the
+Qt TIFF plugin is installed) and falls back to an immutable fixture under
+`tests/fixtures/imagepayload/` if the writer is unavailable.
+
+### Failing-first extraction and concrete mutations
+
+The seams first land as behaviour-preserving extractions: `payload.hh` keeps the
+current unsafe `resize`+`front()` body, `setIsolatedCssPayload` keeps the current
+copy, `tiffToBmp` moves the decode sequence, and the backends are rewired. The suite
+then aborts in cases 1, 4, 6, 8 and 9 with the same `__glibcxx_assert_fail` signature
+as the coredump. Only then are the guards added.
+
+The audit mutation-probes exactly these mechanisms, each with its killing case:
+
+| Mechanism | Mutation | Observable failure |
+| --- | --- | --- |
+| `Payload::assign` | remove the zero-size guard | case 1 aborts |
+| `Payload::append` | remove the zero-size guard | case 4 aborts |
+| `File::loadFromFile` | remove the empty-vector guard | case 6 aborts |
+| `setIsolatedCssPayload` | substitute the old `resize`+`front()` copy | cases 8 and 9 abort |
+
+`tiffToBmp` takes a pointer and a size, so it has no removable guard; cases 11–13 pin
+its empty, undecodable and positive semantics, and caller wiring is covered by the
+inventory check below. The audit does not claim an abort for a mechanism that cannot
+produce one.
 
 ### Suite inventory
 
@@ -261,15 +295,18 @@ spec and plan documents keep their recorded counts.
 All emptying and replacing logic lives in five linked, tested seams: `Payload::assign`,
 `Payload::append`, `File::loadFromFile`, `Class::setIsolatedCssPayload`, and
 `ImagePayload::tiffToBmp`. Each backend row above becomes a single call to one of
-them; no backend keeps its own resize/copy/front sequence.
+them; no backend keeps its own resize/copy/front or decode sequence.
 
-The audit verifies wiring deterministically in two ways:
+The audit verifies wiring deterministically:
 
-- it checks the diff touches exactly the inventory rows and leaves no
-  `resize(...)` followed by `memcpy(&data.front()...)`/`f.read(&data.front()...)`
-  in the resource translation units;
-- it mutation-probes each linked seam (remove the zero-size guard) and records the
-  suite case that aborts, then restores and reruns green.
+- it checks the diff touches exactly the inventory rows;
+- it enumerates every remaining `front()` and `&…front()` in the resource translation
+  units (`mdx`, `gls`, `stardict`, `slob`, `zim`, `website`, `dsl`, `xdxf`, `bgl`,
+  `epwing`, `sounddir`, `file`) and requires each remaining one to be provably inside
+  a non-empty branch (`mdx.cc:887`, for example, is guarded by `data.size() >
+  sizeof(pattern)`), so an empty-TIFF `QImage::fromData(&data.front(), …)` cannot
+  hide behind a repaired BMP copy;
+- it mutation-probes the four mechanisms above and records the killing case.
 
 ## Risks
 
@@ -278,17 +315,26 @@ The audit verifies wiring deterministically in two ways:
 - **Unlinked backend wiring.** Backend one-line calls cannot be executed from the
   suite; the seam extraction plus the audit's inventory and mutation probes are the
   compensating control.
+- **Conditional translation units.** `zim.cc` compiles only under
+  `CONFIG+=zim_support`, and EPWING is included unless `no_epwing_support` is set.
+  Verification therefore builds with the package's feature set.
+- **Feature drift.** `MAKE_EXTRA_TIFF_HANDLER` is on by default; the suite and the
+  application build both link `tiff.cc`/`-ltiff` under the same condition.
 - **TIFF fixture portability.** If `QImageWriter` cannot write TIFF at test runtime,
   the committed fixture keeps the positive case deterministic.
-- **Behaviour drift.** An empty payload must stay a successful empty resource
-  wherever `hasAnyData` is already set; the specification pins each site.
+- **Behaviour drift.** The empty outcome table above is the contract; the
+  specification pins each row to its source line.
 
 ## Verification
 
 - Build and run the full 21-suite gate from the integration worktree.
-- Build the application, which is the compile proof for every backend touched.
-- Record the failing-first aborts for cases 1 and 6 on the pre-repair extraction.
-- Run the inventory check and the seam mutation probes during the audit.
+- Build the application with the package's configuration —
+  `qmake6 goldendict.pro PREFIX=/usr CONFIG+=chinese_conversion_support
+  CONFIG+=zim_support` — and require compile evidence that `zim.cc`, `epwing.cc`,
+  `tiff.cc`, and every touched backend produced objects; the default build alone may
+  compile an empty `zim.cc`.
+- Record the failing-first aborts for cases 1, 4, 6, 8 and 9 on the extraction.
+- Run the front() inventory and the four mutation probes during the audit.
 - If the dictionary folder that produced the coredump is identified, load that
   dictionary's real empty local resource through the repaired tree before delivery.
 
@@ -296,19 +342,20 @@ The audit verifies wiring deterministically in two ways:
 
 - The reported abort no longer occurs on a zero-byte local resource file.
 - No resource-payload site in the inventory retains the unguarded
-  resize/copy/read idiom.
-- `tst_resource_payload` aborts on the pre-repair code and passes on the repaired
-  code; the 21-suite gate and the application build pass.
+  resize/copy/read or decode-pointer idiom.
+- `tst_resource_payload` aborts on the pre-repair extraction and passes on the
+  repaired code; the 21-suite gate and the feature-enabled application build pass.
 - Non-empty payloads and the success-versus-missing contract are unchanged.
 
-## Review round 1 dispositions
+## Review dispositions
+
+Round 1:
 
 - DR-1 accepted: diagnosis corrected to `File::loadFromFile`; the CSS copy is a
   separate defect.
 - DR-2 accepted: inventory expanded to every resource-payload site across backends;
   article producers excluded with explicit invariants.
-- DR-3 accepted: the `QBuffer::constData` error disappears with `tiffToBmp`; the
-  backing `QByteArray` is used where a byte buffer is needed.
+- DR-3 accepted: the `QBuffer::constData` error disappears with `tiffToBmp`.
 - DR-4 accepted: the exact empty outcome and `dataSize()` value are stated above.
 - DR-5 accepted: every live count pin changes, including `goldendict.pro`.
 - DR-6 accepted: the new suite is assertion-enabled so the RED abort is real.
@@ -317,3 +364,20 @@ The audit verifies wiring deterministically in two ways:
 - DR-8 accepted: risky logic is extracted into linked seams; wiring is verified by
   the audit's inventory check and mutation probes.
 - DR-9 accepted: the XDXF article copy is excluded as unreachable.
+
+Round 2:
+
+- DR2-1 accepted: `tiff.cc` and conditional `-ltiff` join the suite closure.
+- DR2-2 accepted: the fixture implements all six pure virtuals.
+- DR2-3 accepted: the empty-outcome table now separates initially empty,
+  transformed-empty, and invalid resources per backend; BGL keeps a valid empty
+  stream successful.
+- DR2-4 accepted: an empty BGL name still consumes its offset before the skip.
+- DR2-5 accepted: the inventory check enumerates remaining `front()` uses, not just
+  `resize`+copy, and covers the fallback decoders.
+- DR2-6 accepted: each mechanism has a concrete mutation and killing case;
+  `tiffToBmp` is a semantics control, not a fabricated abort.
+- DR2-7 accepted: verification builds with the package feature set and requires
+  object evidence for the conditional translation units.
+- DR2-8 accepted: SLOB/ZIM fallback and archive rows are corrected and classified.
+- DR2-9 accepted: the offsets are `run+0x342` and `run+0x348`.
