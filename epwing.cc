@@ -24,6 +24,7 @@
 #include "utf8.hh"
 #include "filetype.hh"
 #include "ftshelpers.hh"
+#include "payload.hh"
 
 namespace Epwing {
 
@@ -781,9 +782,7 @@ void EpwingResourceRequest::run()
 
       Mutex::Lock _( dataMutex );
 
-      data.resize( buffer.size() );
-
-      memcpy( &data.front(), buffer.data(), data.size() );
+      Payload::assign( data, buffer.constData(), buffer.size() );
 
       hasAnyData = true;
     }
