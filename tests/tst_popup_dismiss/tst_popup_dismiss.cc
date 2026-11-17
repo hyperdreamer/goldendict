@@ -9,6 +9,7 @@
 #include <QSignalSpy>
 #include <QPointer>
 #include <QFile>
+#include <QFileInfo>
 #include <QDir>
 #include <QRegularExpression>
 #include <QSet>
@@ -509,6 +510,62 @@ bool hasInclude( QString const & raw, QString const & token )
   for( qsizetype i = 0; i + wanted.size() <= tokens.size(); ++i )
     if( tokens.mid( i, wanted.size() ) == wanted ) return true;
   return false;
+}
+// The build files are qmake, not C++: these helpers strip only real qmake
+// comments, join physical continuations, and keep scope depth outside quoted
+// strings. They never evaluate qmake and never apply the C++ normaliser.
+QString qmakeUncomment( QString const & text )
+{
+  QString result; QChar quote; bool escaped = false, comment = false;
+  for( QChar c : text )
+  {
+    if( c == '\n' ) { result += c; comment = false; escaped = false; continue; }
+    if( comment ) continue;
+    if( escaped ) { result += c; escaped = false; continue; }
+    if( c == '\\' ) { result += c; escaped = true; continue; }
+    if( !quote.isNull() ) { result += c; if( c == quote ) quote = QChar{}; continue; }
+    if( c == '"' || c == '\'' ) { quote = c; result += c; continue; }
+    if( c == '#' ) { comment = true; continue; }
+    result += c;
+  }
+  return result;
+}
+QStringList qmakeLines( QString const & text )
+{
+  QStringList result; QString pending;
+  for( QString line : qmakeUncomment( text ).split( '\n' ) )
+  {
+    line = line.trimmed();
+    bool const continued = line.endsWith( '\\' );
+    if( continued ) line.chop( 1 );
+    pending += line + ' ';
+    if( !continued ) { if( !pending.trimmed().isEmpty() ) result.append( pending.trimmed() ); pending.clear(); }
+  }
+  if( !pending.trimmed().isEmpty() ) result.append( pending.trimmed() );
+  return result;
+}
+struct QmakeAssignment { int depth; QStringList values; };
+QList< QmakeAssignment > qmakeAssignments( QString const & text, QString const & variable )
+{
+  QRegularExpression const assign( "^" + QRegularExpression::escape( variable ) + "\\s*\\+?=\\s*(.*)$" );
+  QList< QmakeAssignment > result; int depth = 0;
+  for( QString const & line : qmakeLines( text ) )
+  {
+    auto const match = assign.match( line );
+    if( match.hasMatch() ) result.append( { depth, match.captured( 1 ).split( QRegularExpression( "\\s+" ), Qt::SkipEmptyParts ) } );
+    QChar quote; bool escaped = false;
+    for( QChar c : line )
+    {
+      if( escaped ) { escaped = false; continue; }
+      if( c == '\\' ) { escaped = true; continue; }
+      if( !quote.isNull() ) { if( c == quote ) quote = QChar{}; continue; }
+      if( c == '"' || c == '\'' ) { quote = c; continue; }
+      if( c == '{' ) ++depth;
+      else if( c == '}' ) --depth;
+    }
+    if( depth < 0 ) return {};
+  }
+  return depth == 0 ? result : QList< QmakeAssignment >{};
 }
 } // namespace
 
@@ -1123,6 +1180,65 @@ private slots:
     QCOMPARE( selectionCount( body, "activateWindow(" ), 1 );
     QVERIFY( selectionOrdered( body, { "show();", guard, "activateWindow();", "raise();",
                                       "if( checked ) pinnedGeometry = saveGeometry();" } ) );
+  }
+
+  void applicationProjectRegistersPopupDismiss()
+  {
+    QString const project = source( "goldendict.pro" ); QVERIFY( !project.isEmpty() );
+    auto const headers = qmakeAssignments( project, "HEADERS" );
+    auto const sources = qmakeAssignments( project, "SOURCES" );
+    QVERIFY( !headers.isEmpty() ); QVERIFY( !sources.isEmpty() );
+    auto assertRegistration = []( QList< QmakeAssignment > const & lists,
+                                  QString const & before, QString const & added ) {
+      int count = 0;
+      for( auto const & list : lists )
+        for( qsizetype i = 0; i < list.values.size(); ++i )
+          if( list.values[i] == added )
+          { ++count; QCOMPARE( list.depth, 0 ); QVERIFY( i > 0 ); QCOMPARE( list.values[i-1], before ); }
+      QCOMPARE( count, 1 );
+    };
+    assertRegistration( headers, "platformwindow.hh", "popupdismiss.hh" );
+    assertRegistration( sources, "platformwindow.cc", "popupdismiss.cc" );
+    for( auto const & list : headers ) QVERIFY( !list.values.contains( "popupdismiss.cc" ) );
+    for( auto const & list : sources ) QVERIFY( !list.values.contains( "popupdismiss.hh" ) );
+  }
+  void requiredSuiteInventoryIsExact()
+  {
+    QString const project = source( "tests/tests.pro" ); QVERIFY( !project.isEmpty() );
+    QString const clean = qmakeUncomment( project );
+    QString const ordinary = selectionRawBlock( clean, "} else {" ); QVERIFY( !ordinary.isEmpty() );
+    auto const lists = qmakeAssignments( ordinary, "GD_REQUIRED_SUITE_NAMES" ); QCOMPARE( lists.size(), 1 );
+    QCOMPARE( lists[0].depth, 0 );
+    QStringList const expected = {
+      "tst_article_bridge", "tst_article_history", "tst_article_load", "tst_article_schemes",
+      "tst_article_stream", "tst_btree_index", "tst_encoding", "tst_external_content",
+      "tst_hotkeys", "tst_htmlescape", "tst_langcoder", "tst_linkrewrite", "tst_platformwindow",
+      "tst_popup_dismiss", "tst_portal_hotkeys", "tst_print_pipeline", "tst_regex",
+      "tst_save_article", "tst_utf8_wstring", "tst_waylandselection", "tst_website_frames" };
+    QCOMPARE( expected.size(), 21 ); QCOMPARE( lists[0].values, expected );
+    QStringList discovered;
+    QDir const tests( QDir( TestSupport::repositoryRoot() ).filePath( "tests" ) );
+    QVERIFY( tests.exists() );
+    for( auto const & directory : tests.entryInfoList( { "tst_*" }, QDir::Dirs | QDir::NoDotAndDotDot ) )
+      for( auto const & file : QDir( directory.absoluteFilePath() ).entryInfoList( { "tst_*.pro" }, QDir::Files ) )
+        discovered.append( file.completeBaseName() );
+    discovered.sort(); QCOMPARE( discovered, expected );
+    QCOMPARE( QSet< QString >( discovered.begin(), discovered.end() ).size(), discovered.size() );
+    QCOMPARE( QSet< QString >( lists[0].values.begin(), lists[0].values.end() ).size(), lists[0].values.size() );
+    QCOMPARE( discovered.count( "tst_popup_dismiss" ), 1 );
+    QCOMPARE( expected[12], QString( "tst_platformwindow" ) );
+    QCOMPARE( expected[13], QString( "tst_popup_dismiss" ) );
+    QCOMPARE( expected[14], QString( "tst_portal_hotkeys" ) );
+    QRegularExpression const countPattern( "!count\\s*\\(\\s*GD_TEST_NAMES\\s*,\\s*([0-9]+)\\s*\\)" );
+    auto counts = countPattern.globalMatch( ordinary ); QVERIFY( counts.hasNext() );
+    auto const count = counts.next(); QVERIFY( !counts.hasNext() );
+    QCOMPARE( count.captured( 1 ).toInt(), int( lists[0].values.size() ) );
+    QCOMPARE( count.captured( 1 ).toInt(), int( discovered.size() ) );
+    auto const lines = qmakeLines( ordinary );
+    QVERIFY( lines.contains( "!count(GD_TEST_NAMES, 21): error(\"Expected exactly 21 required suites; found: $$GD_TEST_NAMES\")" ) );
+    QVERIFY( lines.contains( "message(\"tests/tests.pro: exact 21 suites: $$GD_TEST_NAMES\")" ) );
+    QVERIFY( lines.contains( "!equals(GD_TEST_NAMES, $$GD_REQUIRED_SUITE_NAMES): error(\"Required suite inventory mismatch: $$GD_TEST_NAMES\")" ) );
+    QVERIFY( project.split( '\n' ).contains( "# Ordinary mode is a closed acceptance inventory: exactly the 21 required suites." ) );
   }
 };
 QTEST_MAIN( TstPopupDismiss )

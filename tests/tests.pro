@@ -6,7 +6,7 @@
 #   make -C tests -j$(nproc)
 #   QT_QPA_PLATFORM=xcb xvfb-run -a timeout 900 make -C tests check
 #
-# Ordinary mode is a closed acceptance inventory: exactly the 20 required suites.
+# Ordinary mode is a closed acceptance inventory: exactly the 21 required suites.
 # Discovery is validated against that inventory; missing or extra projects fail
 # configuration instead of silently reducing the gate. Closure mode is separate.
 #
@@ -124,7 +124,7 @@ equals(GD_CLOSURE_MODE, true) {
         tst_article_bridge tst_article_history tst_article_load \
         tst_article_schemes tst_article_stream tst_btree_index tst_encoding \
         tst_external_content tst_hotkeys tst_htmlescape tst_langcoder \
-        tst_linkrewrite tst_platformwindow \
+        tst_linkrewrite tst_platformwindow tst_popup_dismiss \
         tst_portal_hotkeys tst_print_pipeline tst_regex tst_save_article \
         tst_utf8_wstring tst_waylandselection tst_website_frames
     GD_TEST_NAMES =
@@ -134,13 +134,13 @@ equals(GD_CLOSURE_MODE, true) {
         GD_TEST_NAMES += $$GD_TEST_NAME
     }
     GD_TEST_NAMES = $$sorted(GD_TEST_NAMES)
-    !count(GD_TEST_NAMES, 20): error("Expected exactly 20 required suites; found: $$GD_TEST_NAMES")
+    !count(GD_TEST_NAMES, 21): error("Expected exactly 21 required suites; found: $$GD_TEST_NAMES")
     !equals(GD_TEST_NAMES, $$GD_REQUIRED_SUITE_NAMES): error("Required suite inventory mismatch: $$GD_TEST_NAMES")
     for(GD_TEST_NAME, GD_REQUIRED_SUITE_NAMES) {
         GD_REQUIRED_PROJECT = $$PWD/$$GD_TEST_NAME/$${GD_TEST_NAME}.pro
         !exists($$GD_REQUIRED_PROJECT): error("Missing required suite project: $$GD_REQUIRED_PROJECT")
         !contains(GD_TEST_PROJECTS, $$re_escape($$GD_REQUIRED_PROJECT)): error("Required suite not registered: $$GD_REQUIRED_PROJECT")
     }
-    message("tests/tests.pro: exact 20 suites: $$GD_TEST_NAMES")
+    message("tests/tests.pro: exact 21 suites: $$GD_TEST_NAMES")
     SUBDIRS += $$GD_TEST_PROJECTS
 }

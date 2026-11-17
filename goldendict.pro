@@ -423,7 +423,8 @@ HEADERS += folding.hh \
     portalhotkeys.hh \
     waylandselectionlogic.hh \
     waylandselection.hh \
-    platformwindow.hh
+    platformwindow.hh \
+    popupdismiss.hh
 
 FORMS += groups.ui \
     dictgroupwidget.ui \
@@ -570,7 +571,8 @@ SOURCES += folding.cc \
     portalhotkeys.cc \
     waylandselectionlogic.cc \
     waylandselection.cc \
-    platformwindow.cc
+    platformwindow.cc \
+    popupdismiss.cc
 
 win32 {
     FORMS   += texttospeechsource.ui
