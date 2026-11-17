@@ -506,10 +506,14 @@ transitions it relies on instead of assuming them: each step waits for
 4. **opening the popup's own dialog hides it** — `first` is given production-like
     `Qt::Tool` flags, and a `QDialog` parented to it is shown, with
     `QGuiApplication::focusWindow() == dialog.windowHandle()` asserted first and the
-    dialog's window type asserted to be `Qt::Dialog`. A classifier that used transient
-    ancestry, or that omitted the popup-type discriminator, would classify this dialog as
-    `OwnPopup` and keep `first`; the fixture therefore pins D8 and the classifier scope:
-    the handler runs once, `first` is hidden and the dialog stays visible. (R6-M1, R7-M2)
+    dialog's window type asserted to be `Qt::Dialog`. The handler must run once, `first`
+    hidden, the dialog visible. What this fixture proves is exactly D8 for a dialog: the
+    dialog's focus is not treated as one of the popup's menus. It does **not** isolate the
+    `isPopupWindowType()` condition — the ownership and window-identity conditions already
+    reject this dialog, so deleting only the type check leaves it green. That condition's
+    own behaviour is pinned by the `isPopupWindowType()` matrix in §8.1, and its presence
+    in the classifier is stated as a requirement here rather than claimed as killed by
+    this fixture. (R6-M1, R7-M2, R8-m1)
 5. **focus returning to the popup keeps it** — after 3, the menu is closed; the focus
    transition back to `first` is asserted; the handler never ran and `first` is visible.
 6. **the application losing focus hides it, through the production connection** — with
@@ -730,7 +734,7 @@ requirement, and the acceptance commands.
 
 | finding | severity | change |
 | --- | --- | --- |
-| a dialog whose transient parent is an owned menu was still classified `OwnPopup` | **blocker** | transient ancestry is removed from the classifier; `OwnPopup` requires the owned active popup's own window to hold focus **and** `isPopupWindowType()` to be true, so `Qt::Dialog` can never match (§6.1, §6.2, §8.1) (R7-B1) |
-| the dialog fixture did not assert the transient relationship it claimed to kill | major | §8.2(4) now uses production-like `Qt::Tool` flags, asserts the dialog's focus and its `Qt::Dialog` type, so the ancestry-only mutant is red regardless of what Qt sets as transient parent (R7-M2) |
+| a dialog whose transient parent is an owned menu was still classified `OwnPopup` | **blocker** | transient ancestry is removed from the classifier; `OwnPopup` now requires the owned active popup's own window to hold focus, and the type check excludes a dialog from ever matching (§6.1, §6.2, §8.1) (R7-B1). Isolation of the type check is a statement requirement, not a fixture claim (§8.2(4)) |
+| the dialog fixture did not assert the transient relationship it claimed to kill | major | §8.2(4) uses production-like `Qt::Tool` flags and asserts the dialog's focus and type; it proves D8 dismissal, and no longer claims to isolate a mutant that its other conditions already reject (R7-M2, R8-m1) |
 | the nested-menu fixture short-circuited the chain branch | major | the chain branch no longer exists; §8.2(3a) asserts the innermost popup is the active one and holds focus, which is exactly what the identity-only classifier needs (R7-M3) |
 | the `applicationStateChanged` connection was untested | major | §8.2(6) delivers the real signal to the real application object and requires the production slot to act, with pinned and unarmed negatives; §8.3(1b) pins the connection (R7-M4) |
