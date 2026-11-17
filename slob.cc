@@ -1672,12 +1672,9 @@ void SlobResourceRequest::run()
     if( Filetype::isNameOfCSS( resourceName ) )
     {
       QString css = QString::fromUtf8( resource.data(), resource.size() );
-      dict.isolateCSS( css, ".slobdict" );
-      QByteArray bytes = css.toUtf8();
 
       Mutex::Lock _( dataMutex );
-      data.resize( bytes.size() );
-      memcpy( &data.front(), bytes.constData(), bytes.size() );
+      dict.setIsolatedCssPayload( css, data, ".slobdict" );
     }
     else
     if ( Filetype::isNameOfTiff( resourceName ) )

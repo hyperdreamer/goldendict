@@ -1587,12 +1587,9 @@ void ZimResourceRequest::run()
     if( Filetype::isNameOfCSS( resourceName ) )
     {
       QString css = QString::fromUtf8( resource.data(), resource.size() );
-      dict.isolateCSS( css, ".zimdict" );
-      QByteArray bytes = css.toUtf8();
 
       Mutex::Lock _( dataMutex );
-      data.resize( bytes.size() );
-      memcpy( &data.front(), bytes.constData(), bytes.size() );
+      dict.setIsolatedCssPayload( css, data, ".zimdict" );
     }
     else
     if ( Filetype::isNameOfTiff( resourceName ) )

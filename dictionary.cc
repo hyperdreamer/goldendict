@@ -422,6 +422,15 @@ void Class::isolateCSS( QString & css, QString const & wrapperSelector )
   css = newCSS;
 }
 
+void Class::setIsolatedCssPayload( QString & css, std::vector< char > & data,
+                                   QString const & wrapperSelector )
+{
+  isolateCSS( css, wrapperSelector );
+  QByteArray bytes = css.toUtf8();
+  data.resize( bytes.size() );
+  memcpy( &data.front(), bytes.data(), bytes.size() );
+}
+
 string makeDictionaryId( vector< string > const & dictionaryFiles ) throw()
 {
   std::vector< string > sortedList;

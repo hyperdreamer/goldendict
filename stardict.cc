@@ -1750,10 +1750,7 @@ void StardictResourceRequest::run()
         newCSS.clear();
       }
 
-      dict.isolateCSS( css );
-      QByteArray bytes = css.toUtf8();
-      data.resize( bytes.size() );
-      memcpy( &data.front(), bytes.constData(), bytes.size() );
+      dict.setIsolatedCssPayload( css, data );
     }
 
     Mutex::Lock _( dataMutex );

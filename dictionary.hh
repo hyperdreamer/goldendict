@@ -282,6 +282,11 @@ protected:
 
 public:
 
+  /// Makes css content usable only for articles from this dictionary and
+  /// copies the isolated bytes into a resource payload buffer.
+  void setIsolatedCssPayload( QString & css, vector< char > & data,
+                              QString const & wrapperSelector = QString() );
+
   /// Creates a dictionary. The id should be made using
   /// Format::makeDictionaryId(), the dictionaryFiles is the file names the
   /// dictionary consists of.
