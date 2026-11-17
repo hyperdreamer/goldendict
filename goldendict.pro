@@ -296,8 +296,10 @@ HEADERS += folding.hh \
     sources.hh \
     utf8.hh \
     file.hh \
+    payload.hh \
     bgl_babylon.hh \
     bgl.hh \
+    bglresource.hh \
     initializing.hh \
     article_netmgr.hh \
     dictzip.h \
@@ -395,6 +397,7 @@ HEADERS += folding.hh \
     gddebug.hh \
     gestures.hh \
     tiff.hh \
+    imagepayload.hh \
     dictheadwords.hh \
     fulltextsearch.hh \
     ftshelpers.hh \
@@ -451,6 +454,7 @@ SOURCES += folding.cc \
     file.cc \
     bgl_babylon.cc \
     bgl.cc \
+    bglresource.cc \
     initializing.cc \
     article_netmgr.cc \
     dictzip.c \
@@ -543,6 +547,7 @@ SOURCES += folding.cc \
     gddebug.cc \
     gestures.cc \
     tiff.cc \
+    imagepayload.cc \
     dictheadwords.cc \
     fulltextsearch.cc \
     ftshelpers.cc \
