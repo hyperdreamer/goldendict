@@ -18,6 +18,8 @@
 #include "htmlescape.hh"
 #include "filetype.hh"
 #include "tiff.hh"
+#include "imagepayload.hh"
+#include "payload.hh"
 
 #ifdef _MSC_VER
 #include <stub_msvc.h>
@@ -1682,37 +1684,19 @@ void SlobResourceRequest::run()
       // Convert it
 
       dataMutex.lock();
-
-      QImage img = QImage::fromData( reinterpret_cast< const uchar * >( resource.data() ), resource.size() );
-
-#ifdef MAKE_EXTRA_TIFF_HANDLER
-      if( img.isNull() )
-        GdTiff::tiffToQImage( &data.front(), data.size(), img );
-#endif
-
+      QByteArray const bmp = ImagePayload::tiffToBmp( resource.data(), resource.size() );
       dataMutex.unlock();
 
-      if ( !img.isNull() )
+      if ( !bmp.isEmpty() )
       {
-        // Managed to load -- now store it back as BMP
-
-        QByteArray ba;
-        QBuffer buffer( &ba );
-        buffer.open( QIODevice::WriteOnly );
-        img.save( &buffer, "BMP" );
-
         Mutex::Lock _( dataMutex );
-
-        data.resize( buffer.size() );
-
-        memcpy( &data.front(), buffer.data(), data.size() );
+        Payload::assign( data, bmp.constData(), bmp.size() );
       }
     }
     else
     {
       Mutex::Lock _( dataMutex );
-      data.resize( resource.size() );
-      memcpy( &data.front(), resource.data(), data.size() );
+      Payload::assign( data, resource.data(), resource.size() );
     }
 
     Mutex::Lock _( dataMutex );
