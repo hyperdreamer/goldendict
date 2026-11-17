@@ -1,6 +1,6 @@
 # Scan popup crash on an empty resource payload
 
-Status: revised after design review rounds 1-4
+Status: revised after design review rounds 1-5
 Date: 2026-11-16
 Run: pm-run-20261116-203148-068023b6
 Target: `refs/heads/master` at `30a7111d750ea1aac214b208172640e0dd10befd`
@@ -160,13 +160,20 @@ namespace ImagePayload {
 QImage decodeWithQt( char const * bytes, std::size_t size );
 
 /// Decodes a one-bit, single-sample TIFF with the bundled GdTiff reader.
-/// Returns a null QImage for any other input.
+/// Without MAKE_EXTRA_TIFF_HANDLER this returns a null QImage.
 QImage decodeWithGdTiff( char const * bytes, std::size_t size );
 
 /// Qt first, GdTiff second; returns an empty QByteArray when neither decodes.
 QByteArray tiffToBmp( char const * bytes, std::size_t size );
 }
 ```
+
+`decodeWithGdTiff` compiles to the null-returning form when the
+`MAKE_EXTRA_TIFF_HANDLER` feature is disabled (`CONFIG+=no_extra_tiff_handler`), so
+the module links in both configurations and `tiffToBmp` degrades to Qt-only exactly
+as today's backends do. The suite pins both configurations: with the feature enabled
+cases 13–14 require the BMP grid below; with it disabled case 13 requires an empty
+result for the Qt-rejected fixture and case 14 requires a null image.
 
 Callers keep their mutex and their current source: `data` in dsl/gls/stardict/xdxf,
 the non-empty local resource string in slob/zim. They assign only a non-empty result:
@@ -196,6 +203,13 @@ struct DirectoryEntry { std::string name; uint32_t offset; };
 /// File::Class::read already does; a completed record has no false outcome.
 void readDirectoryEntry( File::Class & idx, DirectoryEntry & entry );
 
+/// Walks `count` directory records, skipping every record whose name is empty
+/// after its offset has been consumed, and returns true plus the offset of the
+/// record whose lowercased name equals `lowercaseName`. An empty requested name
+/// never matches an empty directory name.
+bool findResource( File::Class & idx, uint32_t count, std::string const & lowercaseName,
+                   uint32_t & offset );
+
 /// Decompresses one resource block into `data`, which is resized to
 /// `advertisedSize` first (a one-byte scratch is used while the advertised size
 /// is zero). Success requires Z_OK and an actual output length equal to
@@ -206,10 +220,10 @@ bool decompress( std::vector< char > const & compressed, std::size_t advertisedS
 }
 ```
 
-`BglResourceRequest::run()` uses them for its directory loop and resource decode; the
-name comparison and `idx.seek` remain at the call site. No exception handling is
-added around record I/O, so truncated-index behaviour is unchanged: `readDirectoryEntry`
-lets `File::Class::read` throw exactly as today, and callers do not catch it.
+`BglResourceRequest::run()` uses them for its directory walk and resource decode;
+the `idx.seek` remains at the call site. No exception handling is added around record
+I/O, so truncated-index behaviour is unchanged: `readDirectoryEntry` lets
+`File::Class::read` throw exactly as today, and callers do not catch it.
 
 ### Remaining sites
 
@@ -238,7 +252,8 @@ No `hasAnyData` line and no reader semantics change. The backend-specific outcom
 | DSL/GLS/StarDict/XDXF image, non-empty but undecodable | The original raw bytes remain in the payload (the assignment is skipped). | original size |
 | SLOB/ZIM image, empty resource | Rejected before payload work. | `-1` |
 | SLOB/ZIM image, non-empty but undecodable | No BMP is assigned; the payload stays empty; success is set after the block. | `0` |
-| XDXF ZIP entry, empty stored bytes | `IndexedZip::loadFile` clears the payload and reports success (`indexedzip.cc:78-81`); XDXF then publishes success at `xdxf.cc:1167`. No new seam is involved. | `0` |
+| XDXF ZIP entry, empty stored bytes, non-TIFF | `IndexedZip::loadFile` clears the payload and reports success (`indexedzip.cc:78-81`); XDXF publishes success at `xdxf.cc:1167`. | `0` |
+| XDXF ZIP entry, empty stored bytes, TIFF name | The empty payload reaches the TIFF branch, which passes a pointer and size to `ImagePayload::tiffToBmp`; the empty result is not assigned, the payload stays empty, and success is published. | `0` |
 | SLOB/ZIM archive entry, empty stored bytes | Unreachable: the resource string is rejected first. | `-1` |
 | BGL valid stream producing zero bytes | `BglResource::decompress` succeeds; success is published. | `0` |
 | BGL invalid stream in a fully readable record | `BglResource::decompress` fails; success is not published. | `-1` |
@@ -306,7 +321,7 @@ Cases:
 | 12 | `tiffToBmp_undecodableInputYieldsEmpty` | control |
 | 13 | `tiffToBmp_producesBmpFromValidTiff` | control |
 | 14 | `gdTiffDecodesCommittedOneBitFixture` | control |
-| 15 | `bglReadDirectoryEntry_emptyNameStillConsumesOffset` | failing-first |
+| 15 | `bglFindResource_emptyNameSkippedAfterOffset` | failing-first |
 | 16 | `bglDecompress_validEmptyStreamSucceedsEmpty` | failing-first |
 | 17 | `bglDecompress_corruptStreamFails` | control |
 | 18 | `bglDecompress_exactNonEmptyRoundTrip` | control |
@@ -323,11 +338,13 @@ still accepts and reads it, which forces the bundled decoder. The two scanlines 
 `0x40` and `0x80`; `GdTiff` maps palette index 0 to white and index 1 to black
 (`tiff.cc:129-132`), so the expected pixels are (0,0) white, (1,0) black, (0,1)
 black, (1,1) white. Case 13 first asserts
-`QVERIFY( ImagePayload::decodeWithQt( bytes ).isNull() )` — if a future Qt accepts the
-fixture, the test fails loudly instead of silently skipping the fallback — then
-asserts that `tiffToBmp` returns a 2x2 BMP with exactly that grid. Case 14 calls
-`ImagePayload::decodeWithGdTiff` directly with the same oracle. Removing the GdTiff
-invocation from `tiffToBmp` therefore fails case 13.
+`QVERIFY( ImagePayload::decodeWithQt( bytes.constData(), bytes.size() ).isNull() )` —
+if a future Qt accepts the fixture, the test fails loudly instead of silently
+skipping the fallback — then asserts that `tiffToBmp` returns a 2x2 BMP with exactly
+that grid. Case 14 calls `ImagePayload::decodeWithGdTiff` directly with the same
+oracle. Removing the GdTiff invocation from `tiffToBmp` therefore fails case 13 when
+the feature is enabled. With `CONFIG+=no_extra_tiff_handler`, case 13 expects an
+empty result and case 14 expects a null image.
 
 ### Failing-first extraction and concrete mutations
 
@@ -337,8 +354,8 @@ copy, `tiffToBmp` moves the decode sequence, the BGL bodies move verbatim (inclu
 their unsafe `front()` formation), and the backends are rewired. The suite then
 aborts in cases 1, 4, 6, 8, 9, 15, 16 and 20 with the same `__glibcxx_assert_fail`
 signature as the coredump. Only then are the guards added. The BGL extraction is not
-an exception to this rule: it arrives with the unsafe bodies and its cases are
-failing-first, so no control is required to pass before a guard exists.
+an exception to this rule: it arrives with the unsafe bodies, so cases 15, 16 and 20
+abort there, while cases 17–19 remain controls and must pass in both phases.
 
 The audit mutation-probes exactly these mechanisms, each with its killing case:
 
@@ -351,7 +368,12 @@ The audit mutation-probes exactly these mechanisms, each with its killing case:
 | `BglResource::readDirectoryEntry` | skip the offset when the name is empty | case 15 reads the next record wrongly |
 | `BglResource::decompress` | reject a zero-byte output | case 16 fails |
 | `BglResource::decompress` | drop the advertised-length comparison | case 19 fails |
-| `BglResource::decompress` | drop the zero-input guard | case 20 aborts |
+
+Case 20 pins the invalid-input contract (empty compressed storage is not a valid
+stream and returns false); it is failing-first only because the extraction's
+`data.resize(0)` forms an empty `front()`. No guard-removal mutation is claimed for
+it, because a correct implementation that reads through `compressed.data()` rejects
+the empty stream without an abort.
 
 `tiffToBmp` takes a pointer and a size, so it has no removable guard; cases 11–14 pin
 its empty, undecodable, positive and fallback-decoder semantics, and removing its
@@ -377,13 +399,17 @@ call to one of them; SoundDir's hand-rolled load disappears entirely.
 The audit verifies wiring deterministically:
 
 - it checks the diff touches exactly the inventory rows;
-- it enumerates every remaining `front()` and `&…front()` in the resource translation
-  units (`mdx`, `gls`, `stardict`, `slob`, `zim`, `website`, `dsl`, `xdxf`, `bgl`,
-  `epwing`, `sounddir`, `file`) and requires each remaining one to be provably inside
-  a non-empty branch (`mdx.cc:887` is guarded by `data.size() > sizeof(pattern)`),
-  so an empty-TIFF `QImage::fromData(&data.front(), …)` cannot hide behind a repaired
-  BMP copy;
-- it mutation-probes the six mechanisms above and records the killing case.
+- it enumerates the payload pointer formations inside the changed resource functions
+  (`mdx`, `gls`, `stardict`, `slob`, `zim`, `website`, `dsl`, `xdxf`, `bgl`, `epwing`,
+  `sounddir`, `file`) and requires each remaining one to be provably inside a
+  non-empty branch (`mdx.cc:887` is guarded by `data.size() > sizeof(pattern)`), so an
+  empty-TIFF `QImage::fromData(&data.front(), …)` cannot hide behind a repaired BMP
+  copy. Accesses outside the resource path are listed as excluded rather than
+  silently skipped: `xdxf.cc:689` is the article chunk reader (article path, not a
+  payload producer) and `chunkedstorage.cc:179` is the storage primitive that permits
+  a successfully decoded empty chunk, which no resource code dereferences without
+  its own check;
+- it mutation-probes the mechanisms above and records the killing case.
 
 ## Risks
 
@@ -413,6 +439,9 @@ The audit verifies wiring deterministically:
   objects; the default build alone may compile an empty `zim.cc`.
 - Record the failing-first aborts for cases 1, 4, 6, 8, 9, 15, 16 and 20 on the extraction.
 - Run the front() inventory and every mutation probe in the table above during the audit.
+- Build and run the suite once more with
+  `QMAKEFLAGS=CONFIG+=no_extra_tiff_handler` so the disabled-TIFF configuration is
+  compiled and its conditional expectations (case 13 empty, case 14 null) hold.
 - If the dictionary folder that produced the coredump is identified, load that
   dictionary's real empty local resource through the repaired tree before delivery.
 
@@ -484,3 +513,18 @@ Round 4:
   false outcome is claimed.
 - DR4-5 accepted: the XDXF empty-ZIP row now attributes the result to
   `IndexedZip::loadFile`, not to a seam the path does not call.
+
+Round 5:
+
+- DR5-1 accepted: the staging text now states that cases 17–19 are controls that pass
+  in both phases while 15, 16 and 20 are failing-first.
+- DR5-2 accepted: the zero-input guard-removal mutation is removed; case 20 pins the
+  invalid-input contract instead.
+- DR5-3 accepted: the audit is scoped to payload formations in the changed resource
+  functions, and the excluded article/storage accesses are named.
+- DR5-4 accepted: the disabled-TIFF configuration compiles a null decoder and has
+  explicit conditional expectations, verified with `QMAKEFLAGS=CONFIG+=no_extra_tiff_handler`.
+- DR5-5 accepted: `BglResource::findResource` owns the loop decision and case 15
+  exercises it.
+- DR5-6 accepted: the XDXF ZIP row is split into non-TIFF and TIFF entries.
+- DR5-7 accepted: the fixture assertion passes the byte pointer and size explicitly.
