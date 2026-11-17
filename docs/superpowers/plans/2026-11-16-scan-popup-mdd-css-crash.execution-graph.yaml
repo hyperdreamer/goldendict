@@ -14,6 +14,7 @@ tasks:
     implementer_tier: advanced
     depends_on: []
     ownership: ["payload.hh", "file.cc", "file.hh", "sounddir.cc", "epwing.cc"]
+    owns: ["payload.hh", "file.cc", "file.hh", "sounddir.cc", "epwing.cc"]
     exclusive_resources: []
     interfaces:
       produces:
@@ -35,6 +36,7 @@ tasks:
     implementer_tier: advanced
     depends_on: [T-001]
     ownership: ["dictionary.hh", "dictionary.cc", "mdx.cc", "gls.cc", "stardict.cc", "slob.cc", "zim.cc", "website.cc"]
+    owns: ["dictionary.hh", "dictionary.cc", "mdx.cc", "gls.cc", "stardict.cc", "slob.cc", "zim.cc", "website.cc"]
     exclusive_resources: []
     interfaces:
       produces:
@@ -56,6 +58,7 @@ tasks:
     implementer_tier: advanced
     depends_on: [T-002]
     ownership: ["imagepayload.hh", "imagepayload.cc", "dsl.cc", "gls.cc", "stardict.cc", "xdxf.cc", "slob.cc", "zim.cc"]
+    owns: ["imagepayload.hh", "imagepayload.cc", "dsl.cc", "gls.cc", "stardict.cc", "xdxf.cc", "slob.cc", "zim.cc"]
     exclusive_resources: []
     interfaces:
       produces:
@@ -79,6 +82,7 @@ tasks:
     implementer_tier: advanced
     depends_on: [T-003]
     ownership: ["bglresource.hh", "bglresource.cc", "bgl.cc"]
+    owns: ["bglresource.hh", "bglresource.cc", "bgl.cc"]
     exclusive_resources: []
     interfaces:
       produces:
@@ -100,6 +104,7 @@ tasks:
     implementer_tier: standard
     depends_on: [T-004]
     ownership: ["goldendict.pro"]
+    owns: ["goldendict.pro"]
     exclusive_resources: []
     interfaces:
       produces: []
@@ -133,6 +138,7 @@ tasks:
     implementer_tier: advanced
     depends_on: [T-005]
     ownership: ["tests/tst_resource_payload/**", "tests/fixtures/imagepayload/**"]
+    owns: ["tests/tst_resource_payload/**", "tests/fixtures/imagepayload/**"]
     exclusive_resources: []
     interfaces:
       produces: []
@@ -168,6 +174,7 @@ tasks:
     implementer_tier: standard
     depends_on: [T-006]
     ownership: ["tests/tests.pro", "goldendict.pro"]
+    owns: ["tests/tests.pro", "goldendict.pro"]
     exclusive_resources: []
     interfaces:
       produces: []
@@ -183,6 +190,7 @@ tasks:
     implementer_tier: standard
     depends_on: [T-007]
     ownership: ["tests/tst_resource_payload/**"]
+    owns: ["tests/tst_resource_payload/**"]
     exclusive_resources: []
     interfaces:
       produces: []
@@ -212,6 +220,7 @@ tasks:
     implementer_tier: advanced
     depends_on: [T-008]
     ownership: ["payload.hh", "file.cc", "dictionary.cc", "bglresource.cc"]
+    owns: ["payload.hh", "file.cc", "dictionary.cc", "bglresource.cc"]
     exclusive_resources: []
     interfaces:
       produces: []
@@ -241,6 +250,7 @@ tasks:
     implementer_tier: advanced
     depends_on: [T-009]
     ownership: ["tests/tst_resource_payload/**"]
+    owns: ["tests/tst_resource_payload/**"]
     exclusive_resources: []
     interfaces:
       produces: []
@@ -270,6 +280,7 @@ tasks:
     implementer_tier: advanced
     depends_on: [T-010]
     ownership: ["tests/tst_resource_payload/**"]
+    owns: ["tests/tst_resource_payload/**"]
     exclusive_resources: []
     interfaces:
       produces: []
@@ -299,6 +310,7 @@ tasks:
     implementer_tier: advanced
     depends_on: [T-011]
     ownership: ["tests/tst_resource_payload/**", "tests/fixtures/imagepayload/**"]
+    owns: ["tests/tst_resource_payload/**", "tests/fixtures/imagepayload/**"]
     exclusive_resources: []
     interfaces:
       produces: []
