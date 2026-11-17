@@ -438,6 +438,78 @@ QString requiredBranch( QString const & text, QString const & condition )
   [&] { QVERIFY2( !body.isEmpty(), qPrintable( "Missing branch: " + condition ) ); }();
   return body;
 }
+// Locate a brace scope by its real code tokens, then return the untouched source
+// between the braces. Offsets come from the token stream, so a comment or a
+// string that merely contains the anchor cannot supply an executable scope, and
+// preprocessor directives inside the scope survive for the directive tests.
+QString rawCodeBlock( QString const & text, QString const & anchor )
+{
+  QRegularExpression const lexer( QStringLiteral(
+    "\"(?:\\\\.|[^\"\\\\])*\"|'(?:\\\\.|[^'\\\\])*'|//[^\\n]*"
+    "|/\\*[\\s\\S]*?\\*/|[A-Za-z_][A-Za-z_0-9]*|[0-9]+|::|->|\\+\\+|--"
+    "|&&|\\|\\||==|!=|<=|>=|\\+=|-=|<<|>>|\\S" ) );
+  QStringList tokens; QList< qsizetype > starts, ends;
+  auto matches = lexer.globalMatch( text );
+  while( matches.hasNext() )
+  {
+    auto const match = matches.next(); QString const token = match.captured();
+    if( token.startsWith( "//" ) || token.startsWith( "/*" ) ) continue;
+    tokens.append( token ); starts.append( match.capturedStart() ); ends.append( match.capturedEnd() );
+  }
+  QStringList const wanted = selectionTokens( selectionCode( anchor ) );
+  if( wanted.isEmpty() ) return {};
+  for( qsizetype i = 0; i + wanted.size() <= tokens.size(); ++i )
+    if( tokens.mid( i, wanted.size() ) == wanted )
+    {
+      qsizetype open = i + wanted.size();
+      while( open < tokens.size() && tokens[open] != "{" ) ++open;
+      if( wanted.last() == "{" ) open = i + wanted.size() - 1;
+      if( open >= tokens.size() ) return {};
+      int depth = 0;
+      for( qsizetype close = open; close < tokens.size(); ++close )
+      {
+        if( tokens[close] == "{" ) ++depth;
+        else if( tokens[close] == "}" && --depth == 0 )
+          return text.mid( ends[open], starts[close]-ends[open] );
+      }
+      return {};
+    }
+  return {};
+}
+// Return the physical lines nested inside one actual conditional directive,
+// without its opening and closing directive lines.
+QString directiveRegion( QString const & raw, QString const & opening )
+{
+  auto const physical = raw.split( '\n' );
+  auto const stripped = stripPreprocessorDirectives( raw ).split( '\n' );
+  if( physical.size() != stripped.size() ) return {};
+  int depth = 0; bool found = false; QString result;
+  for( qsizetype i = 0; i < physical.size(); ++i )
+  {
+    QString const line = physical[i].trimmed();
+    bool const directive = line.startsWith( '#' ) && stripped[i].isEmpty();
+    if( !found )
+    {
+      if( directive && line == opening ) { found = true; depth = 1; }
+      continue;
+    }
+    if( directive )
+    {
+      if( QRegularExpression( "^#\\s*(if|ifdef|ifndef)\\b" ).match( line ).hasMatch() ) ++depth;
+      else if( QRegularExpression( "^#\\s*endif\\b" ).match( line ).hasMatch() && --depth == 0 ) return result;
+    }
+    result += physical[i] + '\n';
+  }
+  return {}; // Missing or unmatched actual directive is a test failure at the caller.
+}
+bool hasInclude( QString const & raw, QString const & token )
+{
+  auto const tokens = selectionTokens( raw );
+  auto const wanted = selectionTokens( "#include " + token );
+  for( qsizetype i = 0; i + wanted.size() <= tokens.size(); ++i )
+    if( tokens.mid( i, wanted.size() ) == wanted ) return true;
+  return false;
+}
 } // namespace
 
 class TstPopupDismiss : public QObject {
@@ -941,6 +1013,116 @@ private slots:
     QCOMPARE( tail[2], selectionCode( "armed = false;" ) );
     QVERIFY( !selectionHas( after, "window" ) );
     QVERIFY( !selectionHas( body, "hide(" ) );
+  }
+
+  void scanPopupDeclaresCloserWithoutEventOverrides()
+  {
+    QString const header = source( "scanpopup.hh" ), file = source( "scanpopup.cc" );
+    QVERIFY( !header.isEmpty() ); QVERIFY( !file.isEmpty() );
+    QVERIFY( hasInclude( header, "\"popupdismiss.hh\"" ) );
+    QVERIFY( hasInclude( header, "<memory>" ) );
+    QString const declaration = requiredBlock( header, "class ScanPopup" ); QVERIFY( !declaration.isEmpty() );
+    QVERIFY( selectionHas( declaration, "std::unique_ptr< PopupDismiss::FocusLossCloser > focusLossCloser;" ) );
+    QVERIFY( !selectionHas( declaration, "event(" ) ); QVERIFY( !selectionHas( declaration, "changeEvent(" ) );
+    QVERIFY( !selectionHas( file, "ScanPopup::event(" ) ); QVERIFY( !selectionHas( file, "ScanPopup::changeEvent(" ) );
+    QVERIFY( selectionHas( declaration, "eventFilter(" ) );
+    QVERIFY( selectionHas( file, "ScanPopup::eventFilter(" ) );
+  }
+  void constructorRestoresPinBeforeChangingFlags()
+  {
+    QString const file = source( "scanpopup.cc" ); QVERIFY( !file.isEmpty() );
+    QString const ctor = requiredBlock( file, "ScanPopup::ScanPopup" ); QVERIFY( !ctor.isEmpty() );
+    QString const setup = "ui.setupUi( this );";
+    QString const create = "focusLossCloser = std::make_unique< PopupDismiss::FocusLossCloser >( this );";
+    QString const handler = "focusLossCloser->setDismissHandler( [ this ] { hideWindow(); } );";
+    QString const restore = "ui.pinButton->setChecked( cfg.pinPopupWindow );";
+    QString const sync = "focusLossCloser->setPinned( ui.pinButton->isChecked() );";
+    QVERIFY( selectionOrdered( ctor, { setup, create, handler, restore, sync, "setWindowFlags(" } ) );
+    QStringList const statements = selectionStatements( ctor ); QVERIFY( statements.size() >= 3 );
+    QCOMPARE( statements[0], selectionCode( setup ) );
+    QCOMPARE( statements[1], selectionCode( create ) );
+    QCOMPARE( statements[2], selectionCode( handler ) );
+    auto const tokens = selectionTokens( selectionCode( ctor ) );
+    qsizetype const restored = selectionFindTokens( tokens, selectionTokens( selectionCode( restore ) ) );
+    qsizetype const synchronised = selectionFindTokens( tokens, selectionTokens( selectionCode( sync ) ) );
+    qsizetype const firstFlags = selectionFindTokens( tokens, selectionTokens( selectionCode( "setWindowFlags(" ) ) );
+    QVERIFY( restored >= 0 ); QVERIFY( synchronised > restored ); QVERIFY( firstFlags > synchronised );
+    QCOMPARE( selectionCount( ctor, "focusLossCloser->setPinned(" ), 1 );
+    QVERIFY( !selectionHas( ctor, "escapePressed();" ) );
+  }
+  void pinButtonSynchronizesBeforeFlags()
+  {
+    QString const file = source( "scanpopup.cc" ); QVERIFY( !file.isEmpty() );
+    QString const body = requiredBlock( file, "ScanPopup::pinButtonClicked" ); QVERIFY( !body.isEmpty() );
+    auto const statements = selectionStatements( body ); QVERIFY( statements.size() >= 5 );
+    QCOMPARE( statements.first(), selectionCode( "focusLossCloser->setPinned( checked );" ) );
+    auto const arms = conditionalArms( statements[1] ); QCOMPARE( arms.size(), 2 );
+    QCOMPARE( arms[0].guard, selectionCode( "if( checked )" ) ); QCOMPARE( arms[1].guard, QString( "else" ) );
+    QVERIFY( !arms[0].body.isEmpty() ); QVERIFY( !arms[1].body.isEmpty() );
+    QVERIFY( selectionHas( arms[0].body, "setWindowFlags( flags );" ) );
+    QVERIFY( selectionHas( arms[1].body, "setWindowFlags( unpinnedWindowFlags() );" ) );
+    QCOMPARE( statements[2], selectionCode( "show();" ) );
+  }
+  void engagePopupPreservesScopedActivationPaths()
+  {
+    QString const file = source( "scanpopup.cc" ); QVERIFY( !file.isEmpty() );
+    QString const body = requiredBlock( file, "ScanPopup::engagePopup" ); QVERIFY( !body.isEmpty() );
+    QString chain;
+    for( QString const & statement : selectionStatements( body ) )
+      if( statement.startsWith( selectionCode( "if( !isVisible() )" ) + ' ' ) )
+      { QVERIFY( chain.isEmpty() ); chain = statement; }
+    QVERIFY( !chain.isEmpty() );
+    auto const arms = conditionalArms( chain ); QCOMPARE( arms.size(), 3 );
+    QCOMPARE( arms[0].guard, selectionCode( "if( !isVisible() )" ) );
+    QCOMPARE( arms[1].guard, selectionCode( "if( ui.pinButton->isChecked() )" ) );
+    QCOMPARE( arms[2].guard, selectionCode(
+      "if( QGuiApplication::platformName() == \"xcb\" && ( windowFlags() & Qt::Tool ) == Qt::Tool )" ) );
+    for( auto const & arm : arms ) QVERIFY( !arm.body.isEmpty() );
+    QString const guard = "if( giveFocus || ( !ui.pinButton->isChecked() && PopupDismiss::needsExplicitActivation( windowFlags() ) ) )";
+    QString const request = requiredBranch( arms[0].body, guard ); QVERIFY( !request.isEmpty() );
+    QCOMPARE( selectionStatements( request ), QStringList( { selectionCode( "activateWindow();" ), selectionCode( "raise();" ) } ) );
+    QCOMPARE( selectionDirectActions( request ), selectionCode( "activateWindow(); raise();" ) );
+    auto const hiddenStatements = selectionStatements( arms[0].body ); QVERIFY( !hiddenStatements.isEmpty() );
+    qsizetype show = -1, requestAt = -1;
+    for( qsizetype i = 0; i < hiddenStatements.size(); ++i )
+    {
+      if( hiddenStatements[i] == selectionCode( "show();" ) ) { QVERIFY( show < 0 ); show = i; }
+      if( hiddenStatements[i].startsWith( selectionCode( guard ) + ' ' ) ) { QVERIFY( requestAt < 0 ); requestAt = i; }
+    }
+    QVERIFY( show >= 0 ); QVERIFY( requestAt > show );
+    QCOMPARE( selectionCount( body, "activateWindow(" ), 3 );
+    for( auto const & arm : arms ) QCOMPARE( selectionCount( arm.body, "activateWindow(" ), 1 );
+    QCOMPARE( selectionCount( body, "PopupDismiss::needsExplicitActivation(" ), 1 );
+    QCOMPARE( selectionDirectActions( arms[1].body ), selectionCode( "show(); activateWindow(); raise();" ) );
+    QCOMPARE( selectionDirectActions( arms[2].body ), selectionCode( "activateWindow(); raise();" ) );
+    QString const rawFunction = rawCodeBlock( file, "ScanPopup::engagePopup" ); QVERIFY( !rawFunction.isEmpty() );
+    QString const rawHidden = rawCodeBlock( rawFunction, "if( !isVisible() )" ); QVERIFY( !rawHidden.isEmpty() );
+    QString const region = directiveRegion( rawHidden, "#ifdef ENABLE_SPWF_CUSTOMIZATION" ); QVERIFY( !region.isEmpty() );
+    QString const giveFocus = requiredBranch( region,
+      "if( QGuiApplication::platformName() == \"xcb\" && !ui.pinButton->isChecked() )" );
+    QVERIFY( !giveFocus.isEmpty() );
+    QCOMPARE( selectionStatements( giveFocus ), QStringList{ selectionCode( "giveFocus = true;" ) } );
+    QVERIFY( selectionOrdered( arms[0].body, {
+      "show();", "if( QGuiApplication::platformName() == \"xcb\" && !ui.pinButton->isChecked() )",
+      "giveFocus = true;", guard } ) );
+  }
+  void unpinRequestsActivationAfterShow()
+  {
+    QString const file = source( "scanpopup.cc" ); QVERIFY( !file.isEmpty() );
+    QString const body = requiredBlock( file, "ScanPopup::pinButtonClicked" ); QVERIFY( !body.isEmpty() );
+    auto const statements = selectionStatements( body ); QCOMPARE( statements.size(), 5 );
+    QCOMPARE( statements[0], selectionCode( "focusLossCloser->setPinned( checked );" ) );
+    QVERIFY( statements[1].startsWith( selectionCode( "if( checked )" ) + ' ' ) );
+    QCOMPARE( statements[2], selectionCode( "show();" ) );
+    QString const guard = "if( !checked && PopupDismiss::needsExplicitActivation( windowFlags() ) )";
+    QVERIFY( statements[3].startsWith( selectionCode( guard ) + ' ' ) );
+    QString const request = requiredBranch( statements[3], guard ); QVERIFY( !request.isEmpty() );
+    QCOMPARE( selectionStatements( request ), QStringList( { selectionCode( "activateWindow();" ), selectionCode( "raise();" ) } ) );
+    QCOMPARE( selectionDirectActions( request ), selectionCode( "activateWindow(); raise();" ) );
+    QCOMPARE( statements[4], selectionCode( "if( checked ) pinnedGeometry = saveGeometry();" ) );
+    QCOMPARE( selectionCount( body, "activateWindow(" ), 1 );
+    QVERIFY( selectionOrdered( body, { "show();", guard, "activateWindow();", "raise();",
+                                      "if( checked ) pinnedGeometry = saveGeometry();" } ) );
   }
 };
 QTEST_MAIN( TstPopupDismiss )
