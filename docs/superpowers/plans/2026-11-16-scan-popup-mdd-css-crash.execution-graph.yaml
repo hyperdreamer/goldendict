@@ -1,0 +1,332 @@
+schema_version: 1
+source_plan:
+  path: docs/superpowers/plans/2026-11-16-scan-popup-mdd-css-crash.md
+  sha256: 1075d3615d3b8e4ac8e2d43376472fd593c08ccd06536e9b331d8fa8397ec9ff
+lanes:
+  - id: resource-payload
+    task_ids: [T-001, T-002, T-003, T-004, T-005, T-006, T-007, T-008, T-009, T-010, T-011, T-012]
+tasks:
+  - id: T-001
+    plan_task: 1
+    title: "Extract byte operations and delegate file and cache payloads"
+    lane: resource-payload
+    sequence: 1
+    implementer_tier: advanced
+    depends_on: []
+    ownership: ["payload.hh", "file.cc", "file.hh", "sounddir.cc", "epwing.cc"]
+    exclusive_resources: []
+    interfaces:
+      produces:
+        - id: payload.assign
+          signature_sha256: d15ecc2331b89c7e6e00f78e939bb9bdd6d80c6d40c06ca913f4192daa395eff
+        - id: payload.append
+          signature_sha256: 966c4de0862351c25246418565a13a22d2ba92bf3dfd94d4e55c49b2a5d0d1fd
+        - id: file.loadFromFile
+          signature_sha256: 4a298797ac822a8743aef38e0da1d079591aaf0ca6cdf051aac91775d0c84fdf
+      consumes: []
+    validation:
+      - argv: ["git","diff","--check"]
+        expect_exit: 0
+  - id: T-002
+    plan_task: 2
+    title: "Extract CSS payload isolation and wire stylesheet callers"
+    lane: resource-payload
+    sequence: 2
+    implementer_tier: advanced
+    depends_on: [T-001]
+    ownership: ["dictionary.hh", "dictionary.cc", "mdx.cc", "gls.cc", "stardict.cc", "slob.cc", "zim.cc", "website.cc"]
+    exclusive_resources: []
+    interfaces:
+      produces:
+        - id: css.setIsolatedCssPayload
+          signature_sha256: 161798447dcd70140053cdd78c35c239ad27c728dbee10058130d0bb92ee2073
+      consumes:
+        - id: payload.assign
+          signature_sha256: d15ecc2331b89c7e6e00f78e939bb9bdd6d80c6d40c06ca913f4192daa395eff
+        - id: payload.append
+          signature_sha256: 966c4de0862351c25246418565a13a22d2ba92bf3dfd94d4e55c49b2a5d0d1fd
+    validation:
+      - argv: ["git","diff","--check"]
+        expect_exit: 0
+  - id: T-003
+    plan_task: 3
+    title: "Extract image decoding and wire all six TIFF resource branches"
+    lane: resource-payload
+    sequence: 3
+    implementer_tier: advanced
+    depends_on: [T-002]
+    ownership: ["imagepayload.hh", "imagepayload.cc", "dsl.cc", "gls.cc", "stardict.cc", "xdxf.cc", "slob.cc", "zim.cc"]
+    exclusive_resources: []
+    interfaces:
+      produces:
+        - id: image.decodeWithQt
+          signature_sha256: ae1629504598f56ee37ef56cc69f36b99f9811892b0e6a2aaffe6a0f7eaf0917
+        - id: image.decodeWithGdTiff
+          signature_sha256: 63dda3123e67c0d085ea105513f468ea681d422a4f630489e60cfa0e141690c9
+        - id: image.tiffToBmp
+          signature_sha256: 5459b22f15338df669e2cb1d289be5a49ec4f77b25c28e324c0a030414d2d460
+      consumes:
+        - id: payload.assign
+          signature_sha256: d15ecc2331b89c7e6e00f78e939bb9bdd6d80c6d40c06ca913f4192daa395eff
+    validation:
+      - argv: ["git","diff","--check"]
+        expect_exit: 0
+  - id: T-004
+    plan_task: 4
+    title: "Extract BGL record lookup and resource decompression"
+    lane: resource-payload
+    sequence: 4
+    implementer_tier: advanced
+    depends_on: [T-003]
+    ownership: ["bglresource.hh", "bglresource.cc", "bgl.cc"]
+    exclusive_resources: []
+    interfaces:
+      produces:
+        - id: bgl.readDirectoryEntry
+          signature_sha256: 1acec10cb51be7a872f36dc814171bdb540344989fc33e4add7fda1b1d9896ba
+        - id: bgl.findResource
+          signature_sha256: 8f46d69a1ff99f2dca844a7648fb858ec666bd54db960c3a7b097642fd212e51
+        - id: bgl.decompress
+          signature_sha256: 7a0db61a60494349489d73a3609613d375337c19224b41d177494e2bc797efde
+      consumes: []
+    validation:
+      - argv: ["git","diff","--check"]
+        expect_exit: 0
+  - id: T-005
+    plan_task: 5
+    title: "Register the new production modules in the application"
+    lane: resource-payload
+    sequence: 5
+    implementer_tier: standard
+    depends_on: [T-004]
+    ownership: ["goldendict.pro"]
+    exclusive_resources: []
+    interfaces:
+      produces: []
+      consumes:
+        - id: payload.assign
+          signature_sha256: d15ecc2331b89c7e6e00f78e939bb9bdd6d80c6d40c06ca913f4192daa395eff
+        - id: payload.append
+          signature_sha256: 966c4de0862351c25246418565a13a22d2ba92bf3dfd94d4e55c49b2a5d0d1fd
+        - id: css.setIsolatedCssPayload
+          signature_sha256: 161798447dcd70140053cdd78c35c239ad27c728dbee10058130d0bb92ee2073
+        - id: image.decodeWithQt
+          signature_sha256: ae1629504598f56ee37ef56cc69f36b99f9811892b0e6a2aaffe6a0f7eaf0917
+        - id: image.decodeWithGdTiff
+          signature_sha256: 63dda3123e67c0d085ea105513f468ea681d422a4f630489e60cfa0e141690c9
+        - id: image.tiffToBmp
+          signature_sha256: 5459b22f15338df669e2cb1d289be5a49ec4f77b25c28e324c0a030414d2d460
+        - id: bgl.readDirectoryEntry
+          signature_sha256: 1acec10cb51be7a872f36dc814171bdb540344989fc33e4add7fda1b1d9896ba
+        - id: bgl.findResource
+          signature_sha256: 8f46d69a1ff99f2dca844a7648fb858ec666bd54db960c3a7b097642fd212e51
+        - id: bgl.decompress
+          signature_sha256: 7a0db61a60494349489d73a3609613d375337c19224b41d177494e2bc797efde
+    validation:
+      - argv: ["git","diff","--check"]
+        expect_exit: 0
+  - id: T-006
+    plan_task: 6
+    title: "Add the complete pure regression suite and pinned fixtures"
+    lane: resource-payload
+    sequence: 6
+    implementer_tier: advanced
+    depends_on: [T-005]
+    ownership: ["tests/tst_resource_payload/**", "tests/fixtures/imagepayload/**"]
+    exclusive_resources: []
+    interfaces:
+      produces: []
+      consumes:
+        - id: payload.assign
+          signature_sha256: d15ecc2331b89c7e6e00f78e939bb9bdd6d80c6d40c06ca913f4192daa395eff
+        - id: payload.append
+          signature_sha256: 966c4de0862351c25246418565a13a22d2ba92bf3dfd94d4e55c49b2a5d0d1fd
+        - id: file.loadFromFile
+          signature_sha256: 4a298797ac822a8743aef38e0da1d079591aaf0ca6cdf051aac91775d0c84fdf
+        - id: css.setIsolatedCssPayload
+          signature_sha256: 161798447dcd70140053cdd78c35c239ad27c728dbee10058130d0bb92ee2073
+        - id: image.decodeWithQt
+          signature_sha256: ae1629504598f56ee37ef56cc69f36b99f9811892b0e6a2aaffe6a0f7eaf0917
+        - id: image.decodeWithGdTiff
+          signature_sha256: 63dda3123e67c0d085ea105513f468ea681d422a4f630489e60cfa0e141690c9
+        - id: image.tiffToBmp
+          signature_sha256: 5459b22f15338df669e2cb1d289be5a49ec4f77b25c28e324c0a030414d2d460
+        - id: bgl.readDirectoryEntry
+          signature_sha256: 1acec10cb51be7a872f36dc814171bdb540344989fc33e4add7fda1b1d9896ba
+        - id: bgl.findResource
+          signature_sha256: 8f46d69a1ff99f2dca844a7648fb858ec666bd54db960c3a7b097642fd212e51
+        - id: bgl.decompress
+          signature_sha256: 7a0db61a60494349489d73a3609613d375337c19224b41d177494e2bc797efde
+    validation:
+      - argv: ["git","diff","--check"]
+        expect_exit: 0
+  - id: T-007
+    plan_task: 7
+    title: "Update the live aggregate inventory to exactly 21 suites"
+    lane: resource-payload
+    sequence: 7
+    implementer_tier: standard
+    depends_on: [T-006]
+    ownership: ["tests/tests.pro", "goldendict.pro"]
+    exclusive_resources: []
+    interfaces:
+      produces: []
+      consumes: []
+    validation:
+      - argv: ["git","diff","--check"]
+        expect_exit: 0
+  - id: T-008
+    plan_task: 8
+    title: "Record all eight extraction aborts and twelve passing controls"
+    lane: resource-payload
+    sequence: 8
+    implementer_tier: standard
+    depends_on: [T-007]
+    ownership: []
+    exclusive_resources: []
+    interfaces:
+      produces: []
+      consumes:
+        - id: payload.assign
+          signature_sha256: d15ecc2331b89c7e6e00f78e939bb9bdd6d80c6d40c06ca913f4192daa395eff
+        - id: payload.append
+          signature_sha256: 966c4de0862351c25246418565a13a22d2ba92bf3dfd94d4e55c49b2a5d0d1fd
+        - id: file.loadFromFile
+          signature_sha256: 4a298797ac822a8743aef38e0da1d079591aaf0ca6cdf051aac91775d0c84fdf
+        - id: css.setIsolatedCssPayload
+          signature_sha256: 161798447dcd70140053cdd78c35c239ad27c728dbee10058130d0bb92ee2073
+        - id: bgl.readDirectoryEntry
+          signature_sha256: 1acec10cb51be7a872f36dc814171bdb540344989fc33e4add7fda1b1d9896ba
+        - id: bgl.findResource
+          signature_sha256: 8f46d69a1ff99f2dca844a7648fb858ec666bd54db960c3a7b097642fd212e51
+        - id: bgl.decompress
+          signature_sha256: 7a0db61a60494349489d73a3609613d375337c19224b41d177494e2bc797efde
+    validation:
+      - argv: ["git","diff","--check"]
+        expect_exit: 0
+  - id: T-009
+    plan_task: 9
+    title: "Add the zero-length guards and exact BGL outcomes"
+    lane: resource-payload
+    sequence: 9
+    implementer_tier: advanced
+    depends_on: [T-008]
+    ownership: ["payload.hh", "file.cc", "dictionary.cc", "bglresource.cc"]
+    exclusive_resources: []
+    interfaces:
+      produces: []
+      consumes:
+        - id: payload.assign
+          signature_sha256: d15ecc2331b89c7e6e00f78e939bb9bdd6d80c6d40c06ca913f4192daa395eff
+        - id: payload.append
+          signature_sha256: 966c4de0862351c25246418565a13a22d2ba92bf3dfd94d4e55c49b2a5d0d1fd
+        - id: file.loadFromFile
+          signature_sha256: 4a298797ac822a8743aef38e0da1d079591aaf0ca6cdf051aac91775d0c84fdf
+        - id: css.setIsolatedCssPayload
+          signature_sha256: 161798447dcd70140053cdd78c35c239ad27c728dbee10058130d0bb92ee2073
+        - id: bgl.readDirectoryEntry
+          signature_sha256: 1acec10cb51be7a872f36dc814171bdb540344989fc33e4add7fda1b1d9896ba
+        - id: bgl.findResource
+          signature_sha256: 8f46d69a1ff99f2dca844a7648fb858ec666bd54db960c3a7b097642fd212e51
+        - id: bgl.decompress
+          signature_sha256: 7a0db61a60494349489d73a3609613d375337c19224b41d177494e2bc797efde
+    validation:
+      - argv: ["git","diff","--check"]
+        expect_exit: 0
+  - id: T-010
+    plan_task: 10
+    title: "Prove the eight specified mutations with restored controls"
+    lane: resource-payload
+    sequence: 10
+    implementer_tier: advanced
+    depends_on: [T-009]
+    ownership: []
+    exclusive_resources: []
+    interfaces:
+      produces: []
+      consumes:
+        - id: payload.assign
+          signature_sha256: d15ecc2331b89c7e6e00f78e939bb9bdd6d80c6d40c06ca913f4192daa395eff
+        - id: payload.append
+          signature_sha256: 966c4de0862351c25246418565a13a22d2ba92bf3dfd94d4e55c49b2a5d0d1fd
+        - id: file.loadFromFile
+          signature_sha256: 4a298797ac822a8743aef38e0da1d079591aaf0ca6cdf051aac91775d0c84fdf
+        - id: css.setIsolatedCssPayload
+          signature_sha256: 161798447dcd70140053cdd78c35c239ad27c728dbee10058130d0bb92ee2073
+        - id: bgl.readDirectoryEntry
+          signature_sha256: 1acec10cb51be7a872f36dc814171bdb540344989fc33e4add7fda1b1d9896ba
+        - id: bgl.decompress
+          signature_sha256: 7a0db61a60494349489d73a3609613d375337c19224b41d177494e2bc797efde
+        - id: image.tiffToBmp
+          signature_sha256: 5459b22f15338df669e2cb1d289be5a49ec4f77b25c28e324c0a030414d2d460
+    validation:
+      - argv: ["git","diff","--check"]
+        expect_exit: 0
+  - id: T-011
+    plan_task: 11
+    title: "Audit every production resource function and reject wiring regressions"
+    lane: resource-payload
+    sequence: 11
+    implementer_tier: advanced
+    depends_on: [T-010]
+    ownership: []
+    exclusive_resources: []
+    interfaces:
+      produces: []
+      consumes:
+        - id: payload.assign
+          signature_sha256: d15ecc2331b89c7e6e00f78e939bb9bdd6d80c6d40c06ca913f4192daa395eff
+        - id: payload.append
+          signature_sha256: 966c4de0862351c25246418565a13a22d2ba92bf3dfd94d4e55c49b2a5d0d1fd
+        - id: file.loadFromFile
+          signature_sha256: 4a298797ac822a8743aef38e0da1d079591aaf0ca6cdf051aac91775d0c84fdf
+        - id: css.setIsolatedCssPayload
+          signature_sha256: 161798447dcd70140053cdd78c35c239ad27c728dbee10058130d0bb92ee2073
+        - id: image.tiffToBmp
+          signature_sha256: 5459b22f15338df669e2cb1d289be5a49ec4f77b25c28e324c0a030414d2d460
+        - id: bgl.findResource
+          signature_sha256: 8f46d69a1ff99f2dca844a7648fb858ec666bd54db960c3a7b097642fd212e51
+        - id: bgl.decompress
+          signature_sha256: 7a0db61a60494349489d73a3609613d375337c19224b41d177494e2bc797efde
+    validation:
+      - argv: ["git","diff","--check"]
+        expect_exit: 0
+  - id: T-012
+    plan_task: 12
+    title: "Verify both TIFF variants, the 21-suite root gate, and the feature build"
+    lane: resource-payload
+    sequence: 12
+    implementer_tier: advanced
+    depends_on: [T-011]
+    ownership: []
+    exclusive_resources: []
+    interfaces:
+      produces: []
+      consumes:
+        - id: payload.assign
+          signature_sha256: d15ecc2331b89c7e6e00f78e939bb9bdd6d80c6d40c06ca913f4192daa395eff
+        - id: payload.append
+          signature_sha256: 966c4de0862351c25246418565a13a22d2ba92bf3dfd94d4e55c49b2a5d0d1fd
+        - id: file.loadFromFile
+          signature_sha256: 4a298797ac822a8743aef38e0da1d079591aaf0ca6cdf051aac91775d0c84fdf
+        - id: css.setIsolatedCssPayload
+          signature_sha256: 161798447dcd70140053cdd78c35c239ad27c728dbee10058130d0bb92ee2073
+        - id: image.decodeWithQt
+          signature_sha256: ae1629504598f56ee37ef56cc69f36b99f9811892b0e6a2aaffe6a0f7eaf0917
+        - id: image.decodeWithGdTiff
+          signature_sha256: 63dda3123e67c0d085ea105513f468ea681d422a4f630489e60cfa0e141690c9
+        - id: image.tiffToBmp
+          signature_sha256: 5459b22f15338df669e2cb1d289be5a49ec4f77b25c28e324c0a030414d2d460
+        - id: bgl.readDirectoryEntry
+          signature_sha256: 1acec10cb51be7a872f36dc814171bdb540344989fc33e4add7fda1b1d9896ba
+        - id: bgl.findResource
+          signature_sha256: 8f46d69a1ff99f2dca844a7648fb858ec666bd54db960c3a7b097642fd212e51
+        - id: bgl.decompress
+          signature_sha256: 7a0db61a60494349489d73a3609613d375337c19224b41d177494e2bc797efde
+    validation:
+      - argv: ["git","diff","--check"]
+        expect_exit: 0
+      - argv: ["qmake6","goldendict.pro"]
+        expect_exit: 0
+      - argv: ["make","tests-run","-j8"]
+        expect_exit: 0
