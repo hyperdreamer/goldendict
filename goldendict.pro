@@ -774,7 +774,7 @@ tests-makefile.commands = $$QMAKE_QMAKE $$PWD/tests/tests.pro -o $$PWD/tests/$$C
 tests-build.target = tests-build
 tests-build.depends = tests-makefile
 # The suites are independent projects with private object directories, so the
-# build half runs in parallel for all 20 suites. The run half stays serial for
+# build half runs in parallel for all 21 suites. The run half stays serial for
 # deterministic test execution within the gate's wall-clock budget.
 tests-build.commands = $(GD_TEST_WRAPPER) $(MAKE) -C $$PWD/tests -f $$CHECK_MAKEFILE -j$(shell nproc)
 
