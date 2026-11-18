@@ -9,6 +9,7 @@
 #include <QDir>
 #include <QFileInfo>
 #include "gddebug.hh"
+#include "payload.hh"
 
 #include <QRegularExpression>
 
@@ -350,11 +351,7 @@ void WebSiteResourceRequest::requestFinished( QNetworkReply * r )
 
     Mutex::Lock _( dataMutex );
 
-    size_t prevSize = data.size();
-
-    data.resize( prevSize + cssData.size() );
-
-    memcpy( &data.front() + prevSize, cssData.data(), cssData.size() );
+    Payload::append( data, cssData.constData(), cssData.size() );
 
     hasAnyData = true;
   }
