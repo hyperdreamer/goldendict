@@ -16,12 +16,15 @@ inline void assign( std::vector< char > & destination,
                     char const * bytes, std::size_t size )
 {
   destination.resize( size );
-  std::memcpy( &destination.front(), bytes, size );
+  if ( size )
+    std::memcpy( &destination.front(), bytes, size );
 }
 
 inline void append( std::vector< char > & destination,
                     char const * bytes, std::size_t size )
 {
+  if ( !size )
+    return;
   std::size_t const oldSize = destination.size();
   destination.resize( oldSize + size );
   std::memcpy( &destination.front() + oldSize, bytes, size );

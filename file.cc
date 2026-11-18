@@ -62,7 +62,8 @@ void loadFromFile( std::string const & n, std::vector< char > & data )
 
   f.rewind();
 
-  f.read( &data.front(), data.size() );
+  if ( !data.empty() )
+    f.read( &data.front(), data.size() );
 }
 
 bool exists( char const * filename ) throw()

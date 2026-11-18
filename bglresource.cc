@@ -10,9 +10,9 @@ namespace BglResource {
 
 void readDirectoryEntry( File::Class & idx, DirectoryEntry & entry )
 {
-  std::vector< char > nameData( idx.read< uint32_t >() );
-  idx.read( &nameData.front(), nameData.size() );
-  entry.name.assign( &nameData.front(), nameData.size() );
+  entry.name.resize( idx.read< uint32_t >() );
+  if ( !entry.name.empty() )
+    idx.read( &entry.name.front(), entry.name.size() );
   entry.offset = idx.read< uint32_t >();
 }
 
@@ -40,10 +40,16 @@ bool decompress( std::vector< char > const & compressed,
                  std::size_t advertisedSize, std::vector< char > & data )
 {
   data.resize( advertisedSize );
-  uLongf actualLength = data.size();
-  return uncompress( reinterpret_cast< Bytef * >( &data.front() ), &actualLength,
-                     reinterpret_cast< Bytef const * >( &compressed.front() ),
-                     compressed.size() ) == Z_OK && actualLength == advertisedSize;
+  if ( compressed.empty() )
+    return false;
+  Bytef scratch;
+  uLongf actualLength = advertisedSize ? data.size() : 1;
+  Bytef * destination = advertisedSize
+    ? reinterpret_cast< Bytef * >( &data.front() ) : &scratch;
+  int const result = uncompress(
+    destination, &actualLength,
+    reinterpret_cast< Bytef const * >( &compressed.front() ), compressed.size() );
+  return result == Z_OK && actualLength == advertisedSize;
 }
 
 }
