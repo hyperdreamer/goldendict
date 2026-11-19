@@ -9,7 +9,7 @@
 # passed at configure time and the binary looks for its data in /usr/share/goldendict.
 #
 # Building a specific revision instead of master (reproducible rebuilds):
-#   GD_TAG=1.5.4 makepkg -si      build that release tag
+#   GD_TAG=1.5.5 makepkg -si      build that release tag
 #   GD_COMMIT=<sha> makepkg -si   build that exact commit
 # pkgver() is always derived from git describe, so the package version records
 # the tag, the distance from it, and the commit hash of whatever was built.
@@ -18,7 +18,7 @@
 # as one more commit lands.
 
 pkgname=goldendict
-pkgver=1.5.4
+pkgver=1.5.5
 pkgrel=1
 epoch=2
 pkgdesc='Feature-rich dictionary lookup program (Qt 6 and QtWebEngine)'
