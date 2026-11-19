@@ -20,6 +20,8 @@
 #include "categorized_logging.hh"
 #include "gddebug.hh"
 #include "tiff.hh"
+#include "imagepayload.hh"
+#include "payload.hh"
 #include "fulltextsearch.hh"
 #include "ftshelpers.hh"
 #include "language.hh"
@@ -2033,31 +2035,13 @@ void DslResourceRequest::run()
       // Convert it
 
       dataMutex.lock();
-
-      QImage img = QImage::fromData( (unsigned char *) &data.front(),
-                                     data.size() );
-
-#ifdef MAKE_EXTRA_TIFF_HANDLER
-      if( img.isNull() )
-        GdTiff::tiffToQImage( &data.front(), data.size(), img );
-#endif
-
+      QByteArray const bmp = ImagePayload::tiffToBmp( data.data(), data.size() );
       dataMutex.unlock();
 
-      if ( !img.isNull() )
+      if ( !bmp.isEmpty() )
       {
-        // Managed to load -- now store it back as BMP
-
-        QByteArray ba;
-        QBuffer buffer( &ba );
-        buffer.open( QIODevice::WriteOnly );
-        img.save( &buffer, "BMP" );
-
         Mutex::Lock _( dataMutex );
-
-        data.resize( buffer.size() );
-
-        memcpy( &data.front(), buffer.data(), data.size() );
+        Payload::assign( data, bmp.constData(), bmp.size() );
       }
     }
 

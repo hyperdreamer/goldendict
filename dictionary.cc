@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <limits>
 #include "dictionary.hh"
+#include "payload.hh"
 
 #include <QCryptographicHash>
 
@@ -420,6 +421,14 @@ void Class::isolateCSS( QString & css, QString const & wrapperSelector )
     ++currentPos;
   }
   css = newCSS;
+}
+
+void Class::setIsolatedCssPayload( QString & css, std::vector< char > & data,
+                                   QString const & wrapperSelector )
+{
+  isolateCSS( css, wrapperSelector );
+  QByteArray const bytes = css.toUtf8();
+  Payload::assign( data, bytes.constData(), bytes.size() );
 }
 
 string makeDictionaryId( vector< string > const & dictionaryFiles ) throw()

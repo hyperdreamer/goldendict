@@ -296,8 +296,10 @@ HEADERS += folding.hh \
     sources.hh \
     utf8.hh \
     file.hh \
+    payload.hh \
     bgl_babylon.hh \
     bgl.hh \
+    bglresource.hh \
     initializing.hh \
     article_netmgr.hh \
     dictzip.h \
@@ -395,6 +397,7 @@ HEADERS += folding.hh \
     gddebug.hh \
     gestures.hh \
     tiff.hh \
+    imagepayload.hh \
     dictheadwords.hh \
     fulltextsearch.hh \
     ftshelpers.hh \
@@ -452,6 +455,7 @@ SOURCES += folding.cc \
     file.cc \
     bgl_babylon.cc \
     bgl.cc \
+    bglresource.cc \
     initializing.cc \
     article_netmgr.cc \
     dictzip.c \
@@ -544,6 +548,7 @@ SOURCES += folding.cc \
     gddebug.cc \
     gestures.cc \
     tiff.cc \
+    imagepayload.cc \
     dictheadwords.cc \
     fulltextsearch.cc \
     ftshelpers.cc \
@@ -771,7 +776,7 @@ tests-makefile.commands = $$QMAKE_QMAKE $$PWD/tests/tests.pro -o $$PWD/tests/$$C
 tests-build.target = tests-build
 tests-build.depends = tests-makefile
 # The suites are independent projects with private object directories, so the
-# build half runs in parallel for all 20 suites. The run half stays serial for
+# build half runs in parallel for all 22 suites. The run half stays serial for
 # deterministic test execution within the gate's wall-clock budget.
 tests-build.commands = $(GD_TEST_WRAPPER) $(MAKE) -C $$PWD/tests -f $$CHECK_MAKEFILE -j$(shell nproc)
 

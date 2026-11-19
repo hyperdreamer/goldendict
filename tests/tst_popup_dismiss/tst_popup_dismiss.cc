@@ -1214,8 +1214,8 @@ private slots:
       "tst_article_stream", "tst_btree_index", "tst_encoding", "tst_external_content",
       "tst_hotkeys", "tst_htmlescape", "tst_langcoder", "tst_linkrewrite", "tst_platformwindow",
       "tst_popup_dismiss", "tst_portal_hotkeys", "tst_print_pipeline", "tst_regex",
-      "tst_save_article", "tst_utf8_wstring", "tst_waylandselection", "tst_website_frames" };
-    QCOMPARE( expected.size(), 21 ); QCOMPARE( lists[0].values, expected );
+      "tst_resource_payload", "tst_save_article", "tst_utf8_wstring", "tst_waylandselection", "tst_website_frames" };
+    QCOMPARE( expected.size(), 22 ); QCOMPARE( lists[0].values, expected );
     QStringList discovered;
     QDir const tests( QDir( TestSupport::repositoryRoot() ).filePath( "tests" ) );
     QVERIFY( tests.exists() );
@@ -1235,10 +1235,10 @@ private slots:
     QCOMPARE( count.captured( 1 ).toInt(), int( lists[0].values.size() ) );
     QCOMPARE( count.captured( 1 ).toInt(), int( discovered.size() ) );
     auto const lines = qmakeLines( ordinary );
-    QVERIFY( lines.contains( "!count(GD_TEST_NAMES, 21): error(\"Expected exactly 21 required suites; found: $$GD_TEST_NAMES\")" ) );
-    QVERIFY( lines.contains( "message(\"tests/tests.pro: exact 21 suites: $$GD_TEST_NAMES\")" ) );
+    QVERIFY( lines.contains( "!count(GD_TEST_NAMES, 22): error(\"Expected exactly 22 required suites; found: $$GD_TEST_NAMES\")" ) );
+    QVERIFY( lines.contains( "message(\"tests/tests.pro: exact 22 suites: $$GD_TEST_NAMES\")" ) );
     QVERIFY( lines.contains( "!equals(GD_TEST_NAMES, $$GD_REQUIRED_SUITE_NAMES): error(\"Required suite inventory mismatch: $$GD_TEST_NAMES\")" ) );
-    QVERIFY( project.split( '\n' ).contains( "# Ordinary mode is a closed acceptance inventory: exactly the 21 required suites." ) );
+    QVERIFY( project.split( '\n' ).contains( "# Ordinary mode is a closed acceptance inventory: exactly the 22 required suites." ) );
   }
 };
 QTEST_MAIN( TstPopupDismiss )

@@ -369,19 +369,12 @@ sptr< Dictionary::DataRequest > SoundDirDictionary::getResource( string const & 
 
   try
   {
-    File::Class f( FsEncoding::encode( fileName ), "rb" );
-
     sptr< Dictionary::DataRequestInstant > dr = new
       Dictionary::DataRequestInstant( true );
 
     vector< char > & data = dr->getData();
 
-    f.seekEnd();
-
-    data.resize( f.tell() );
-
-    f.rewind();
-    f.read( &data.front(), data.size() );
+    File::loadFromFile( FsEncoding::encode( fileName ), data );
 
     return dr;
   }

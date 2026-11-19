@@ -1,0 +1,30 @@
+digraph scan_popup_mdd_css_crash {
+  rankdir=LR;
+  node [shape=box, style=rounded];
+  subgraph cluster_resource-payload {
+    label="resource-payload";
+    T001 [label="T-001\nExtract byte operations and delegate file and "];
+    T002 [label="T-002\nExtract CSS payload isolation and wire stylesh"];
+    T003 [label="T-003\nExtract image decoding and wire all six TIFF r"];
+    T004 [label="T-004\nExtract BGL record lookup and resource decompr"];
+    T005 [label="T-005\nRegister the new production modules in the app"];
+    T006 [label="T-006\nAdd the complete pure regression suite and pin"];
+    T007 [label="T-007\nUpdate the live aggregate inventory to exactly"];
+    T008 [label="T-008\nRecord all eight extraction aborts and twelve "];
+    T009 [label="T-009\nAdd the zero-length guards and exact BGL outco"];
+    T010 [label="T-010\nProve the eight specified mutations with resto"];
+    T011 [label="T-011\nAudit every production resource function and r"];
+    T012 [label="T-012\nVerify both TIFF variants, the 21-suite root g"];
+  }
+  T001 -> T002;
+  T002 -> T003;
+  T003 -> T004;
+  T004 -> T005;
+  T005 -> T006;
+  T006 -> T007;
+  T007 -> T008;
+  T008 -> T009;
+  T009 -> T010;
+  T010 -> T011;
+  T011 -> T012;
+}

@@ -2,6 +2,7 @@
  * Part of GoldenDict. Licensed under GPLv3 or later, see the LICENSE file */
 
 #include "bgl.hh"
+#include "bglresource.hh"
 #include "btreeidx.hh"
 #include "bgl_babylon.hh"
 #include "file.hh"
@@ -1041,44 +1042,20 @@ void BglResourceRequest::run()
   {
     if ( isCancelled.loadAcquire() )
       break;
-
-    vector< char > nameData( idx.read< uint32_t >() );
-    idx.read( &nameData.front(), nameData.size() );
-
-    for( size_t x = nameData.size(); x--; )
-      nameData[ x ] = tolower( nameData[ x ] );
-
-    uint32_t offset = idx.read< uint32_t >();
-
-    if ( string( &nameData.front(), nameData.size() ) == nameLowercased )
-    {
-      // We have a match.
-
-      idx.seek( offset );
-
-      Mutex::Lock _( dataMutex );
-
-      data.resize( idx.read< uint32_t >() );
-
-      vector< unsigned char > compressedData( idx.read< uint32_t >() );
-
+    uint32_t offset;
+    if ( !BglResource::findResource( idx, 1, nameLowercased, offset ) )
+      continue;
+    idx.seek( offset );
+    Mutex::Lock _( dataMutex );
+    uint32_t advertisedSize = idx.read< uint32_t >();
+    vector< char > compressedData( idx.read< uint32_t >() );
+    if ( !compressedData.empty() )
       idx.read( &compressedData.front(), compressedData.size() );
-
-      unsigned long decompressedLength = data.size();
-
-      if ( uncompress( (unsigned char *) &data.front(),
-                       &decompressedLength,
-                       &compressedData.front(),
-                       compressedData.size() ) != Z_OK ||
-           decompressedLength != data.size() )
-      {
-        gdWarning( "Failed to decompress resource \"%s\", ignoring it.\n", name.c_str() );
-      }
-      else
-        hasAnyData = true;
-
-      break;
-    }
+    if ( !BglResource::decompress( compressedData, advertisedSize, data ) )
+      gdWarning( "Failed to decompress resource \"%s\", ignoring it.\n", name.c_str() );
+    else
+      hasAnyData = true;
+    break;
   }
 
   finish();
